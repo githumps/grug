@@ -229,5 +229,6 @@ jobs:
       endpoints: |
         [
           {"name": "grug.lol signin link", "url": "https://grug.lol/", "expect-status": "200", "contains": "href=\"/signin\""},
-          {"name": "grug.lol grug-tribe", "url": "https://grug.lol/", "expect-status": "200", "contains": "grug-tribe"}
+          {"name": "grug.lol source CTA", "url": "https://grug.lol/", "expect-status": "200", "contains": "quadseven/grug"},
+          {"name": "grug.lol AGPL", "url": "https://grug.lol/", "expect-status": "200", "contains": "AGPL-3.0"}
         ]

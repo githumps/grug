@@ -88,6 +88,17 @@ jobs:
           uv --version
       - name: 10. Pulumi up
         uses: pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58 # v6.6.1
+        env:
+          # The `time` provider is fetched from
+          # github://api.github.com/pulumiverse/pulumi-time, which without a
+          # token is an ANONYMOUS GitHub API call - 60 requests/hour shared
+          # across every job on that egress IP. It 403'd with "rate limit
+          # exceeded" on 2026-07-24 and failed a deploy on main for a reason
+          # that had nothing to do with the change being deployed.
+          # GITHUB_TOKEN raises the limit to 5000/hour and is read directly
+          # by Pulumi's github:// plugin downloader. Read-only use of the
+          # default job token; no extra permission needed.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           command: up
           stack-name: ${{ steps.stack.outputs.stack }}
