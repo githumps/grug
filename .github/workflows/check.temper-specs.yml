@@ -227,8 +227,8 @@ jobs:
       - name: Verify spec 0010 (MirrorDiscipline)
         run: /tmp/temper-bin verify -s specs/0010-mirror-discipline/
 
-      - name: Attester · DoR-checks five canonical rules (spec 0006)
-        run: python3 infra/scripts/attest_dor_checks_five_rules.py
+      - name: Attester · DoR-checks six canonical rules (spec 0006)
+        run: python3 infra/scripts/attest_dor_checks_six_rules.py
 
       - name: Attester · DoR-checks single-copy invariant (spec 0006)
         run: python3 infra/scripts/attest_dor_checks_mirror.py
