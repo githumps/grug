@@ -173,6 +173,33 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, int | str]:
             )
             dep_watch_failed += 1
 
+    # Guard reopen watch (2026-07-24 audit finding): the close-completeness
+    # guard reopens an issue once and never follows up - this closes that
+    # loop by escalating stale (untouched) guard-reopens. Same store-driven,
+    # best-effort shape as dep_watch.
+    reopen_escalated = 0
+    reopen_watch_failed = 0
+    for install_id in installs:
+        try:
+            from adapters.install_store import list_reopen_watch_repos
+            from personas.guard.reopen_watch import run_reopen_watch_for_install
+
+            repos = list_reopen_watch_repos(install_id)
+            if not repos:
+                continue
+            escalated_failed = with_install_token_retry(
+                install_id,
+                lambda token, iid=install_id, r=repos: run_reopen_watch_for_install(token, iid, r),
+            ) or (0, 0)
+            reopen_escalated += escalated_failed[0]
+            reopen_watch_failed += escalated_failed[1]
+        except Exception as e:  # noqa: BLE001 — one install must not abort the cron
+            log.warning(
+                "reopen_watch_install_failed",
+                extra={"install_id": install_id, "kind": type(e).__name__},
+            )
+            reopen_watch_failed += 1
+
     # Enforcement-gauge re-emission (#460): grug.enforcement.state was only
     # emitted on enforcement CONFIG events (dashboard toggle, repo-added
     # heal), so in steady state the enforcement-gap monitor sat in permanent
@@ -262,6 +289,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, int | str]:
         "pulse_failed_installs": pulse_failed,
         "dep_watch_reports": dep_reports,
         "dep_watch_failed_installs": dep_watch_failed,
+        "reopen_watch_escalated": reopen_escalated,
+        "reopen_watch_failed_installs": reopen_watch_failed,
         "enforcement_emitted": enforcement_emitted,
         "enforcement_failed_installs": enforcement_failed,
         **replay,

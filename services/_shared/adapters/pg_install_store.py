@@ -189,7 +189,7 @@ def list_allowlisted_installs() -> list[int]:
 # Repo-level flags that are NOT persona enable/blocking pairs (those live
 # in _DEFAULT_PERSONA_CONFIG, locked to the registry). Writable through
 # set_repo_config; read with an explicit default in get_repo_config.
-_EXTRA_REPO_FLAGS = frozenset({"dep_watch_enabled"})
+_EXTRA_REPO_FLAGS = frozenset({"dep_watch_enabled", "reopen_watch_enabled"})
 
 # Repo-level flags whose value is a STRING, not a bool (the persona flags and
 # _EXTRA_REPO_FLAGS are all bool). elder_voice (#288/#578) is "caveman" | "sage".
@@ -243,6 +243,7 @@ def get_repo_config(install_id: int, repo_id: int) -> dict[str, Any]:
     cfg["enforcement_ruleset_id"] = int(rid) if rid is not None else None
     cfg["force_disable_enforcement"] = bool(item.get("force_disable_enforcement", False))
     cfg["dep_watch_enabled"] = bool(item.get("dep_watch_enabled", False))
+    cfg["reopen_watch_enabled"] = bool(item.get("reopen_watch_enabled", False))
     # Elder voice pack (#288/#578): stored only for entitled installs that
     # opted in; every other repo reads the caveman free default.
     cfg["elder_voice"] = str(item.get("elder_voice") or "caveman")
@@ -1028,17 +1029,19 @@ def release_dep_watch_report(install_id: int, repo: str) -> None:
         )
 
 
-def list_dep_watch_repos(install_id: int) -> list[dict[str, Any]]:
-    """Repo rows with dep_watch_enabled=true (#491) - the Pulse
-    store-driven targeting pattern."""
+def _list_flag_enabled_repos(install_id: int, flag: str) -> list[dict[str, Any]]:
+    """Repo rows with `flag`=true - the shared store-driven targeting
+    pattern used by Pulse/dep_watch/reopen_watch (CodeRabbit DRY finding,
+    PR #744: list_dep_watch_repos and list_reopen_watch_repos were
+    identical except for the flag column name)."""
     with get_pool().connection() as conn:
         rows = conn.execute(
             f"""
             SELECT sk, data FROM grug_kv
             WHERE pk = %s AND sk LIKE 'REPO#%%'
-              AND data->>'dep_watch_enabled' = 'true' AND {TTL_LIVE}
+              AND data->>%s = 'true' AND {TTL_LIVE}
             """,
-            (_inst_pk(install_id),),
+            (_inst_pk(install_id), flag),
         ).fetchall()
     out: list[dict[str, Any]] = []
     for sk, data in rows:
@@ -1051,6 +1054,18 @@ def list_dep_watch_repos(install_id: int) -> list[dict[str, Any]]:
         if sep and full:
             out.append({"id": rid, "full_name": full})
     return out
+
+
+def list_dep_watch_repos(install_id: int) -> list[dict[str, Any]]:
+    """Repo rows with dep_watch_enabled=true (#491) - the Pulse
+    store-driven targeting pattern."""
+    return _list_flag_enabled_repos(install_id, "dep_watch_enabled")
+
+
+def list_reopen_watch_repos(install_id: int) -> list[dict[str, Any]]:
+    """Repo rows with reopen_watch_enabled=true (grug#730 audit finding) -
+    same store-driven targeting pattern as dep_watch/pulse."""
+    return _list_flag_enabled_repos(install_id, "reopen_watch_enabled")
 
 
 def claim_pulse_nudge(install_id: int, repo: str, pr_number: int) -> bool:
