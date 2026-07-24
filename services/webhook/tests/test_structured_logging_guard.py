@@ -32,7 +32,6 @@ _BASIC_CONFIG_RE = re.compile(r"\blogging\.basicConfig\(")
 #   stdout, so fixing their log format wouldn't fix anything DD-side.
 _ALLOWLIST_RELATIVE = (
     "sast_benchmark/__main__.py",
-    "elder_eval/harvest_review_findings.py",
     "elder_eval/__main__.py",
     "review_latency/__main__.py",
     "personas/smasher/trial_worker.py",

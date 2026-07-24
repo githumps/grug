@@ -1,6 +1,6 @@
 """Elder replay eval harness (#361 slice 2, #537).
 
-Replays Elder over the PRs recorded in the review-findings ledger corpus
+Replays Elder over the PRs recorded in grug's own review ledger
 (#361 slice 1) and scores CATCH-RATE vs NOISE per finding class - the
 measured answer to "what do rival reviewers catch that Elder misses".
 

@@ -1,6 +1,6 @@
 # Elder replay eval harness (#361 slice 2, #537) - on-demand only.
 #
-# Replays Elder over the PRs in the committed review-findings ledger corpus
+# Replays Elder over the PRs in grug's own committed review ledger
 # and scores catch-rate vs noise per class. NOT a per-PR gate: it makes real
 # LLM calls + real GitHub diff fetches, so it runs ONLY on manual dispatch.
 # The per-PR suite covers the pure corpus/scoring core AND the prompt-sha
