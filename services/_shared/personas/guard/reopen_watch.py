@@ -33,6 +33,7 @@ from urllib.parse import quote
 import httpx
 
 from adapters.install_store import get_repo_config
+from github_app_auth import get_app_id
 
 log = logging.getLogger(f"{os.getenv('DD_SERVICE', 'grug')}.persona.guard.reopen_watch")
 
@@ -92,10 +93,30 @@ def _list_open_reopened_issues(token: str, owner: str, repo: str) -> list[dict[s
     return out
 
 
-def _was_guard_reopened(token: str, owner: str, repo: str, issue_number: int) -> bool:
-    """True if the close-completeness guard's own marker text is present
-    in some comment on this issue - distinguishes a guard-reopen from any
-    other reason an issue might carry state_reason=reopened."""
+# GitHub's own well-known "github-actions" App login - the close-
+# completeness guard runs as a GH Actions workflow step, so its reopen
+# comment is always posted via this identity. Checked ALONGSIDE the
+# marker text (CodeRabbit security finding, PR #744): a bare body-text
+# match lets ANY actor with issues:write fake either marker by typing the
+# literal string into a comment, which would falsely mark an unrelated
+# issue as guard-reopened, or - worse - permanently suppress escalation
+# by pre-empting the escalation marker. `user.login` cannot be spoofed by
+# a different actor (GitHub reserves bot identities), same guarantee
+# `performed_via_github_app` gives ticket_compliance_run.py's own marker
+# check.
+_GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
+
+
+def _scan_issue_comments(
+    token: str, owner: str, repo: str, issue_number: int,
+) -> tuple[bool, bool]:
+    """One paginated comment scan answering BOTH (was this guard-reopened,
+    have we already escalated) - CodeRabbit perf finding, PR #744: the two
+    checks always ran back-to-back over the same pages, doubling GitHub
+    API calls on every cron tick for the lifetime of every stale issue."""
+    own_app_id = get_app_id()
+    guard_reopened = False
+    already_escalated = False
     page = 1
     while page <= _MAX_COMMENT_PAGES:
         resp = httpx.get(
@@ -107,35 +128,24 @@ def _was_guard_reopened(token: str, owner: str, repo: str, issue_number: int) ->
         resp.raise_for_status()
         batch = resp.json() or []
         for c in batch:
-            if _GUARD_REOPEN_SNIPPET in (c.get("body") or ""):
-                return True
+            body = c.get("body") or ""
+            if (
+                not guard_reopened
+                and c.get("user", {}).get("login") == _GITHUB_ACTIONS_BOT_LOGIN
+                and _GUARD_REOPEN_SNIPPET in body
+            ):
+                guard_reopened = True
+            if not already_escalated:
+                app = c.get("performed_via_github_app")
+                if app and str(app.get("id")) == own_app_id and _ESCALATION_MARKER in body:
+                    already_escalated = True
+            if guard_reopened and already_escalated:
+                return True, True
         if len(batch) < _PER_PAGE:
-            return False
+            return guard_reopened, already_escalated
         page += 1
     log.info("reopen_watch_comment_page_cap", extra={"repo": f"{owner}/{repo}", "issue": issue_number})
-    return False
-
-
-def _already_escalated(token: str, owner: str, repo: str, issue_number: int) -> bool:
-    """True if we already posted the escalation marker - escalate a given
-    stale-reopen once, not every cron tick."""
-    page = 1
-    while page <= _MAX_COMMENT_PAGES:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
-            f"/issues/{issue_number}/comments",
-            params={"per_page": _PER_PAGE, "page": page},
-            headers=_headers(token), timeout=_FETCH_TIMEOUT,
-        )
-        resp.raise_for_status()
-        batch = resp.json() or []
-        for c in batch:
-            if _ESCALATION_MARKER in (c.get("body") or ""):
-                return True
-        if len(batch) < _PER_PAGE:
-            return False
-        page += 1
-    return False
+    return guard_reopened, already_escalated
 
 
 def _escalation_body(hours: int) -> str:
@@ -172,14 +182,14 @@ def _ensure_label(token: str, owner: str, repo: str) -> None:
 
 
 def _escalate(token: str, owner: str, repo: str, issue_number: int, hours: int) -> None:
+    """Label FIRST, comment LAST (CodeRabbit finding, PR #744): the
+    comment is the idempotency-defining write (`_scan_issue_comments`
+    only looks for it), so if a failure happens between the two writes,
+    it must happen before the comment posts - otherwise a label-attach
+    failure would leave the issue silently marked "handled" with no
+    label and no retry, forever. Re-adding an already-present label on a
+    retried tick is a no-op on GitHub, so this ordering is safe to repeat."""
     _ensure_label(token, owner, repo)
-    resp = httpx.post(
-        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
-        f"/issues/{issue_number}/comments",
-        json={"body": _escalation_body(hours)},
-        headers=_headers(token), timeout=_FETCH_TIMEOUT,
-    )
-    resp.raise_for_status()
     resp = httpx.post(
         f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
         f"/issues/{issue_number}/labels",
@@ -187,6 +197,39 @@ def _escalate(token: str, owner: str, repo: str, issue_number: int, hours: int) 
         headers=_headers(token), timeout=_FETCH_TIMEOUT,
     )
     resp.raise_for_status()
+    resp = httpx.post(
+        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{issue_number}/comments",
+        json={"body": _escalation_body(hours)},
+        headers=_headers(token), timeout=_FETCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+
+
+def _should_escalate(issue: dict[str, Any], *, now: datetime) -> bool:
+    """Pure pre-filter: does this issue even warrant the (network-bound)
+    comment scan? Keeps the per-issue GitHub calls to the ones that could
+    plausibly need escalating."""
+    labels = [(label.get("name") or "").lower() for label in issue.get("labels", [])]
+    if "force-close" in labels or "wontfix" in labels:
+        return False
+    return is_stale(issue.get("updated_at", ""), now=now)
+
+
+def _try_escalate_issue(
+    token: str, owner: str, name: str, issue: dict[str, Any], *, now: datetime,
+) -> bool:
+    """One issue's full escalation decision + action. Extracted from
+    run_reopen_watch_for_install (CodeRabbit high-complexity finding, PR
+    #744) so the per-install loop stays a simple dispatch."""
+    number = issue.get("number")
+    if number is None or not _should_escalate(issue, now=now):
+        return False
+    guard_reopened, already_escalated = _scan_issue_comments(token, owner, name, number)
+    if not guard_reopened or already_escalated:
+        return False
+    _escalate(token, owner, name, number, _STALE_AFTER_HOURS)
+    return True
 
 
 def run_reopen_watch_for_install(
@@ -208,24 +251,12 @@ def run_reopen_watch_for_install(
             if not get_repo_config(install_id, int(repo_id)).get("reopen_watch_enabled", False):
                 continue
             for issue in _list_open_reopened_issues(token, owner, name):
-                number = issue.get("number")
-                if number is None:
-                    continue
-                labels = [(label.get("name") or "").lower() for label in issue.get("labels", [])]
-                if "force-close" in labels or "wontfix" in labels:
-                    continue
-                if not is_stale(issue.get("updated_at", ""), now=now):
-                    continue
-                if not _was_guard_reopened(token, owner, name, number):
-                    continue
-                if _already_escalated(token, owner, name, number):
-                    continue
-                _escalate(token, owner, name, number, _STALE_AFTER_HOURS)
-                escalated += 1
-                log.info(
-                    "reopen_watch_escalated",
-                    extra={"install_id": install_id, "repo": full, "issue": number},
-                )
+                if _try_escalate_issue(token, owner, name, issue, now=now):
+                    escalated += 1
+                    log.info(
+                        "reopen_watch_escalated",
+                        extra={"install_id": install_id, "repo": full, "issue": issue.get("number")},
+                    )
         except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
             failed += 1
             log.warning(

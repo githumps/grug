@@ -35,8 +35,7 @@ def _issue(number=1, state_reason="reopened", hours_old=25, labels=None):
 def _wire(monkeypatch, *, enabled=True, issues=None, guard_reopened=True, already_escalated=False):
     monkeypatch.setattr(rw, "get_repo_config", lambda i, r: {"reopen_watch_enabled": enabled})
     monkeypatch.setattr(rw, "_list_open_reopened_issues", lambda t, o, r: issues or [])
-    monkeypatch.setattr(rw, "_was_guard_reopened", lambda t, o, r, n: guard_reopened)
-    monkeypatch.setattr(rw, "_already_escalated", lambda t, o, r, n: already_escalated)
+    monkeypatch.setattr(rw, "_scan_issue_comments", lambda t, o, r, n: (guard_reopened, already_escalated))
     writes = []
 
     def _post(url, **kw):
@@ -72,6 +71,27 @@ def test_stale_guard_reopen_escalates(monkeypatch):
     assert rw._ESCALATION_MARKER in comment_body
     label_body = next(b for u, b in writes if u.endswith("/issues/1/labels"))
     assert label_body == {"labels": [rw._ESCALATION_LABEL]}
+
+
+def test_escalate_writes_label_before_comment(monkeypatch):
+    """CodeRabbit finding, PR #744: the comment is the idempotency-
+    defining write - a failure between the two writes must land BEFORE
+    the comment posts, so a partial failure retries cleanly next tick
+    instead of reading as permanently 'handled' with no label."""
+    monkeypatch.setattr(
+        rw.httpx, "get",
+        lambda url, **kw: httpx.Response(200, json={}, request=httpx.Request("GET", url)),
+    )
+    order = []
+
+    def _post(url, **kw):
+        order.append(url)
+        return httpx.Response(201, json={}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(rw.httpx, "post", _post)
+    rw._escalate("tok", "o", "r", 1, 20)
+    assert order[0].endswith("/issues/1/labels")
+    assert order[1].endswith("/issues/1/comments")
 
 
 def test_fresh_guard_reopen_not_yet_escalated(monkeypatch):
@@ -114,8 +134,7 @@ def test_wontfix_label_skips_escalation(monkeypatch):
 def test_label_created_when_missing(monkeypatch):
     monkeypatch.setattr(rw, "get_repo_config", lambda i, r: {"reopen_watch_enabled": True})
     monkeypatch.setattr(rw, "_list_open_reopened_issues", lambda t, o, r: [_issue(hours_old=25)])
-    monkeypatch.setattr(rw, "_was_guard_reopened", lambda t, o, r, n: True)
-    monkeypatch.setattr(rw, "_already_escalated", lambda t, o, r, n: False)
+    monkeypatch.setattr(rw, "_scan_issue_comments", lambda t, o, r, n: (True, False))
     monkeypatch.setattr(
         rw.httpx, "get",
         lambda url, **kw: httpx.Response(404, request=httpx.Request("GET", url)),
@@ -137,8 +156,7 @@ def test_label_created_when_missing(monkeypatch):
 def test_label_not_recreated_when_present(monkeypatch):
     monkeypatch.setattr(rw, "get_repo_config", lambda i, r: {"reopen_watch_enabled": True})
     monkeypatch.setattr(rw, "_list_open_reopened_issues", lambda t, o, r: [_issue(hours_old=25)])
-    monkeypatch.setattr(rw, "_was_guard_reopened", lambda t, o, r, n: True)
-    monkeypatch.setattr(rw, "_already_escalated", lambda t, o, r, n: False)
+    monkeypatch.setattr(rw, "_scan_issue_comments", lambda t, o, r, n: (True, False))
     monkeypatch.setattr(
         rw.httpx, "get",
         lambda url, **kw: httpx.Response(200, json={"name": rw._ESCALATION_LABEL}, request=httpx.Request("GET", url)),
@@ -164,8 +182,7 @@ def test_repo_failure_does_not_abort_other_repos(monkeypatch):
         return [_issue(hours_old=25)]
 
     monkeypatch.setattr(rw, "_list_open_reopened_issues", _list)
-    monkeypatch.setattr(rw, "_was_guard_reopened", lambda t, o, r, n: True)
-    monkeypatch.setattr(rw, "_already_escalated", lambda t, o, r, n: False)
+    monkeypatch.setattr(rw, "_scan_issue_comments", lambda t, o, r, n: (True, False))
     monkeypatch.setattr(
         rw.httpx, "get",
         lambda url, **kw: httpx.Response(200, json={"name": rw._ESCALATION_LABEL}, request=httpx.Request("GET", url)),
@@ -179,3 +196,62 @@ def test_repo_failure_does_not_abort_other_repos(monkeypatch):
     )
     assert failed == 1
     assert escalated == 1
+
+
+# --- _scan_issue_comments: author-verified marker detection (CodeRabbit --
+# --- security finding, PR #744) ---------------------------------------
+
+
+def _comment(body, *, login=None, app_id=None):
+    c = {"body": body, "user": {"login": login} if login else {}}
+    if app_id is not None:
+        c["performed_via_github_app"] = {"id": app_id}
+    return c
+
+
+def test_scan_trusts_real_guard_reopen_comment(monkeypatch):
+    monkeypatch.setattr(rw, "get_app_id", lambda: "999")
+    comments = [_comment(f"{rw._GUARD_REOPEN_SNIPPET} - stuff", login="github-actions[bot]")]
+    monkeypatch.setattr(
+        rw.httpx, "get",
+        lambda url, **kw: httpx.Response(200, json=comments, request=httpx.Request("GET", url)),
+    )
+    guard_reopened, already_escalated = rw._scan_issue_comments("tok", "o", "r", 1)
+    assert (guard_reopened, already_escalated) == (True, False)
+
+
+def test_scan_rejects_spoofed_guard_reopen_comment(monkeypatch):
+    """A human (or any other app) typing the guard's literal marker text
+    must NOT be trusted - only github-actions[bot] can post it for real."""
+    monkeypatch.setattr(rw, "get_app_id", lambda: "999")
+    comments = [_comment(f"{rw._GUARD_REOPEN_SNIPPET} - stuff", login="some-random-user")]
+    monkeypatch.setattr(
+        rw.httpx, "get",
+        lambda url, **kw: httpx.Response(200, json=comments, request=httpx.Request("GET", url)),
+    )
+    guard_reopened, _ = rw._scan_issue_comments("tok", "o", "r", 1)
+    assert guard_reopened is False
+
+
+def test_scan_trusts_own_escalation_comment(monkeypatch):
+    monkeypatch.setattr(rw, "get_app_id", lambda: "999")
+    comments = [_comment(rw._ESCALATION_MARKER + "\nbody", app_id=999)]
+    monkeypatch.setattr(
+        rw.httpx, "get",
+        lambda url, **kw: httpx.Response(200, json=comments, request=httpx.Request("GET", url)),
+    )
+    _, already_escalated = rw._scan_issue_comments("tok", "o", "r", 1)
+    assert already_escalated is True
+
+
+def test_scan_rejects_spoofed_escalation_comment(monkeypatch):
+    """A decoy comment from a DIFFERENT app (or a human) containing the
+    literal escalation marker must not suppress a real escalation."""
+    monkeypatch.setattr(rw, "get_app_id", lambda: "999")
+    comments = [_comment(rw._ESCALATION_MARKER + "\nbody", app_id=111)]
+    monkeypatch.setattr(
+        rw.httpx, "get",
+        lambda url, **kw: httpx.Response(200, json=comments, request=httpx.Request("GET", url)),
+    )
+    _, already_escalated = rw._scan_issue_comments("tok", "o", "r", 1)
+    assert already_escalated is False
