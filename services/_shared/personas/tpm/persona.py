@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from github_checks_client import CheckConclusion
 from personas.publish_check import PUBLISH_FAILED, publish_persona_check
 from personas.tpm.dor_checks import CheckResult, run_all
+from personas.tpm.dor_checks import IssueFetcher
 from personas.tribe import CHECK_CHIEF
 
 
@@ -91,13 +92,22 @@ def _summary(results: list[CheckResult]) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
-def evaluate_pull_request(pr_body: str) -> TpmEvaluation:
-    """Pure: run all 5 DoR rules over pr_body and return the rollup.
+def evaluate_pull_request(
+    pr_body: str,
+    *,
+    fetch_issue: IssueFetcher | None = None,
+) -> TpmEvaluation:
+    """Pure: run all 6 DoR rules over pr_body and return the rollup.
 
     No network IO, no AWS calls, no logging side-effects. Callers wrap
     the result in `publish_tpm_evaluation(...)` to POST the check-run.
+
+    `fetch_issue` is passed through to check_linked_issue_completeness.
+    When None, that check fails open (pass). The fetcher is a parameter,
+    not a call target inside this function -- the purity attestation
+    (attest_persona_purity.py) sees only the allowlisted `run_all` call.
     """
-    results = run_all(pr_body)
+    results = run_all(pr_body, fetch_issue=fetch_issue)
     blocking = _blocking_failures(results)
     conclusion: CheckConclusion = "success" if not blocking else "failure"
     return TpmEvaluation(
