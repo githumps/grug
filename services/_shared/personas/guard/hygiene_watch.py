@@ -113,16 +113,30 @@ def _code_part(line: str) -> str:
     return line if idx < 0 else line[:idx]
 
 
-def scan_job_timeouts(path: str, text: str) -> tuple[Violation, ...]:
-    """Jobs declaring `runs-on:` with no `timeout-minutes:`.
+def _job_block_end(lines: list[str], start: int) -> int:
+    """Index one past the last line of the job block beginning at `start`.
 
-    GitHub's default is 360 minutes, so a hung step burns runner minutes
-    silently. Walks the `jobs:` map by indentation: a job key sits 2 spaces
-    in, its keys 4 spaces in. A reusable-caller job (top-level `uses:`,
-    no `runs-on:`) is exempt - its bound lives in the reusable.
+    A job's body is everything indented deeper than its 2-space key; blank
+    lines do not end it. Split out of `scan_job_timeouts` so the walk and
+    the rule are separately readable (Elder #766: cyclomatic 17 > cap 15).
     """
-    out: list[Violation] = []
-    lines = text.splitlines()
+    j = start
+    n = len(lines)
+    while j < n:
+        ln = lines[j]
+        if ln.strip() == "":
+            j += 1
+            continue
+        if len(ln) - len(ln.lstrip()) <= 2:
+            break
+        j += 1
+    return j
+
+
+def _iter_job_blocks(lines: list[str]):
+    """Yield `(job_name, key_index, block_lines)` for each job in the
+    `jobs:` map. A non-indented, non-blank, non-comment line ends the map.
+    """
     n = len(lines)
     i = 0
     in_jobs = False
@@ -135,7 +149,6 @@ def scan_job_timeouts(path: str, text: str) -> tuple[Violation, ...]:
         if not in_jobs:
             i += 1
             continue
-        # A non-indented, non-blank, non-comment line ends the jobs: map.
         if line.strip() and not line[0].isspace() and not line.lstrip().startswith("#"):
             in_jobs = False
             i += 1
@@ -144,27 +157,31 @@ def scan_job_timeouts(path: str, text: str) -> tuple[Violation, ...]:
         if not m:
             i += 1
             continue
-        job_name = m.group(1)
-        key_line = i
-        j = i + 1
-        while j < n:
-            ln = lines[j]
-            if ln.strip() == "":
-                j += 1
-                continue
-            if len(ln) - len(ln.lstrip()) <= 2:
-                break
-            j += 1
-        block = lines[key_line:j]
-        has_runs_on = any(_JOB_RUNS_ON_RE.match(b) for b in block)
-        has_timeout = any(_JOB_TIMEOUT_RE.match(b) for b in block)
-        opted_out = any(_TIMEOUT_ALLOW_RE.search(b) for b in block)
-        if has_runs_on and not has_timeout and not opted_out:
-            out.append(Violation(
-                file=path, line=key_line + 1, category="job-timeout",
-                detail=f"job `{job_name}` has `runs-on:` but no `timeout-minutes:`",
-            ))
-        i = j
+        end = _job_block_end(lines, i + 1)
+        yield m.group(1), i, lines[i:end]
+        i = end
+
+
+def scan_job_timeouts(path: str, text: str) -> tuple[Violation, ...]:
+    """Jobs declaring `runs-on:` with no `timeout-minutes:`.
+
+    GitHub's default is 360 minutes, so a hung step burns runner minutes
+    silently. A reusable-caller job (top-level `uses:`, no `runs-on:`) is
+    exempt - its bound lives in the reusable, so requiring `runs-on:`
+    excludes it for free.
+    """
+    out: list[Violation] = []
+    for job_name, key_index, block in _iter_job_blocks(text.splitlines()):
+        if not any(_JOB_RUNS_ON_RE.match(b) for b in block):
+            continue
+        if any(_JOB_TIMEOUT_RE.match(b) for b in block):
+            continue
+        if any(_TIMEOUT_ALLOW_RE.search(b) for b in block):
+            continue
+        out.append(Violation(
+            file=path, line=key_index + 1, category="job-timeout",
+            detail=f"job `{job_name}` has `runs-on:` but no `timeout-minutes:`",
+        ))
     return tuple(out)
 
 
@@ -352,6 +369,45 @@ def _existing_report(token: str, owner: str, repo: str) -> int | None:
     return None
 
 
+def _write_report(
+    token: str, install_id: int, owner: str, name: str,
+    violations: list[Violation], existing: int | None,
+) -> None:
+    """File or refresh the quarantine report, and get the CLAIM semantics
+    right on failure. Split out of the run loop (Elder #766: cognitive 26 >
+    cap 25) - the claim rules are the subtle part and deserve to be read
+    without the surrounding per-repo bookkeeping.
+
+    A claim must represent a FILED report, not an attempt:
+      - 4xx is a definite no-write -> release, so the next tick retries.
+      - 5xx / transport is AMBIGUOUS (the write may have landed) -> keep
+        the claim. A missed weekly report beats duplicate issues, and the
+        marker-based refresh makes a later pass safe either way.
+    """
+    base = f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(name, safe='')}/issues"
+    try:
+        if existing:
+            resp = httpx.patch(
+                f"{base}/{existing}",
+                json={"body": _report_body(violations)},
+                headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
+            )
+        else:
+            resp = httpx.post(
+                base,
+                json={
+                    "title": f"{_REPORT_TITLE} ({len(violations)} violation(s))",
+                    "body": _report_body(violations),
+                },
+                headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
+            )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if 400 <= e.response.status_code < 500:
+            release_hygiene_watch_report(install_id, f"{owner}/{name}")
+        raise
+
+
 def run_hygiene_watch_for_install(
     token: str, install_id: int, repos: list[dict[str, Any]],
 ) -> tuple[int, int]:
@@ -384,34 +440,7 @@ def run_hygiene_watch_for_install(
             existing = _existing_report(token, owner, name)
             if not claim_hygiene_watch_report(install_id, full):
                 continue
-            try:
-                if existing:
-                    resp = httpx.patch(
-                        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(name, safe='')}/issues/{existing}",
-                        json={"body": _report_body(violations)},
-                        headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
-                    )
-                else:
-                    resp = httpx.post(
-                        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(name, safe='')}/issues",
-                        json={
-                            "title": f"{_REPORT_TITLE} ({len(violations)} violation(s))",
-                            "body": _report_body(violations),
-                        },
-                        headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
-                    )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if 400 <= e.response.status_code < 500:
-                    # Definite no-write: release so the next tick retries.
-                    release_hygiene_watch_report(install_id, full)
-                # 5xx is ambiguous (the write may have landed): keep the
-                # claim; marker-based refresh makes a future pass safe.
-                raise
-            except httpx.RequestError:
-                # Ambiguous transport outcome: keep the claim - a missed
-                # weekly report beats duplicate issues.
-                raise
+            _write_report(token, install_id, owner, name, violations, existing)
             filed += 1
             log.info(
                 "hygiene_watch_reported",

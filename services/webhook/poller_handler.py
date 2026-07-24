@@ -74,6 +74,46 @@ def _replay_missed_deliveries() -> dict[str, int | str]:
 from aws_identity import prove_roles_anywhere_identity as _prove_roles_anywhere_identity  # noqa: E402
 
 
+def _hygiene_watch_pass(installs: list[int]) -> tuple[int, int]:
+    """Guard hygiene watch (#655, epic #654): the fleet lints CI hygiene at
+    DIFF time, so a violation that merged before the linter existed sits
+    silent forever - nothing re-reads the default branch. Weekly
+    default-branch scan, one refreshed report issue per repo. Same
+    store-driven, best-effort shape as the dep_watch pass.
+
+    Extracted rather than inlined as a sixth block in `handler` (Elder
+    #766): `handler` is already cyclomatic 30 / cognitive 53 on main,
+    well over the 15/25 caps, and adding another inline pass measured it
+    to 34/59. The pre-existing size is its own problem; this at least
+    does not grow it. The other four passes could adopt the same shape.
+
+    Returns (reports_filed, installs_failed).
+    """
+    reports = 0
+    failed = 0
+    for install_id in installs:
+        try:
+            from adapters.install_store import list_hygiene_watch_repos
+            from personas.guard.hygiene_watch import run_hygiene_watch_for_install
+
+            repos = list_hygiene_watch_repos(install_id)
+            if not repos:
+                continue
+            filed_failed = with_install_token_retry(
+                install_id,
+                lambda token, iid=install_id, r=repos: run_hygiene_watch_for_install(token, iid, r),
+            ) or (0, 0)
+            reports += filed_failed[0]
+            failed += filed_failed[1]
+        except Exception as e:  # noqa: BLE001 — one install must not abort the cron
+            log.warning(
+                "hygiene_watch_install_failed",
+                extra={"install_id": install_id, "kind": type(e).__name__},
+            )
+            failed += 1
+    return reports, failed
+
+
 def handler(event: dict[str, Any], context: Any) -> dict[str, int | str]:
     """Poll reactions for every allowlisted install. Returns a summary
     dict (installs scanned, records polled, verdicts submitted) — also
@@ -200,33 +240,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, int | str]:
             )
             reopen_watch_failed += 1
 
-    # Guard hygiene watch (#655, epic #654): the fleet lints CI hygiene at
-    # DIFF time, so a violation that merged before the linter existed sits
-    # silent forever - nothing re-reads the default branch. Weekly
-    # default-branch scan, one refreshed report issue per repo. Same
-    # store-driven, best-effort shape as dep_watch.
-    hygiene_reports = 0
-    hygiene_watch_failed = 0
-    for install_id in installs:
-        try:
-            from adapters.install_store import list_hygiene_watch_repos
-            from personas.guard.hygiene_watch import run_hygiene_watch_for_install
-
-            repos = list_hygiene_watch_repos(install_id)
-            if not repos:
-                continue
-            filed_failed = with_install_token_retry(
-                install_id,
-                lambda token, iid=install_id, r=repos: run_hygiene_watch_for_install(token, iid, r),
-            ) or (0, 0)
-            hygiene_reports += filed_failed[0]
-            hygiene_watch_failed += filed_failed[1]
-        except Exception as e:  # noqa: BLE001 — one install must not abort the cron
-            log.warning(
-                "hygiene_watch_install_failed",
-                extra={"install_id": install_id, "kind": type(e).__name__},
-            )
-            hygiene_watch_failed += 1
+    hygiene_reports, hygiene_watch_failed = _hygiene_watch_pass(installs)
 
     # Enforcement-gauge re-emission (#460): grug.enforcement.state was only
     # emitted on enforcement CONFIG events (dashboard toggle, repo-added
