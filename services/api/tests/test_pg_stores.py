@@ -426,6 +426,27 @@ def test_comment_records_roundtrip_and_ttl_filtering(pg):
     assert store.list_comment_records(1) == []
 
 
+def test_list_comment_records_for_pr_filters_by_repo_and_pr(pg):
+    """grug#743 (Sentinel's abandoned-finding check): scoped to ONE PR,
+    not the whole install's 30-day comment history."""
+    from adapters import pg_install_store as store
+
+    store.put_comment_record(
+        install_id=1, comment_id=200, repo="o/r", pr_number=5,
+        review_span_context=None, finding_tags={"severity": "high"},
+    )
+    store.put_comment_record(
+        install_id=1, comment_id=201, repo="o/r", pr_number=6,  # different PR
+        review_span_context=None, finding_tags={"severity": "high"},
+    )
+    store.put_comment_record(
+        install_id=1, comment_id=202, repo="o/other", pr_number=5,  # different repo
+        review_span_context=None, finding_tags={"severity": "high"},
+    )
+    recs = store.list_comment_records_for_pr(1, "o/r", 5)
+    assert [r["comment_id"] for r in recs] == [200]
+
+
 def test_learnings_roundtrip_dedup_and_ttl(pg):
     from adapters import pg_install_store as store
 
