@@ -647,13 +647,21 @@ def _run_ask(install_id: int, repo_full: str, pr_number: int, question: str) -> 
     return result
 
 
+_DEFUSE_MD_CAP = 600
+
+
 def _defuse_md(s: str) -> str:
     """Neutralize model-produced text before it lands in a GitHub comment
     body. The learning/scope come from the classifier (derived from an
     untrusted reply), so strip HTML-significant chars (a stray </details>
     would break out of the ack's collapsible), backticks/pipes, and flatten
-    newlines; cap to bound a hostile payload."""
-    return (
+    newlines; cap to bound a hostile payload.
+
+    Logs when the cap actually truncates (PR #679 Elder finding): the raw
+    length is captured, not the defused one, since the HTML-escaping above
+    can only grow the string - measuring pre-escape avoids under-counting
+    a truncation the escaping itself pushed past the cap."""
+    defused = (
         s.replace("<", "&lt;").replace(">", "&gt;")
         .replace("`", "'").replace("|", "\\|")
         .replace("\r", " ").replace("\n", " ")
@@ -661,7 +669,10 @@ def _defuse_md(s: str) -> str:
         # model-restated "@org/team" cannot ping people from grug's ack
         # (renders identically to the reader).
         .replace("@", "@\u200b")
-    )[:600]
+    )
+    if len(defused) > _DEFUSE_MD_CAP:
+        log.info("defuse_md_truncated", extra={"raw_len": len(s), "cap": _DEFUSE_MD_CAP})
+    return defused[:_DEFUSE_MD_CAP]
 
 
 def _learn_ack_body(learning: str, scope_path: str) -> str:

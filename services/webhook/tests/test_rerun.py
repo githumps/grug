@@ -1488,6 +1488,24 @@ def test_defuse_md_breaks_mentions():
     assert "@​org/team" in out and "@​user" in out
 
 
+def test_defuse_md_logs_when_truncated(caplog):
+    """PR #679 Elder finding: a silent 600-char cap hides truncation from
+    the operator - now logged."""
+    import logging as _logging
+    with caplog.at_level(_logging.INFO):
+        out = rerun._defuse_md("x" * 1000)
+    assert len(out) == rerun._DEFUSE_MD_CAP
+    hits = [r for r in caplog.records if r.msg == "defuse_md_truncated"]
+    assert hits and hits[0].raw_len == 1000 and hits[0].cap == rerun._DEFUSE_MD_CAP
+
+
+def test_defuse_md_no_log_under_cap(caplog):
+    import logging as _logging
+    with caplog.at_level(_logging.INFO):
+        rerun._defuse_md("short")
+    assert not [r for r in caplog.records if r.msg == "defuse_md_truncated"]
+
+
 # --- _run_ask mention neutralization (#561) ---------------------------
 
 _ZWSP = chr(0x200B)  # kept as a runtime chr() call, not a literal
