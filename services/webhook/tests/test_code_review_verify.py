@@ -261,7 +261,7 @@ def test_order_preserved_and_mixed_verdicts():
     assert [k.finding for k in killed] == [dead]
 
 
-# --- PR #710 review tightenings (CodeRabbit round 1) ----------------------
+# --- PR #710 review tightenings (FLINT round 1) ----------------------
 
 
 def test_docs_class_rule_with_execution_vocabulary_survives_on_prose():

@@ -918,7 +918,7 @@ def _gauge_tags(captured_gauges, metric):
 
 def _assert_queue_tags(captured_gauges, metric, queue_names):
     """A missing/wrong `queue` tag on any gauge - not just messages_visible -
-    would silently disable that gauge's per-queue monitor filter (CodeRabbit
+    would silently disable that gauge's per-queue monitor filter (FLINT
     #684)."""
     tags = _gauge_tags(captured_gauges, metric)
     assert [t.get("queue") for t in tags] == queue_names

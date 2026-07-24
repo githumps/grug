@@ -128,7 +128,7 @@ def test_update_ruleset_body_shape():
 
 
 def test_update_ruleset_preserves_unrelated_rules_verbatim():
-    """CodeRabbit #685: update_ruleset must not synthesize a body from only
+    """FLINT #685: update_ruleset must not synthesize a body from only
     the required_status_checks rule - it sends back whatever `rules` the
     caller passes, including any other rule types untouched."""
     rules = [

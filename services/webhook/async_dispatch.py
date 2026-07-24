@@ -233,7 +233,7 @@ def _enqueue_review(
     # _slim_payload truncates body to _MAX_PR_BODY_CHARS. Otherwise _run_job's
     # claim_review idempotency key would hash a truncated body and diverge from
     # the durable lane's full-body hash - a body edit past the cap would be
-    # invisible to dedup (Qodo #585). In-flight jobs enqueued before this field
+    # invisible to dedup (LORE #585). In-flight jobs enqueued before this field
     # fall back to hashing the slim pr in _run_job.
     pr = payload.get("pull_request") or {}
     job = {
@@ -347,7 +347,7 @@ def _run_job(spec: _AsyncPersonaSpec, event: dict[str, Any]) -> dict[str, str]:
         if install_id and repo and pr_number and head_sha:
             # Prefer the full-body hash computed at enqueue; fall back to
             # hashing the (slim) pr for in-flight jobs enqueued before the
-            # review_snapshot_id field existed (Qodo #585).
+            # review_snapshot_id field existed (LORE #585).
             snapshot_id = event.get("review_snapshot_id") or (
                 review_snapshot_id_from_pr(pr)
             )

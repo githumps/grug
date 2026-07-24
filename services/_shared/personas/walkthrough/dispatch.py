@@ -203,7 +203,7 @@ def _emit_degraded_metric(degraded: bool) -> None:
         emit_gauge("grug.teller.summary_degraded", 1 if degraded else 0)
     except Exception as e:  # noqa: BLE001 - telemetry never breaks the comment
         # A silent swallow here would hide a real import/signature bug in
-        # observability.emit_gauge indefinitely (CodeRabbit) - debug, not
+        # observability.emit_gauge indefinitely (FLINT) - debug, not
         # warning, since a missing gauge is never itself an operator page.
         log.debug(
             "walkthrough_emit_degraded_metric_failed",

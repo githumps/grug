@@ -96,7 +96,7 @@ def _list_open_reopened_issues(token: str, owner: str, repo: str) -> list[dict[s
 # GitHub's own well-known "github-actions" App login - the close-
 # completeness guard runs as a GH Actions workflow step, so its reopen
 # comment is always posted via this identity. Checked ALONGSIDE the
-# marker text (CodeRabbit security finding, PR #744): a bare body-text
+# marker text (FLINT security finding, PR #744): a bare body-text
 # match lets ANY actor with issues:write fake either marker by typing the
 # literal string into a comment, which would falsely mark an unrelated
 # issue as guard-reopened, or - worse - permanently suppress escalation
@@ -111,7 +111,7 @@ def _scan_issue_comments(
     token: str, owner: str, repo: str, issue_number: int,
 ) -> tuple[bool, bool]:
     """One paginated comment scan answering BOTH (was this guard-reopened,
-    have we already escalated) - CodeRabbit perf finding, PR #744: the two
+    have we already escalated) - FLINT perf finding, PR #744: the two
     checks always ran back-to-back over the same pages, doubling GitHub
     API calls on every cron tick for the lifetime of every stale issue."""
     own_app_id = get_app_id()
@@ -182,7 +182,7 @@ def _ensure_label(token: str, owner: str, repo: str) -> None:
 
 
 def _escalate(token: str, owner: str, repo: str, issue_number: int, hours: int) -> None:
-    """Label FIRST, comment LAST (CodeRabbit finding, PR #744): the
+    """Label FIRST, comment LAST (FLINT finding, PR #744): the
     comment is the idempotency-defining write (`_scan_issue_comments`
     only looks for it), so if a failure happens between the two writes,
     it must happen before the comment posts - otherwise a label-attach
@@ -220,7 +220,7 @@ def _try_escalate_issue(
     token: str, owner: str, name: str, issue: dict[str, Any], *, now: datetime,
 ) -> bool:
     """One issue's full escalation decision + action. Extracted from
-    run_reopen_watch_for_install (CodeRabbit high-complexity finding, PR
+    run_reopen_watch_for_install (FLINT high-complexity finding, PR
     #744) so the per-install loop stays a simple dispatch."""
     number = issue.get("number")
     if number is None or not _should_escalate(issue, now=now):

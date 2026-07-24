@@ -227,7 +227,7 @@ def test_pr_fetch_transport_error_returns_skip(_no_install_lookups, mock_transpo
 
 
 def test_recheck_unexpected_raise_contained_not_500(_no_install_lookups):
-    """CodeRabbit on #575: main.py forwards dispatch() exceptions into a
+    """FLINT on #575: main.py forwards dispatch() exceptions into a
     webhook 500 and GitHub does NOT auto-redeliver on 5xx — an
     unexpected raise from evaluate/publish must be contained by the
     recheck final guard (mirror of

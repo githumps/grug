@@ -212,7 +212,7 @@ def parse_diff(unified_diff: str) -> tuple[DiffHunk, ...]:
                 # A zero START is only legal with a zero COUNT: `+0,0`.
                 # `+0,N` / a bare `+0` (implied count 1) are malformed -
                 # fall through to fail loudly rather than silently
-                # swallowing hunks (CodeRabbit PR #580).
+                # swallowing hunks (FLINT PR #580).
                 if m.group(2) != "0":
                     raise DiffParseError(
                         f"malformed zero-start hunk header at line {i + 1}: {line!r}"

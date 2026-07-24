@@ -93,7 +93,7 @@ def test_verify_accepts_state_within_ttl(_oauth_mod, monkeypatch):
 
 
 def test_different_secrets_yield_different_signatures(monkeypatch):
-    """#91 (greptile P1, re-verified during #563 disposition): the original
+    """#91 (SPOOR P1, re-verified during #563 disposition): the original
     assertion OR'd the signature comparison with a rand-component comparison,
     which is near-always true regardless of the signature (rand is
     independently random per call) - a broken/constant-signature HMAC would

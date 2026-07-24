@@ -228,7 +228,7 @@ def update_ruleset(
 
     Takes the FULL `rules` array (every rule the ruleset has, with only the
     specific rule/contexts the caller means to change actually modified),
-    not a synthesized required_status_checks-only list (CodeRabbit #685):
+    not a synthesized required_status_checks-only list (FLINT #685):
     PUT /rulesets/{id} is not documented as a partial-update endpoint, and
     a body built from only the one rule type this client cares about risks
     silently dropping any OTHER rule (deletion protection, non-fast-forward,

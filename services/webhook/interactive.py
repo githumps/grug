@@ -40,7 +40,7 @@ def run_command(
 ) -> dict[str, str]:
     """Execute a gated command. All heavy work is ASYNC via the rerun lane -
     the webhook only enqueues (fast) so the delivery ACK never blocks on an
-    LLM call (#528 Qodo). `enqueue`/`enqueue_ask`/`claim` are injectable for
+    LLM call (#528 LORE). `enqueue`/`enqueue_ask`/`claim` are injectable for
     tests. Claim happens AFTER a successful enqueue, so a claim-then-crash
     can't silently swallow the command."""
     if claim is None:

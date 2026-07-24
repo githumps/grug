@@ -333,7 +333,7 @@ def test_diff_hunk_invariant_violation_raises_diff_parse_error() -> None:
 def test_zero_start_with_nonzero_count_raises() -> None:
     """`+0,N` (zero start, nonzero count) is malformed unified diff - the
     zero-new-side skip must only accept the legal `+0,0` shape, never
-    silently swallow a corrupt header (CodeRabbit PR #580)."""
+    silently swallow a corrupt header (FLINT PR #580)."""
     diff = """diff --git a/x.py b/x.py
 index abc..def 100644
 --- a/x.py

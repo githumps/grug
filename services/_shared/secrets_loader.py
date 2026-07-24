@@ -48,7 +48,7 @@ def get_webhook_secret() -> str:
     from preview_mode import preview_mode
     if preview_mode():
         # The preview workflow always injects a fresh random secret; if it
-        # is somehow absent, fall back to a per-PROCESS random value (Qodo
+        # is somehow absent, fall back to a per-PROCESS random value (LORE
         # review on #531) - an unconfigured preview then REJECTS every HMAC
         # rather than accepting a predictable "preview-not-configured".
         env_secret = os.environ.get("GRUG_PREVIEW_WEBHOOK_SECRET")

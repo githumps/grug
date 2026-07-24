@@ -195,7 +195,7 @@ def test_migrate_check_context_noop_when_no_required_status_checks_rule():
 
 
 def test_migrate_check_context_preserves_other_required_contexts():
-    """Qodo on #685: an earlier version replaced the WHOLE checks list with
+    """LORE on #685: an earlier version replaced the WHOLE checks list with
     just the canonical Chief check, which would silently drop any other
     required context a ruleset carries. Only the stale alias is rewritten;
     unrelated contexts pass through untouched, in their original order."""
@@ -249,7 +249,7 @@ def test_migrate_check_context_dedupes_canonical_and_stale_alias():
 
 
 def test_migrate_check_context_preserves_unrelated_rule_types():
-    """CodeRabbit #685: the fix must not synthesize a body from only the
+    """FLINT #685: the fix must not synthesize a body from only the
     required_status_checks rule - other rule types on the SAME ruleset
     (deletion protection, non-fast-forward, whatever an admin added) must
     pass through byte-for-byte, in their original position."""
@@ -321,7 +321,7 @@ def test_migrate_check_context_rebuilt_entries_omit_integration_id():
 
 
 def test_migrate_check_context_preserves_real_integration_id_on_healed_entry():
-    """CodeRabbit #685 (security): a legacy-alias entry scoped to a
+    """FLINT #685 (security): a legacy-alias entry scoped to a
     specific GitHub App must keep that scoping after its context is
     rewritten - only the null-integration_id case gets dropped, a real
     one must survive."""
@@ -345,7 +345,7 @@ def test_migrate_check_context_preserves_real_integration_id_on_healed_entry():
 
 
 def test_migrate_check_context_untouched_entry_keeps_its_integration_id():
-    """CodeRabbit #685 (security): an entry that ISN'T a legacy Chief
+    """FLINT #685 (security): an entry that ISN'T a legacy Chief
     alias must pass through byte-for-byte, integration_id (null or real)
     included - only the entry actually being healed is touched."""
     from enforcement import migrate_check_context
@@ -370,7 +370,7 @@ def test_migrate_check_context_untouched_entry_keeps_its_integration_id():
 
 
 def test_migrate_check_context_dedup_key_includes_integration_id():
-    """CodeRabbit #685: dedup must key on (canonical, integration_id), not
+    """FLINT #685: dedup must key on (canonical, integration_id), not
     canonical alone - the same context scoped to two DIFFERENT GitHub Apps
     is two distinct requirements, not a duplicate. A legacy-alias entry
     scoped to app 1 and a canonical entry scoped to app 2 must both
@@ -399,7 +399,7 @@ def test_migrate_check_context_dedup_key_includes_integration_id():
 
 
 def test_migrate_check_context_heals_every_required_status_checks_rule():
-    """Qodo #685: GitHub does not document a one-rule-per-type limit on
+    """LORE #685: GitHub does not document a one-rule-per-type limit on
     rulesets. A second required_status_checks rule later in the array must
     also get healed, not just the first."""
     from enforcement import migrate_check_context
@@ -428,7 +428,7 @@ def test_migrate_check_context_heals_every_required_status_checks_rule():
 
 
 def test_migrate_check_context_untouched_entry_null_integration_id_stripped():
-    """Qodo #685: GitHub 422s the whole PUT on integration_id: null,
+    """LORE #685: GitHub 422s the whole PUT on integration_id: null,
     including on an UNTOUCHED entry re-sent verbatim - null and absent
     mean the same thing to GitHub's model, so stripping it changes
     nothing about what the entry actually requires. This alone counts as
@@ -452,7 +452,7 @@ def test_migrate_check_context_untouched_entry_null_integration_id_stripped():
 
 
 def test_migrate_check_context_non_string_context_left_alone():
-    """Qodo #685: a malformed entry (context missing/non-string) must not
+    """LORE #685: a malformed entry (context missing/non-string) must not
     make the healed PUT itself malformed - primary_check_name is never
     called on it, and if it's the only entry, no PUT happens at all."""
     from enforcement import migrate_check_context
@@ -471,7 +471,7 @@ def test_migrate_check_context_non_string_context_left_alone():
 
 
 def test_migrate_check_context_unhashable_context_does_not_crash():
-    """Qodo #685: a malformed entry with a dict/list context (non-string,
+    """LORE #685: a malformed entry with a dict/list context (non-string,
     so left alone per the previous fix) must not blow up the dedup set -
     an unhashable value can never be dedup-keyed, so it's just kept."""
     from enforcement import migrate_check_context
@@ -513,7 +513,7 @@ def test_remove_deletes_by_stored_id():
 def test_remove_stored_id_plus_coexisting_legacy_deletes_both():
     """A stored canonical ID AND a coexisting legacy 'Grug — ...' ruleset:
     delete BOTH, or the legacy stays an orphaned merge gate while the store
-    reports enforcement removed (found by CodeRabbit + Qodo on this PR)."""
+    reports enforcement removed (found by FLINT + LORE on this PR)."""
     rulesets = [
         {"id": 42, "name": "Grug - Chief Enforcement"},       # the stored one
         {"id": 77, "name": "Grug — Chief Enforcement"},       # coexisting legacy

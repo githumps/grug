@@ -79,12 +79,12 @@ def _changed_files(token: str, owner: str, repo: str, pr_number: int) -> list[st
         if len(batch) < 100:
             break
         page += 1
-    return files[:_MAX_FILES]  # hard cap (Qodo review #535: a page could overshoot)
+    return files[:_MAX_FILES]  # hard cap (LORE review #535: a page could overshoot)
 
 
 def _find_marker_comment(token: str, owner: str, repo: str, pr_number: int) -> int | None:
     # Paginate: on a busy PR the marker may sit past page 1, and missing it
-    # would POST a duplicate instead of PATCHing (Qodo review #535).
+    # would POST a duplicate instead of PATCHing (LORE review #535).
     #
     # `performed_via_github_app` is populated server-side ONLY for comments
     # created via a GitHub App installation token - a human contributor
@@ -116,7 +116,7 @@ def _find_marker_comment(token: str, owner: str, repo: str, pr_number: int) -> i
             return None
         page += 1
     # Gave up at the cap without finding the marker - distinguish this from
-    # the ordinary "no marker" exit above (Qodo review, PR #694), or a
+    # the ordinary "no marker" exit above (LORE review, PR #694), or a
     # duplicate-comment-growth bug on an extreme PR (>2000 comments) would
     # go unnoticed forever, same as walkthrough/dispatch.py already does.
     log.warning(
@@ -152,7 +152,7 @@ def _cleared_body(issue_numbers: list[int]) -> str:
 
 
 def _emit_metric(flagged: int) -> None:
-    """Best-effort observability signal (Qodo review #535): ticket-compliance
+    """Best-effort observability signal (LORE review #535): ticket-compliance
     posts an advisory COMMENT (not a check-run), so a check-verdict row would
     misrepresent it - emit an owned gauge instead."""
     try:
@@ -171,7 +171,7 @@ def run_ticket_compliance(
     on GitHub hiccups (the dispatch also guards)."""
     # Toggle: per-repo it inherits Chief's tpm_enabled (this runs only inside
     # the Chief dispatch, which the registry gates per repo). A global
-    # operator kill-switch lets it be turned off fleet-wide (Qodo review #535).
+    # operator kill-switch lets it be turned off fleet-wide (LORE review #535).
     if os.getenv("GRUG_TICKET_COMPLIANCE_DISABLED", "").lower() in ("1", "true", "yes"):
         return {"checked": 0, "reason": "disabled"}
     refs = closes_refs(pr_body)[:_MAX_ISSUES]

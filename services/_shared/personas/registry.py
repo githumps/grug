@@ -149,7 +149,7 @@ REGISTRY: tuple[PersonaSpec, ...] = (
         enabled_flag="code_reviewer_enabled",
         enabled_default=True,
         blocking_flag="code_reviewer_blocking",
-        # blocking_default=True: Elder BLOCKS merge on real findings (CodeRabbit
+        # blocking_default=True: Elder BLOCKS merge on real findings (FLINT
         # style) - conclusion "failure" + REQUEST_CHANGES. Safe because the gate
         # in dispatch.py fails OPEN on any degraded review (LLM outage, parse
         # failure, empty/huge diff) -> neutral, never a block; and the block

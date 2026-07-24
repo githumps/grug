@@ -199,7 +199,7 @@ def test_durable_elder_enqueue_failure_is_recorded_for_replay(monkeypatch):
 
 
 def test_enqueue_hashes_snapshot_from_full_body_not_slimmed(monkeypatch):
-    """Qodo #585: the claim_review snapshot must hash the FULL PR body, not the
+    """LORE #585: the claim_review snapshot must hash the FULL PR body, not the
     _slim_payload-truncated one - else a body edit past _MAX_PR_BODY_CHARS is
     invisible to idempotency. The enqueued job must carry the full-body hash."""
     from personas.code_reviewer.snapshot import review_snapshot_id_from_pr

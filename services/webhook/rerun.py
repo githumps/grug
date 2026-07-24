@@ -262,7 +262,7 @@ def _complete_elder_check_open(
 ) -> bool:
     """Post a TERMINAL Elder check so required-status never sticks in_progress.
 
-    CodeRabbit-style fail-open: infra failure / GH brownout / superseded head
+    FLINT-style fail-open: infra failure / GH brownout / superseded head
     must complete the required check as neutral (passes merge) with an honest
     title, never leave "in_progress" forever. Never raises. Returns False
     only on a transient post failure (the completion did NOT land, so the
@@ -759,7 +759,7 @@ def _run_learn(
     # on the rule digest), so a redelivery re-storing is a harmless no-op - but
     # storing before the claim means a later put/ack failure can never lose the
     # learning (the claim, made only for the ACK, would otherwise short-circuit
-    # the retry and drop the rule entirely). CodeRabbit data-integrity fix.
+    # the retry and drop the rule entirely). FLINT data-integrity fix.
     if classification["durable"]:
         put_learning(
             repo=repo_full,
@@ -1422,7 +1422,7 @@ def _run_hot_review(
         result_status = result.get("result")
         if result_status == "publish_failed":
             raise RuntimeError("Elder review publication failed")
-        # Fail-open like CodeRabbit: infra / GH brownout must COMPLETE the
+        # Fail-open like FLINT: infra / GH brownout must COMPLETE the
         # required check as neutral, never leave in_progress forever and
         # never redrive forever. Real model findings still use pass/fail.
         if result_status == "skipped" and degraded_reason == "freshness_check_failed":

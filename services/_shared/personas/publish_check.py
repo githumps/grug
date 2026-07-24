@@ -41,7 +41,7 @@ log = logging.getLogger(f"{os.getenv('DD_SERVICE', 'grug')}.persona.publish_chec
 
 
 def _env_number(name: str, default: float, *, cap: float) -> float:
-    """Operator-tunable numeric env var, parsed defensively (Qodo review,
+    """Operator-tunable numeric env var, parsed defensively (LORE review,
     PR #698): a malformed value must degrade to the default with a warning,
     not crash the service at import (this module loads inside webhook
     startup - a bad deploy config would otherwise take down check
@@ -55,7 +55,7 @@ def _env_number(name: str, default: float, *, cap: float) -> float:
         value = float(raw)
         # NaN/inf parse fine and NaN SURVIVES the clamp (every NaN
         # comparison is False, so min/max pass it through) - int(nan)
-        # would then crash the import anyway (CodeRabbit, PR #698).
+        # would then crash the import anyway (FLINT, PR #698).
         if not math.isfinite(value):
             raise ValueError(raw)
     except ValueError:
@@ -85,7 +85,7 @@ def _emit_retry_exhausted_gauge(persona_key: str) -> None:
         pass
 
 
-# Hard ceiling on CUMULATIVE retry sleep (CodeRabbit, PR #698): the per-knob
+# Hard ceiling on CUMULATIVE retry sleep (FLINT, PR #698): the per-knob
 # caps alone still allow retries=5 x base=2.0 -> 2+4+8+16+32 = 62s of sleep,
 # blowing the 10s webhook ACK window the budget exists to respect. The last
 # retry's delay is truncated to whatever budget remains; when it hits zero

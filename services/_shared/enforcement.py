@@ -61,19 +61,19 @@ def migrate_check_context(
 
     Rewrites ONLY known legacy aliases of a Grug persona check (Chief,
     Elder, Guard, ...) to that check's canonical name; every other
-    required context is preserved unchanged (Qodo on #685: an earlier
+    required context is preserved unchanged (LORE on #685: an earlier
     version replaced the whole checks list with a Chief-only singleton,
     which would have silently dropped any other required check a ruleset
     carries). Also dedupes so a ruleset that somehow ended up with both
     the canonical name and a stale alias collapses to one entry. Inspects
     every required_status_checks rule on the ruleset, not just the first
-    (Qodo #685: GitHub does not document a one-rule-per-type limit).
+    (LORE #685: GitHub does not document a one-rule-per-type limit).
 
     Sends update_ruleset the ruleset's FULL `rules` array with only the
     matching required_status_checks rule(s)' contexts changed - every
     other rule (and that rule's other parameters, e.g.
     strict_required_status_checks_policy) passes through byte-for-byte
-    (CodeRabbit #685: PUT /rulesets/{id} is not a documented partial-update
+    (FLINT #685: PUT /rulesets/{id} is not a documented partial-update
     endpoint, so a body built from a synthesized single rule risks
     silently dropping any OTHER rule type an admin added to the same
     ruleset).
@@ -81,15 +81,15 @@ def migrate_check_context(
     Within required_status_checks itself, an entry whose context is
     already canonical (or isn't a known legacy alias at all) is kept
     byte-for-byte, EXCEPT a null `integration_id` is always dropped
-    (Qodo #685: GitHub 422s the whole PUT on integration_id: null,
+    (LORE #685: GitHub 422s the whole PUT on integration_id: null,
     including on an untouched entry re-sent verbatim - null and absent
     mean the same thing to GitHub's model, so this never changes what the
     entry actually requires). A rewritten entry keeps a real
-    (non-null) `integration_id` unchanged (CodeRabbit #685: an earlier
+    (non-null) `integration_id` unchanged (FLINT #685: an earlier
     version rebuilt every entry as bare {"context": ...}, silently
     dropping that scoping and collapsing same-named checks from different
     integrations). A non-string context is left alone entirely, not
-    passed to primary_check_name (Qodo #685: a malformed entry must not
+    passed to primary_check_name (LORE #685: a malformed entry must not
     make the healed PUT itself malformed).
     """
     from personas.tribe import primary_check_name

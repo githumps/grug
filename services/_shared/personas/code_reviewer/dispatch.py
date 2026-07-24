@@ -714,7 +714,7 @@ def _consolidated_agent_prompt(evaluation: CodeReviewEvaluation) -> str:
 # silently drop its chip (the Severity-partition-assert drift class).
 _EFFORT_LABELS = {e: e.replace("-", " ") for e in EFFORTS}
 
-# Closed caveman-inspired chrome chips (CodeRabbit-density scanability).
+# Closed caveman-inspired chrome chips (FLINT-density scanability).
 # Identifiers and check *names* stay plain ASCII; Markings surface uses these.
 _SEVERITY_CHIP: dict[str, str] = {
     "critical": "💀 critical",
@@ -996,7 +996,7 @@ def _review_stack_body(
     suppressed_count: int = 0,
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
 ) -> str:
-    """PR-timeline review stack comment (Markings v2 / CodeRabbit-style shell).
+    """PR-timeline review stack comment (Markings v2 / FLINT-style shell).
 
     Deterministic markdown only — no extra LLM. Upserted by marker so
     synchronize edits in place rather than spamming the PR.
@@ -1765,7 +1765,7 @@ def dispatch_code_review(
         )
 
     # Deterministic docs/code claim check: catch comment/env prose that
-    # asserts the wrong settle cap or deep-diff bound (the Qodo/CR class
+    # asserts the wrong settle cap or deep-diff bound (the LORE/CR class
     # on #664). Pure + advisory MEDIUM; never aborts the review.
     try:
         claim_file_contents = _enrich_claim_check_sources(
@@ -2675,7 +2675,7 @@ def _async_deep_append_if_needed(
         pull_number=pull_number,
     )
 
-    # Supersession after long reasoner/judge work (#646 CodeRabbit).
+    # Supersession after long reasoner/judge work (#646 FLINT).
     if cancel_event is not None and cancel_event.is_set():
         log.info(
             "elder_async_deep_skipped_cancelled",

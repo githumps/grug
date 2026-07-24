@@ -1,6 +1,6 @@
 """Deterministic docs/code claim consistency for Elder.
 
-Catches the review class Qodo and CodeRabbit found when policy knobs
+Catches the review class LORE and FLINT found when policy knobs
 shipped with comments/docs that asserted the wrong number or the wrong
 comparison (settle medium cap, deep-diff exclusive vs inclusive).
 

@@ -245,6 +245,9 @@ jobs:
       - name: Attester · persona registry / API payload / dashboard coherence
         run: python3 infra/scripts/attest_persona_surface_coherence.py
 
+      - name: Attester · no competitor product names in this public repo
+        run: python3 infra/scripts/attest_no_vendor_names.py
+
       - name: Attester · MirrorDiscipline Extracted-state consistency (spec 0010)
         run: python3 infra/scripts/attest_mirror_policy_consistency.py
 

@@ -38,7 +38,7 @@ def test_neutralize_mentions_empty_string():
 
 
 def test_neutralize_mentions_preserves_email_addresses():
-    """CodeRabbit review on #694: the un-anchored `@(?=\\w)` pattern also
+    """FLINT review on #694: the un-anchored `@(?=\\w)` pattern also
     matched the `@` in an email's local-part boundary (e.g.
     owner@example.com), corrupting user-visible text that was never a
     mention. Require a non-word character (or start of string) before

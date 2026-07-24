@@ -29,7 +29,7 @@ _MAX_RULE_CHARS = 220
 
 
 def _sanitize(text: str) -> str:
-    """Neutralize a ledger finding for SYSTEM-prompt injection (#541 Qodo):
+    """Neutralize a ledger finding for SYSTEM-prompt injection (#541 LORE):
     flatten newlines (no fake message boundaries), drop control chars, and
     cap length. Ledger text is operator-authored but still DATA, not
     instructions."""

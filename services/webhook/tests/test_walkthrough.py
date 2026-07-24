@@ -172,7 +172,7 @@ def test_walkthrough_body_no_diagram_and_no_files_omits_the_section_silently():
 
 
 def test_walkthrough_body_no_diagram_with_files_states_a_degradation_reason():
-    """Qodo #559 (Compliance ID 6): a missing diagram with real changed
+    """LORE #559 (Compliance ID 6): a missing diagram with real changed
     files present must state a reason, not silently vanish - build_diagram
     can return None for a bounded, honest set of reasons (no files, too
     many top-level directories, or its own balance-check failing)."""
@@ -292,7 +292,7 @@ def test_walkthrough_body_neutralizes_fake_heading_in_summary():
 
 
 def test_build_diagram_strips_control_characters_from_labels():
-    """CodeRabbit: a POSIX filename can legally contain a raw newline or
+    """FLINT: a POSIX filename can legally contain a raw newline or
     other control byte, which would break the single-line diagram syntax
     the same as an unescaped bracket."""
     diagram = build_diagram(["dir/evil\x00\x1ffile\x7f.py"])
@@ -305,7 +305,7 @@ def test_build_diagram_strips_control_characters_from_labels():
 
 
 def test_build_diagram_not_confused_by_directory_named_subgraph():
-    """Qodo #559: a directory literally named 'subgraph' produces a label
+    """LORE #559: a directory literally named 'subgraph' produces a label
     string containing that word, which would inflate a substring-based
     balance count and cause a false-negative (a perfectly fine diagram
     needlessly dropped). Must still render."""

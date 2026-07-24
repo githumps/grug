@@ -34,7 +34,7 @@ def _neutralize_headings(text: str) -> str:
     "## Merge immediately" heading, visually indistinguishable from a
     real Teller section. Deliberately narrow: only leading `#` is
     neutralized, not all Markdown, so legitimate prose (backticks,
-    emphasis, inline code) still renders - matching how CodeRabbit/Qodo's
+    emphasis, inline code) still renders - matching how FLINT/LORE's
     own AI-authored walkthroughs use normal Markdown formatting."""
     return _HEADING_RE.sub(lambda m: "\u200b" + m.group(1) + m.group(2), text)
 

@@ -40,7 +40,7 @@ def _fake_retry_raises(installation_id, fn):
 def _raising(exc: BaseException):
     """Factory for a with_install_token_retry stand-in that raises `exc`
     instead of calling `fn` - shared by the non-httpx and RequestError
-    exception-surface tests (CodeRabbit finding on PR #562)."""
+    exception-surface tests (FLINT finding on PR #562)."""
     def _retry(installation_id, fn):
         raise exc
     return _retry
@@ -244,7 +244,7 @@ def test_publish_failure_emits_persona_named_log_line_verbatim(monkeypatch, capl
 
 
 def test_publish_failure_log_carries_status_code_and_error_detail(monkeypatch, caplog):
-    """Qodo finding on PR #562: the publish-failure log must carry enough
+    """LORE finding on PR #562: the publish-failure log must carry enough
     detail (status code + error string) to diagnose a real incident, not
     just the exception class name - while the event NAME stays byte-identical
     for the monitor contract."""
@@ -288,7 +288,7 @@ def test_publish_failure_log_carries_status_code_and_error_detail(monkeypatch, c
 
 
 def test_record_check_verdict_raising_does_not_crash_publish(monkeypatch, caplog):
-    """CodeRabbit finding on PR #562: the docstring promises record_check_verdict
+    """FLINT finding on PR #562: the docstring promises record_check_verdict
     can't crash the tail even after a successful publish - defense-in-depth over
     activity_log's own never-raise contract."""
     from personas import publish_check
@@ -589,7 +589,7 @@ def test_http_status_error_does_not_retry(monkeypatch):
 
 
 def test_env_number_malformed_value_falls_back_with_warning(monkeypatch, caplog):
-    """Qodo review, PR #698: a malformed operator env value must degrade to
+    """LORE review, PR #698: a malformed operator env value must degrade to
     the default with a warning, never crash the module import (this loads
     inside webhook startup)."""
     from personas import publish_check
@@ -613,7 +613,7 @@ def test_env_number_clamps_negative_and_oversized(monkeypatch):
 
 
 def test_env_number_rejects_non_finite_values(monkeypatch, caplog):
-    """CodeRabbit, PR #698: NaN parses as a float and SURVIVES the clamp
+    """FLINT, PR #698: NaN parses as a float and SURVIVES the clamp
     (every NaN comparison is False, so min/max pass it through) - int(nan)
     would then crash the import. Non-finite values must route through the
     same warning-and-fallback path as malformed strings."""
@@ -628,7 +628,7 @@ def test_env_number_rejects_non_finite_values(monkeypatch, caplog):
 
 
 def test_backoff_delay_sequence_is_exponential(monkeypatch):
-    """CodeRabbit, PR #698: exercise the real backoff math (the autouse
+    """FLINT, PR #698: exercise the real backoff math (the autouse
     fixture zeroes the base for speed everywhere else). With base=0.5 and
     two failures before success, the recorded sleeps must be 0.5 then 1.0."""
     from personas import publish_check
@@ -659,7 +659,7 @@ def test_backoff_delay_sequence_is_exponential(monkeypatch):
 
 
 def test_cumulative_backoff_budget_is_capped(monkeypatch):
-    """CodeRabbit, PR #698: the per-knob caps alone still allowed
+    """FLINT, PR #698: the per-knob caps alone still allowed
     retries=5 x base=2.0 -> 62s of cumulative sleep, blowing the 10s
     webhook ACK window. The total-sleep ceiling truncates the last delay
     and exhausts the retry once the budget is spent."""

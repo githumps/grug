@@ -112,7 +112,7 @@ def test_parses_the_real_committed_ledger():
 
 
 def test_ledger_digest_is_content_stable():
-    """#536 Qodo: the store sk digest must depend on finding CONTENT, not
+    """#536 LORE: the store sk digest must depend on finding CONTENT, not
     ingest order - so re-ingesting a reordered corpus heals in place."""
     from adapters.pg_install_store import _ledger_digest, _ledger_sk
     a = {"finding": "swallowed exception", "ts": "2026-07-05T00:00:00Z", "evidence": "e1"}

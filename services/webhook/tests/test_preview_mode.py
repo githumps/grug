@@ -53,7 +53,7 @@ def test_webhook_secret_from_env_in_preview(monkeypatch):
 
 
 def test_webhook_secret_fallback_is_random_not_predictable(monkeypatch):
-    """#531 Qodo: an unconfigured preview must REJECT unknown HMACs, not
+    """#531 LORE: an unconfigured preview must REJECT unknown HMACs, not
     accept a predictable 'preview-not-configured'. The fallback is a
     per-process random token (stable within the process, unguessable)."""
     monkeypatch.setenv("GRUG_PREVIEW", "1")

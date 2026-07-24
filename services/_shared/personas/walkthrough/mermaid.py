@@ -1,6 +1,6 @@
 """Deterministic PR-diagram builder (#554).
 
-DELIBERATELY not model-authored: LORE and CodeRabbit both render a mermaid
+DELIBERATELY not model-authored: LORE and FLINT both render a mermaid
 diagram from free-form model output, which means trusting an LLM to emit
 syntactically valid mermaid AND to never smuggle a clickable/injectable
 node label. Teller's diagram is built ENTIRELY from the changed-file path
@@ -30,7 +30,7 @@ _MAX_GROUPS = 12
 # confuse flowchart parsing in some renderers. Strip to a safe set. Also
 # strip C0/DEL control bytes (\x00-\x1f, \x7f) - a POSIX filename can
 # legally contain a raw newline or other control byte, which would break
-# the single-line diagram syntax same as an unescaped bracket (CodeRabbit).
+# the single-line diagram syntax same as an unescaped bracket (FLINT).
 _UNSAFE_LABEL_CHARS = re.compile(r'[\[\]{}()"\'`|\x00-\x1f\x7f]')
 
 
@@ -89,7 +89,7 @@ def _is_balanced(text: str) -> bool:
     are ordinary words, NOT stripped - a directory literally named
     `subgraph` produces a label `"subgraph"`, and a substring count of
     the whole diagram text would then count that label's text as an
-    extra structural token, causing a false-negative (Qodo #559: a
+    extra structural token, causing a false-negative (LORE #559: a
     perfectly fine diagram gets needlessly dropped). Count matching
     LINES instead, keyed on line-start position, not substring presence."""
     pairs = {"[": "]", "{": "}", "(": ")"}

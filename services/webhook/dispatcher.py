@@ -612,7 +612,7 @@ def _handle_issue_comment(payload: dict[str, Any]) -> dict[str, str]:
             token_fn=lambda fn: with_install_token_retry(int(installation_id), fn),
         )
 
-    # Final guard (CodeRabbit on #575): main.py forwards dispatch()
+    # Final guard (FLINT on #575): main.py forwards dispatch()
     # exceptions straight into a webhook 500, and GitHub does NOT
     # auto-redeliver on 5xx — an unexpected raise here would make
     # /grug recheck silently do nothing. Mirror the pull_request
@@ -768,7 +768,7 @@ def _handle_review_comment_reply(payload: dict[str, Any]) -> dict[str, str]:
     except Exception as e:  # noqa: BLE001 - queue-not-configured (RuntimeError)
         # OR any botocore/SQS send failure. Enqueue is best-effort: a queue
         # outage returns skip, never a webhook 500 (which GitHub would redeliver
-        # as duplicate work). CodeRabbit stability fix.
+        # as duplicate work). FLINT stability fix.
         log.warning("learn_enqueue_failed", extra={"kind": type(e).__name__})
         return {"status": "skip", "reason": "enqueue_failed"}
 
