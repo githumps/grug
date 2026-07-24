@@ -688,6 +688,32 @@ def test_main_warms_trace_writer_before_spawning_threads(monkeypatch):
         consumer._stop.clear()
 
 
+def test_main_configures_structured_logging_not_bare_basicconfig(monkeypatch):
+    """2026-07-24 audit: main() used to call bare logging.basicConfig(),
+    which emits unparseable text that DD defaults to status:error for
+    EVERY line (verified live: 39097/39097 of grug-consumer's 7-day log
+    volume). It must call observability.configure_logging() instead - the
+    same JSON formatter webhook/api/poller already use."""
+    consumer._stop.clear()
+    calls: list[str] = []
+    monkeypatch.setattr("observability.configure_logging", lambda: calls.append("configured"))
+    monkeypatch.setattr(consumer, "_warm_trace_writer", lambda: None)
+
+    def _boom_startup():
+        raise SystemExit(1)
+
+    monkeypatch.setattr(consumer, "_startup_check", _boom_startup)
+    thread_ctor = MagicMock()
+    monkeypatch.setattr(consumer.threading, "Thread", thread_ctor)
+    try:
+        with pytest.raises(SystemExit):
+            consumer.main()
+        assert calls == ["configured"]
+        thread_ctor.assert_not_called()
+    finally:
+        consumer._stop.clear()
+
+
 def test_flush_traces_never_raises():
     """#412: span-flush is fail-safe - it runs in the consumer's hot watchdog
     loop and must never crash it, with or without ddtrace installed."""

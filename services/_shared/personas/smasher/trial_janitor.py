@@ -88,7 +88,14 @@ def _parse_ts(rfc3339: str) -> float | None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
+    # 2026-07-24 audit: bare basicConfig() emits unparseable text that DD's
+    # log pipeline defaults to status:error for every line (found via the
+    # identical bug in consumer.py - verified live: 39097/39097 misclassified
+    # over 7 days). configure_logging() is the same JSON formatter
+    # webhook/api/poller/consumer already use.
+    from observability import configure_logging
+
+    configure_logging()
     from personas.smasher.trial_runner import build_janitor_cluster
 
     cluster = build_janitor_cluster()

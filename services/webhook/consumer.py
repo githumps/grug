@@ -785,7 +785,17 @@ def _startup_check() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.getenv("GRUG_LOG_LEVEL", "INFO"))
+    # 2026-07-24 audit: this used to be a bare logging.basicConfig(), which
+    # emits Python's default "LEVEL:logger:message" text - DD's log pipeline
+    # can't parse a severity out of that format, so it defaulted EVERY line
+    # (INFO included) to status:error. Verified live: 39097/39097 of
+    # grug-consumer's 7-day log volume read as status:error before this fix.
+    # observability.configure_logging() is the same JSON formatter
+    # webhook/api/poller already use - it sets `level` from the real
+    # record.levelname, which DD's pipeline does parse correctly.
+    from observability import configure_logging
+
+    configure_logging()
 
     # Initialize the ddtrace writer on the MAIN thread BEFORE any poll thread
     # creates a (worker-thread) span (#406) - otherwise all consumer APM spans
