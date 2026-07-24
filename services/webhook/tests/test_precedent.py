@@ -111,6 +111,36 @@ class TestMatchPrecedent:
                             ledger_rows=rows)
         assert [pr for pr, _ in m.citations] == [366]
 
+    def test_null_pr_row_counts_for_precision_but_is_not_cited(self):
+        """#764: a consensus row written outside a PR context has pr=None.
+        It carries a real verdict, so it MUST move class precision - but it
+        cannot be rendered as "Grug saw this in PR #N", and letting None into
+        the citation dict would also raise on the (ts, pr) sort below."""
+        rows = [
+            _row(None, "c", "fixed", ts="2026-07-21T00:00:00Z"),
+            _row(366, "c", "fixed", ts="2026-06-01T00:00:00Z"),
+        ]
+        m = match_precedent(finding_class="c", finding_path="services/webhook/consumer.py",
+                            ledger_rows=rows)
+        # cited: only the row that actually has a PR number
+        assert [pr for pr, _ in m.citations] == [366]
+        # counted: both rows, so the evidence is not thrown away
+        assert m.labeled_history == 2
+        assert class_precision(rows)["c"].accepted == 2
+
+    def test_all_null_pr_rows_yield_precision_without_citations(self):
+        """The sort-crash guard: a corpus where EVERY matching row lacks a PR
+        must return cleanly with no citations, not raise comparing None to int."""
+        rows = [
+            _row(None, "c", "fixed", ts="2026-07-21T00:00:00Z"),
+            _row(None, "c", "false-positive", ts="2026-07-22T00:00:00Z"),
+        ]
+        m = match_precedent(finding_class="c", finding_path="services/webhook/consumer.py",
+                            ledger_rows=rows)
+        assert m.citations == ()
+        assert m.has_precedent is False
+        assert m.class_precision == 0.5  # 1 accepted / 2 labeled
+
 
 class TestRenderNote:
     def test_precedent_and_confidence_rendered(self):

@@ -139,6 +139,13 @@ def match_precedent(
         for r in ledger_rows:
             if r.finding_class != finding_class or not r.accepted:
                 continue
+            # A row with no PR number cannot be cited as "Grug saw this in
+            # PR #N", and mixing None into `by_pr` would also break the
+            # (ts, pr) sort below on None-vs-int comparison. It still counts
+            # toward class precision - that is tallied separately over all
+            # rows, so the evidence is kept even though the citation is not.
+            if r.pr is None:
+                continue
             row_tokens = _file_tokens(r.evidence) | _file_tokens(r.finding)
             if len(target & row_tokens) < _MIN_TOKEN_OVERLAP:
                 continue
