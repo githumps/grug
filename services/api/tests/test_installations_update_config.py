@@ -217,3 +217,50 @@ def test_repo_config_payload_rejects_unknown_field():
     must not have loosened this."""
     with pytest.raises(Exception):
         inst.RepoConfigPayload(tmp_enabled=True)  # typo: tmp not tpm
+
+
+def test_sparse_update_does_not_resurrect_a_paused_repo():
+    """FLINT on PR #751: `tpm_enabled` used to be
+    `bool = Field(default=True)` - required-with-default. A partial update
+    touching only another flag therefore carried `tpm_enabled=True` along
+    with it, which (a) un-paused a deliberately PAUSED repo and (b) fired
+    `_toggle_enforcement(enable=True)`, creating a branch ruleset on it.
+    Latent while the SPA always sent the field explicitly; activated the
+    moment several optional persona flags made partial updates natural.
+
+    Pins that a body carrying ONLY `sentinel_enabled` leaves tpm alone and
+    triggers no enforcement change on an already-paused repo."""
+    payload = inst.RepoConfigPayload(sentinel_enabled=True)
+    assert payload.tpm_enabled is None, "tpm_enabled must be optional, not default-True"
+
+    install = {"installed_by_user_id": "100"}
+
+    def _retry(install_id, fn):
+        return fn("tok")
+
+    fake_resp = _ok_resp({"repositories": [{"id": 42, "full_name": "myorg/myrepo"}]})
+
+    with patch("installations.get_installation", return_value=install):
+        with patch("installations.with_install_token_retry", side_effect=_retry):
+            with patch("httpx.Client") as client_cls:
+                client = client_cls.return_value.__enter__.return_value
+                client.get.return_value = fake_resp
+                # Repo is PAUSED before the call, and stays paused after
+                # (sparse merge leaves tpm_enabled alone).
+                with patch("installations.get_repo_config",
+                           return_value={"tpm_enabled": False}), \
+                     patch("installations.set_repo_config") as mock_set, \
+                     patch("installations._toggle_enforcement") as mock_toggle:
+                    mock_set.return_value = {
+                        "tpm_enabled": False, "sentinel_enabled": True,
+                    }
+                    inst.update_repo_config(
+                        install_id=1, repo_id=42,
+                        body=payload, user=_user(user_id="100"),
+                    )
+
+    # tpm forwarded as None = "leave stored value alone", not True.
+    assert mock_set.call_args.kwargs["tpm_enabled"] is None
+    assert mock_set.call_args.kwargs["sentinel_enabled"] is True
+    # The paused repo must NOT have been re-enforced.
+    mock_toggle.assert_not_called()

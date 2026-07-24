@@ -242,6 +242,9 @@ jobs:
       - name: Attester · RepoConfig _DEFAULT_PERSONA_CONFIG + is_persona_enabled (spec 0009)
         run: python3 infra/scripts/attest_repo_config_default_dict.py
 
+      - name: Attester · persona registry / API payload / dashboard coherence
+        run: python3 infra/scripts/attest_persona_surface_coherence.py
+
       - name: Attester · MirrorDiscipline Extracted-state consistency (spec 0010)
         run: python3 infra/scripts/attest_mirror_policy_consistency.py
 

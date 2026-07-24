@@ -7,7 +7,7 @@ Covers:
 - _ensure_can_access: int-vs-string user_id comparison robust
 - list_installations: returns user's installs from the gsi1pk-indexed lookup
 - list_installations: empty for user with no installs
-- RepoConfigPayload: tpm_enabled defaults True
+- RepoConfigPayload: tpm_enabled defaults None (sparse merge)
 - RepoConfigPayload: explicit false validates
 """
 
@@ -86,9 +86,21 @@ def test_list_installations_empty_for_user_with_none(_mod):
     assert out == {"installations": []}
 
 
-def test_repo_config_payload_default_tpm_enabled_true(_mod):
+def test_repo_config_payload_default_tpm_enabled_is_none(_mod):
+    """CONTRACT CHANGE (PR #751, FLINT): `tpm_enabled` used to default
+    to True. That made an omitted field indistinguishable from an explicit
+    "enable it", so a sparse update touching only another persona flag
+    silently un-paused a PAUSED repo and fired `_toggle_enforcement` to
+    create a branch ruleset on it.
+
+    It is now optional like every other flag: None means "leave the stored
+    value alone" (the store's sparse-merge contract), and the enforcement
+    branch reads the MERGED config rather than the request body. See
+    test_installations_update_config.py::
+    test_sparse_update_does_not_resurrect_a_paused_repo for the behavior
+    this default protects."""
     p = _mod.RepoConfigPayload()
-    assert p.tpm_enabled is True
+    assert p.tpm_enabled is None
 
 
 def test_repo_config_payload_explicit_false(_mod):

@@ -62,14 +62,26 @@ class RepoConfigPayload(BaseModel):
     that sends only `tpm_enabled` keeps working unchanged.
     """
     model_config = ConfigDict(extra="forbid")
-    tpm_enabled: bool = Field(default=True)
+    # OPTIONAL, like every other flag (FLINT, PR #751). It used to be
+    # `bool = Field(default=True)`, which was latent-safe only while the SPA
+    # always sent it explicitly. Once several optional persona flags exist, a
+    # partial update (e.g. just `sentinel_enabled`) is the natural shape - and
+    # a required-with-default field silently carries `tpm_enabled=True` along
+    # with it, un-pausing a deliberately PAUSED repo and firing
+    # `_toggle_enforcement(enable=True)` to create a branch ruleset on it.
+    # None = leave the stored value alone (the store's sparse-merge contract).
+    tpm_enabled: bool | None = Field(default=None)
+    code_reviewer_enabled: bool | None = Field(default=None)
+    code_reviewer_blocking: bool | None = Field(default=None)
     guard_enabled: bool | None = Field(default=None)
     guard_blocking: bool | None = Field(default=None)
     warder_enabled: bool | None = Field(default=None)
+    sentinel_enabled: bool | None = Field(default=None)
     pulse_enabled: bool | None = Field(default=None)
     smasher_enabled: bool | None = Field(default=None)
     walkthrough_enabled: bool | None = Field(default=None)
     dep_watch_enabled: bool | None = Field(default=None)
+    reopen_watch_enabled: bool | None = Field(default=None)
 
 
 class RerunRequest(BaseModel):
@@ -442,13 +454,17 @@ def update_repo_config(
         install_id=install_id, repo_id=repo_id,
         repo_full_name=full_name, tpm_enabled=body.tpm_enabled,
         updated_by_user_id=user.github_user_id,
+        code_reviewer_enabled=body.code_reviewer_enabled,
+        code_reviewer_blocking=body.code_reviewer_blocking,
         guard_enabled=body.guard_enabled,
         guard_blocking=body.guard_blocking,
         warder_enabled=body.warder_enabled,
+        sentinel_enabled=body.sentinel_enabled,
         pulse_enabled=body.pulse_enabled,
         smasher_enabled=body.smasher_enabled,
         walkthrough_enabled=body.walkthrough_enabled,
         dep_watch_enabled=body.dep_watch_enabled,
+        reopen_watch_enabled=body.reopen_watch_enabled,
     )
     log.info(
         "repo_config_updated",
@@ -460,7 +476,11 @@ def update_repo_config(
     )
 
     was_enabled = previous_cfg.get("tpm_enabled", True)
-    now_enabled = body.tpm_enabled
+    # Read the MERGED config, not the request body: on a sparse update the
+    # body's tpm_enabled is None and the stored value is what actually
+    # applies. Reading the body here would treat "not mentioned" as a change
+    # (FLINT, PR #751).
+    now_enabled = cfg.get("tpm_enabled", was_enabled)
     if now_enabled and not was_enabled:
         _toggle_enforcement(install_id, repo_id, full_name, default_branch, enable=True)
     elif was_enabled and not now_enabled:
