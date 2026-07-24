@@ -1401,15 +1401,7 @@ def release_review_claim(
     return row is not None
 
 
-def list_comment_records(install_id: int) -> list[CommentRecord]:
-    with get_pool().connection() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT pk, sk, data FROM grug_kv
-            WHERE pk = %s AND sk LIKE 'CRCOMMENT#%%' AND {TTL_LIVE}
-            """,
-            (_inst_pk(install_id),),
-        ).fetchall()
+def _decode_comment_record_rows(rows: list[tuple[Any, ...]]) -> list[CommentRecord]:
     out: list[CommentRecord] = []
     for pk, sk, data in rows:
         item = decode_item(pk, sk, data)
@@ -1433,6 +1425,37 @@ def list_comment_records(install_id: int) -> list[CommentRecord]:
             record["trust_reactors"] = True
         out.append(record)
     return out
+
+
+def list_comment_records(install_id: int) -> list[CommentRecord]:
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT pk, sk, data FROM grug_kv
+            WHERE pk = %s AND sk LIKE 'CRCOMMENT#%%' AND {TTL_LIVE}
+            """,
+            (_inst_pk(install_id),),
+        ).fetchall()
+    return _decode_comment_record_rows(rows)
+
+
+def list_comment_records_for_pr(
+    install_id: int, repo: str, pr_number: int,
+) -> list[CommentRecord]:
+    """CommentRecords for one PR (Sentinel's per-finding-resolution check,
+    grug#743 audit) - same key shape as list_comment_records, filtered by
+    the JSONB repo/pr_number fields rather than pulling the whole
+    install's 30-day comment history on every PR close event."""
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT pk, sk, data FROM grug_kv
+            WHERE pk = %s AND sk LIKE 'CRCOMMENT#%%'
+              AND data->>'repo' = %s AND (data->>'pr_number')::int = %s AND {TTL_LIVE}
+            """,
+            (_inst_pk(install_id), repo, pr_number),
+        ).fetchall()
+    return _decode_comment_record_rows(rows)
 
 
 def update_comment_record_reaction(
