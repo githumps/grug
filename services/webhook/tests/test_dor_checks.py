@@ -10,6 +10,7 @@ from personas.tpm.dor_checks import (
     check_acceptance,
     check_estimate,
     check_issue_link,
+    check_linked_issue_completeness,
     check_scope_fence,
     check_why,
     run_all,
@@ -130,11 +131,12 @@ def test_issue_link_missing():
     assert not check_issue_link("just text").passed
 
 
-def test_run_all_returns_5():
+def test_run_all_returns_6():
     results = run_all("")
-    assert len(results) == 5
+    assert len(results) == 6
     assert {r.name for r in results} == {
         "why", "acceptance", "estimate", "scope-fence", "issue-link",
+        "linked-issue-completeness",
     }
 
 
@@ -166,3 +168,79 @@ def test_heading_suffix_requires_word_boundary_no_false_match():
     assert not check_why("## Summarytext\n\nplenty of words here to clear five").passed
     # but a real `## Summary ...` still works
     assert check_why("## Summary of the change\n\nfive or more words present here").passed
+
+
+# --- check_linked_issue_completeness (#564) ---
+
+
+def test_linked_issue_no_closing_keyword_passes():
+    """PR body with no closing keyword -> pass (N/A, nothing to check)."""
+    body = "## Why\nthis is a real why\n## Acceptance criteria\n- [x] a\n- [x] b\n- [x] c\ncloses #1\n## Out of scope\nnothing\n**Size:** M"
+    # Remove the closing keyword to test the no-match path.
+    body_no_close = body.replace("closes #1\n", "")
+    r = check_linked_issue_completeness(body_no_close)
+    assert r.passed
+    assert "no linked issues" in r.detail
+
+
+def test_linked_issue_all_ticked_passes():
+    """One linked issue, all checkboxes ticked -> pass."""
+    body = "closes #42\n**Size:** M"
+    def fetcher(_num: int) -> str:
+        return "## Acceptance\n- [x] done one\n- [x] done two\n"
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert r.passed
+    assert "all checkboxes ticked" in r.detail
+
+
+def test_linked_issue_unchecked_nonexempt_fails():
+    """One linked issue with an unchecked non-exempt box -> fail, names issue+item."""
+    body = "closes #42\n**Size:** M"
+    def fetcher(_num: int) -> str:
+        return "## Acceptance\n- [x] done one\n- [ ] still open\n"
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert not r.passed
+    assert "#42" in r.detail
+    assert "still open" in r.detail
+
+
+def test_linked_issue_unchecked_under_exempt_heading_passes():
+    """An unchecked box under an exempt heading (Out of scope) -> pass."""
+    body = "closes #42\n**Size:** M"
+    def fetcher(_num: int) -> str:
+        return "## Out of scope\n- [ ] deferred item\n"
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert r.passed
+    assert "all checkboxes ticked" in r.detail
+
+
+def test_linked_issue_multiple_only_one_has_gap_fails():
+    """Multiple linked issues, only one has a gap -> fail, names the right one."""
+    body = "closes #10 closes #20\n**Size:** M"
+    def fetcher(num: int) -> str:
+        if num == 10:
+            return "## Acceptance\n- [x] done\n- [x] done2\n"
+        return "## Acceptance\n- [x] done\n- [ ] missing\n"
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert not r.passed
+    assert "#20" in r.detail
+    assert "#10" not in r.detail.split("#20")[0]  # #10 should not appear before #20
+    assert "missing" in r.detail
+
+
+def test_linked_issue_fetch_failure_fails_open():
+    """Fetch failure (exception) must fail OPEN, not block merge."""
+    body = "closes #42\n**Size:** M"
+    def fetcher(_num: int) -> str:
+        raise RuntimeError("network blip")
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert r.passed
+    assert "fail-open" in r.detail
+
+
+def test_linked_issue_no_fetcher_fails_open():
+    """No fetcher provided at all -> fail open."""
+    body = "closes #42\n**Size:** M"
+    r = check_linked_issue_completeness(body)
+    assert r.passed
+    assert "fail-open" in r.detail

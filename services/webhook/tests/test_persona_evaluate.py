@@ -113,7 +113,7 @@ def test_evaluate_pull_request_passes_on_good_body():
 
     assert evaluation.passed is True
     assert evaluation.conclusion == "success"
-    assert len(evaluation.results) == 5  # 5 dor checks
+    assert len(evaluation.results) == 6  # 6 dor checks
     assert all(r.passed for r in evaluation.results)
 
 
@@ -159,7 +159,7 @@ def test_evaluate_mixed_advisory_and_blocking_failure():
     assert scope.passed is False
     assert link.passed is False
     title, summary = persona._summary(list(evaluation.results))
-    assert title == "Hunt Plan hold - 1/5 plan checks fail"
+    assert title == "Hunt Plan hold - 1/6 plan checks fail"
 
 
 def test_summary_advisory_check_renders_warning_icon():

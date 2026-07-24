@@ -26,8 +26,8 @@ The vocabulary used in `services/`, `infra/`, and `web/`. Terms map to identifie
 
 | Term | Definition |
 |---|---|
-| **Hunt Plan** | Product name for Chief's gate: the standard a PR description must meet before the tribe leaves the cave. Enforced as five plan checks rolled into **`Grug - Chief`** (legacy GitHub alias `Grug - Definition of Ready` dual-posted during cutover). Industry jargon "Definition of Ready" / "DoR" is **not** used on product surfaces — only in historical code paths (`dor_checks.py`). |
-| **Plan check** | One rule on the Hunt Plan: `why`, `acceptance`, `estimate`, `scope-fence`, `issue-link`. Defined in [`services/_shared/personas/tpm/dor_checks.py`](services/_shared/personas/tpm/dor_checks.py). Four blocking; `issue-link` advisory. PR body section headings stay English (`## Why`, etc.) so authors and templates do not break. |
+| **Hunt Plan** | Product name for Chief's gate: the standard a PR description must meet before the tribe leaves the cave. Enforced as six plan checks rolled into **`Grug - Chief`** (legacy GitHub alias `Grug - Definition of Ready` dual-posted during cutover). Industry jargon "Definition of Ready" / "DoR" is **not** used on product surfaces — only in historical code paths (`dor_checks.py`). |
+| **Plan check** | One rule on the Hunt Plan: `why`, `acceptance`, `estimate`, `scope-fence`, `issue-link`, `linked-issue-completeness`. Defined in [`services/_shared/personas/tpm/dor_checks.py`](services/_shared/personas/tpm/dor_checks.py). Five blocking; `issue-link` advisory. PR body section headings stay English (`## Why`, etc.) so authors and templates do not break. |
 | **Seer** | The exploitability filter that grades candidate findings (was "judge" in older docs). Seer keep / suppress so Markings stay high signal. Not a standalone check-run. |
 | **Tribe check names** | Canonical GitHub check titles are `Grug - <Caveman>`: Chief, Elder, Guard, Warder, Smasher, Teller, Pulse. SSOT: `personas/tribe.py`. |
 | **CheckResult** | Outcome of one plan check against one PR body. Frozen dataclass — fields `name: str`, `passed: bool`, `detail: str`. Pass/fail only — no third "warn" state. Whether a failed check blocks merge is decided at rollup time by `_ADVISORY_CHECKS`, not by the check itself. |
@@ -107,7 +107,7 @@ The single copy of every cross-service module lives in `services/_shared/` - a P
 | `enforcement.py` | Enforcement lifecycle — `ensure_enforcement()` and `remove_enforcement()` wired from dispatcher + API. |
 | `adapters/install_store.py` | Facade re-exporting `pg_install_store.py` (Postgres single-table CRUD for `Installation` + `RepoConfig` + `AllowlistGate` reads) — import/patch paths preserved from the DDB era. |
 | `ports/token_cache.py` | `TokenCache` Protocol + `InMemoryTokenCache` impl. |
-| `personas/tpm/dor_checks.py` | The 5 `DoR check` rules + the `CheckResult` dataclass. |
+| `personas/tpm/dor_checks.py` | The 6 `DoR check` rules + the `CheckResult` dataclass. |
 | `personas/tpm/persona.py` | `TpmEvaluation` dataclass + `evaluate_pull_request(...)` entry point. |
 
 ## Infrastructure concepts

@@ -35,10 +35,34 @@ def dispatch_pull_request(ctx: PullRequestContext) -> dict[str, str]:
     """
     try:
         from personas.publish_check import PUBLISH_FAILED  # type: ignore
+        from personas.tpm.dor_checks import IssueFetcher  # type: ignore
         from personas.tpm.persona import (  # type: ignore
             evaluate_pull_request, publish_tpm_evaluation,
         )
-        evaluation = evaluate_pull_request(ctx.pr_body)
+        # Build a fetcher that reads issue bodies via the install token.
+        # This is the only impure boundary: evaluate_pull_request itself
+        # stays pure (spec 0002) -- the fetcher is a parameter, not a call
+        # inside the pure function.
+        def _fetch_issue_body(number: int) -> str:
+            from urllib.parse import quote
+            import httpx  # type: ignore
+            def _get(token: str) -> str:
+                r = httpx.get(
+                    f"https://api.github.com/repos/{quote(ctx.owner, safe='')}/"
+                    f"{quote(ctx.repo_name, safe='')}/issues/{number}",
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    timeout=10,
+                )
+                r.raise_for_status()
+                return (r.json() or {}).get("body") or ""
+            from github_app_auth import with_install_token_retry  # type: ignore
+            return with_install_token_retry(ctx.installation_id, _get)
+
+        fetcher: IssueFetcher | None = _fetch_issue_body
+        evaluation = evaluate_pull_request(ctx.pr_body, fetch_issue=fetcher)
         result_map = publish_tpm_evaluation(
             evaluation,
             installation_id=ctx.installation_id,

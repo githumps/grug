@@ -3,14 +3,14 @@
 
 Proves four bools against the real source files:
 
-  - `five_rules_exactly_no_more_no_less_per_process_gate_concepts`
+  - `six_rules_exactly_no_more_no_less_per_process_gate_concepts`
   - `name_field_is_one_of_five_canonical_rule_names_per_process_gate_concepts`
   - `rule_function_returns_check_result_not_class_method_per_process_gate_concepts`
   - `check_result_is_frozen_dataclass_per_process_gate_concepts`
 
 Asserts that `services/{api,webhook}/personas/tpm/dor_checks.py` each
-define exactly the 5 canonical `check_*` functions matching the rule
-names in CONTEXT.md § "Process-gate concepts" AND that the
+define exactly the 6 canonical `check_*` functions matching the rule
+names in CONTEXT.md section "Process-gate concepts" AND that the
 `CheckResult` dataclass is declared with `frozen=True` (peer-review HIGH
 found a frozen=False regression that spec 0006 falsely attested).
 Exits 1 on any drift.
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 CANONICAL_RULES: frozenset[str] = frozenset(
-    {"check_why", "check_acceptance", "check_estimate", "check_scope_fence", "check_issue_link"}
+    {"check_why", "check_acceptance", "check_estimate", "check_scope_fence", "check_issue_link", "check_linked_issue_completeness"}
 )
 
 DOR_CHECK_PATHS: tuple[Path, ...] = (
