@@ -33,6 +33,9 @@ def test_parse_row_maps_class_field():
 
 def test_parse_row_skips_missing_fields():
     assert parse_row({"repo": "x"}) is None
+    # Also the counterweight to #764: `pr` became optional so null rows stop
+    # being discarded, but a non-numeric pr is genuine corruption and must
+    # still skip. Loosening the null case must not loosen validation.
     assert parse_row({"pr": "notanint", "repo": "x", "reviewer": "c",
                       "class": "y", "finding": "z", "verdict": "fixed"}) is None
 
@@ -102,13 +105,56 @@ def test_reviewer_precision_no_findings_is_one():
 
 
 def test_parses_the_real_committed_ledger():
-    """Guard against format drift: the committed corpus must parse."""
+    """Guard against format drift: the committed corpus must parse.
+
+    The `>= 100` floor below is deliberately NOT the real guard - it passed
+    happily while 6 rows were being silently deleted (#764). The
+    every-line-parses assertion underneath is the one that bites: a row the
+    parser rejects is a row that vanishes from the learning corpus without
+    any error, so drift must fail loudly here rather than shrink the corpus.
+    """
     from pathlib import Path
     p = Path(__file__).resolve().parents[3] / "logs" / "review-ledger.jsonl"
-    rows = parse_jsonl(p.read_text())
+    text = p.read_text()
+    rows = parse_jsonl(text)
     assert len(rows) >= 100  # 150-row corpus at time of writing
     # every parsed row has the load-bearing fields
     assert all(r.repo and r.reviewer and r.finding_class and r.verdict for r in rows)
+
+    # ZERO silent drops: one parsed row per non-blank line, no exceptions.
+    non_blank = [ln for ln in text.splitlines() if ln.strip()]
+    dropped = [
+        ln for ln in non_blank if parse_row(json.loads(ln)) is None
+    ]
+    assert not dropped, (
+        f"{len(dropped)} committed ledger row(s) fail to parse and are being "
+        f"silently dropped from the corpus. First: {dropped[0][:200]}"
+    )
+    assert len(rows) == len(non_blank)
+
+
+def test_parse_row_accepts_null_pr():
+    """#764: a consensus finding written outside a PR context carries
+    `pr: null`. It is a real, verdict-bearing row - it must parse, not be
+    discarded as malformed."""
+    r = _row(pr=None)
+    assert isinstance(r, LedgerRow)
+    assert r.pr is None
+    # and it must still be labelable, which is the whole point
+    assert r.accepted is True
+    fp = _row(pr=None, verdict="false-positive")
+    assert isinstance(fp, LedgerRow)
+    assert fp.false_positive is True
+
+
+def test_parse_row_accepts_missing_pr_key():
+    """Absent key behaves the same as an explicit null - `pr` is optional."""
+    d = {
+        "repo": "quadseven/grug", "reviewer": "codex", "severity": "HIGH",
+        "class": "silent-failure", "finding": "x", "verdict": "fixed",
+    }
+    r = parse_row(d)
+    assert r is not None and r.pr is None
 
 
 def test_ledger_digest_is_content_stable():
@@ -123,3 +169,24 @@ def test_ledger_digest_is_content_stable():
     sk1 = _ledger_sk("silent-failure", 5, "codex", _ledger_digest(a))
     sk2 = _ledger_sk("silent-failure", 5, "codex", _ledger_digest(a))
     assert sk1 == sk2
+
+
+def test_ledger_sk_handles_null_pr():
+    """#764: a row with no PR must still get a stable, non-colliding sk.
+
+    `NOPR` is non-numeric on purpose. The corpus scan orders by
+    `sk COLLATE "C"` (raw byte order), where 'N' (0x4E) sorts after every
+    digit (0x30-0x39), so unattributed rows land at the END of their class
+    rather than in the middle of the PR sequence. A zero-padded sentinel
+    would be indistinguishable from a real PR #0.
+    """
+    from adapters.pg_install_store import _ledger_digest, _ledger_sk
+    d = _ledger_digest({"finding": "f", "ts": "t", "evidence": "e"})
+    none_sk = _ledger_sk("silent-failure", None, "codex", d)
+    assert "#NOPR#" in none_sk
+    # stable across calls (idempotent upsert)
+    assert none_sk == _ledger_sk("silent-failure", None, "codex", d)
+    # cannot collide with any real PR number, including 0
+    assert none_sk != _ledger_sk("silent-failure", 0, "codex", d)
+    # and sorts after every numeric pr within the same class
+    assert none_sk > _ledger_sk("silent-failure", 9999999, "codex", d)

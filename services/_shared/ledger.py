@@ -40,7 +40,14 @@ SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "MED": 2, "LOW": 3}
 @dataclass(frozen=True)
 class LedgerRow:
     repo: str
-    pr: int
+    # OPTIONAL. Not every finding comes from a pull request - multi-reviewer
+    # consensus rows written outside a PR context carry `pr: null`. Before
+    # #764 those rows raised TypeError in `int(d["pr"])` and `parse_row`
+    # swallowed it as "malformed", silently deleting them from the learning
+    # corpus; the 6 newest rows in the committed ledger were all invisible.
+    # A row without a PR still carries a real verdict, so it MUST count
+    # toward class precision - it just cannot be cited by number.
+    pr: int | None
     reviewer: str
     severity: str
     finding_class: str
@@ -65,7 +72,10 @@ def parse_row(d: dict) -> LedgerRow | None:
     try:
         return LedgerRow(
             repo=str(d["repo"]),
-            pr=int(d["pr"]),
+            # `pr` is optional (see LedgerRow.pr). Absent or null -> None,
+            # NOT a parse failure. Anything else still coerces, so a
+            # genuinely malformed value ("abc") still skips the row.
+            pr=int(d["pr"]) if d.get("pr") is not None else None,
             reviewer=str(d["reviewer"]),
             severity=str(d.get("severity", "")).upper(),
             finding_class=str(d["class"]),

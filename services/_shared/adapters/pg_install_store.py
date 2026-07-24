@@ -663,12 +663,20 @@ def _ledger_pk(repo: str) -> str:
     return f"LEDGER#{repo}"
 
 
-def _ledger_sk(finding_class: str, pr: int, reviewer: str, digest: str) -> str:
+def _ledger_sk(finding_class: str, pr: int | None, reviewer: str, digest: str) -> str:
     # zero-pad pr so lexicographic == numeric ordering within a class; the
     # trailing digest is CONTENT-derived (not ingest order) so the same
     # finding always maps to the same key - true idempotency across a
     # reordered corpus (LORE review #536).
-    return f"{finding_class}#{pr:07d}#{reviewer}#{digest}"
+    #
+    # `pr` may be None (#764): a consensus row written outside a PR context.
+    # `NOPR` is deliberately non-numeric - under the `COLLATE "C"` byte
+    # ordering the scan uses, 'N' (0x4E) sorts after every digit (0x30-0x39),
+    # so unattributed rows land at the end of their class instead of
+    # colliding with a real PR number. A zero-pad sentinel like 0000000
+    # would be indistinguishable from PR #0.
+    pr_part = f"{pr:07d}" if pr is not None else "NOPR"
+    return f"{finding_class}#{pr_part}#{reviewer}#{digest}"
 
 
 def _ledger_digest(row: dict[str, Any]) -> str:
@@ -697,8 +705,15 @@ def put_ledger_row(row: dict[str, Any]) -> None:
             """,
             {
                 "pk": _ledger_pk(repo),
-                "sk": _ledger_sk(str(row["class"]), int(row["pr"]),
-                                 str(row["reviewer"]), _ledger_digest(row)),
+                "sk": _ledger_sk(
+                    str(row["class"]),
+                    # Mirror parse_row: null/absent pr is a valid row, not a
+                    # crash. Without this the store raised TypeError on the
+                    # same rows parse_row was silently dropping (#764).
+                    int(row["pr"]) if row.get("pr") is not None else None,
+                    str(row["reviewer"]),
+                    _ledger_digest(row),
+                ),
                 "data": encode_attrs(dict(row)),
             },
         )
