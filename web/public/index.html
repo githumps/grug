@@ -445,7 +445,7 @@
     .codebx .k{ color:var(--tomato); font-weight:700; }
     .codebx .s{ color:var(--moss); }
 
-    /* ---------- Skills marketplace ---------- */
+    /* ---------- Skills ---------- */
     .market{ background:var(--bg-2); }
     .market-grid{
       display:grid; grid-template-columns: repeat(4, 1fr); gap:24px;
@@ -886,7 +886,7 @@
         <a href="#personas">Personas</a>
         <a href="#skills">Skills</a>
         <a href="#dashboard">Dashboard</a>
-        <a href="#pricing">Pricing</a>
+        <a href="#free">Free</a>
         <a href="https://github.com/quadseven/grug">Docs</a>
       </nav>
       <a class="btn" href="/signin">
@@ -1105,7 +1105,7 @@
           <span class="eyebrow">03 · the personas</span>
           <h2>Five Grugs. One <em>cave</em>.</h2>
         </div>
-        <p class="aside">// Each persona is its own Check Run. Require any of them in branch protection. Toggle per-repo. BYO model key on Pro.</p>
+        <p class="aside">// Each persona is its own Check Run. Require any of them in branch protection. Toggle per-repo. Bring your own model key if you self-host.</p>
       </div>
 
       <div class="persona-roster">
@@ -1206,7 +1206,7 @@
             <ul class="proster-list">
               <li><span><span class="mono">grug.config.ts</span> in repo root</span><span class="cap soon">SOON</span></li>
               <li><span>Reuse Grug's diff parser + GitHub plumbing</span><span class="cap soon">SOON</span></li>
-              <li><span>Publish to the marketplace if you want</span><span class="cap soon">SOON</span></li>
+              <li><span>Publish it for others if you want</span><span class="cap soon">SOON</span></li>
             </ul>
           </div>
         </article>
@@ -1215,10 +1215,10 @@
     <section id="skills" class="market" style="margin: 0 -28px; padding-left:28px; padding-right:28px;">
       <div class="sec-head">
         <div>
-          <span class="eyebrow">04 · skill marketplace</span>
+          <span class="eyebrow">04 &middot; skills</span>
           <h2>Teach Grug a <em>new trick</em>.<br>Or a <em>new tie</em>.</h2>
         </div>
-        <p class="aside">// Drop-in skills extend Grug. Some are capabilities (Terraform plan review, GraphQL breaking-change). Some are cosmetic skins. Classic Grug is free forever.</p>
+        <p class="aside">// Drop-in skills extend Grug. Some are capabilities (Terraform plan review, GraphQL breaking-change). Some are cosmetic skins. All of them are free.</p>
       </div>
 
       <p class="aside" style="max-width:780px; margin:0 0 22px; font-family:'JetBrains Mono', monospace; font-size:13px; color:var(--ink-2);">
@@ -1235,7 +1235,7 @@
             <p>Grug reads your Terraform changes before you apply them. Yells if you're about to delete a database, change permissions, or break something already running.</p>
           </div>
           <div class="foot">
-            <span class="price">$6/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1250,7 +1250,7 @@
             <p>Watches your GraphQL or OpenAPI schema. If a PR removes a field or renames a type that callers still use, Grug blocks the merge until someone owns the migration.</p>
           </div>
           <div class="foot">
-            <span class="price">$5/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1265,7 +1265,7 @@
             <p>Renders any UI components your PR touched and checks contrast, labels, and screen-reader behaviour. Won't let you ship a button no one can read.</p>
           </div>
           <div class="foot">
-            <span class="price">$4/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1280,7 +1280,7 @@
             <p>Reads your Postgres or MySQL migrations and warns about ones that lock big tables, can't be re-run, or have no rollback. Catches the migrations that take prod down at 2am.</p>
           </div>
           <div class="foot">
-            <span class="price">$5/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1304,7 +1304,7 @@
           </div>
         </article>
 
-        <!-- Pro -->
+        <!-- persona -->
         <article class="skill">
           <div class="art" style="background:#dde7f0;">
             <img src="assets/grug_professional.png" alt="Professional Grug, suit and tie" style="width:92%; transform:rotate(2deg); filter: drop-shadow(6px 7px 0 rgba(0,0,0,0.12));">
@@ -1317,7 +1317,7 @@
             <p>Suit and tie. Replaces caveman speak with passive-aggressive memos. For repos that take themselves seriously.</p>
           </div>
           <div class="foot">
-            <span class="price">$4/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1335,7 +1335,7 @@
             <p>Three haircuts and a leather jacket. Includes a "club smash" reaction GIF.</p>
           </div>
           <div class="foot">
-            <span class="price">$9 once</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1353,7 +1353,7 @@
             <p>Bring your own emoji set and override Grug's failure copy. For in-jokes and angrier teams.</p>
           </div>
           <div class="foot">
-            <span class="price">$3/mo</span>
+            <span class="price">free</span>
             <button class="add">+ ADD</button>
           </div>
         </article>
@@ -1511,72 +1511,35 @@
       </div>
     </section>
 
-    <!-- PRICING -->
-    <section id="pricing" class="pricing" style="margin: 0 -28px; padding-left:28px; padding-right:28px;">
+    <!-- FREE / OPEN SOURCE -->
+    <section id="free" class="pricing" style="margin: 0 -28px; padding-left:28px; padding-right:28px;">
       <div class="sec-head">
         <div>
-          <span class="eyebrow">06 · pricing</span>
-          <h2>Pay Grug, or <em>be Grug.</em></h2>
+          <span class="eyebrow">06 &middot; free</span>
+          <h2>Grug is <em>free.</em></h2>
         </div>
-        <p class="aside">// Self-host is free forever — Grug is AGPL-3.0. SaaS tiers exist because someone has to pay the AWS bill.</p>
+        <p class="aside">// Open source. No seats, no tiers, no invoice. Run the hosted App or host it yourself &mdash; same Grug either way.</p>
       </div>
-
-      <div class="price-grid">
+      <div class="tier-grid">
         <div class="tier">
-          <div class="name">Free</div>
-          <div class="price"><b>$0</b><span>/forever</span></div>
-          <ul class="feats">
-            <li>50 PR checks / day</li>
-            <li>Classic Grug skin</li>
-            <li>1 persona (Chief)</li>
-            <li>1 repo</li>
-            <li class="no">Custom reactions</li>
-            <li class="no">Multi-org</li>
+          <div class="name">Hosted App</div>
+          <div class="price"><b>$0</b></div>
+          <ul>
+            <li>Every persona, every repo</li>
+            <li>Check Runs your branch rules can require</li>
+            <li>One-click GitHub App install</li>
           </ul>
-          <a class="btn ghost pick" href="https://github.com/apps/grug-tribe/installations/new">Sign up →</a>
+          <a class="btn pick" href="https://github.com/apps/grug-tribe/installations/new">Add Grug &rarr;</a>
         </div>
-
-        <div class="tier pop">
-          <span class="stamp">GRUG PICK</span>
-          <div class="name">Pro</div>
-          <div class="price"><b>$12</b><span>/mo · per seat</span></div>
-          <ul class="feats">
-            <li>Unlimited PR checks</li>
-            <li>All personas</li>
-            <li>Up to 10 repos</li>
-            <li>Professional Grug skin</li>
-            <li>Custom reactions add-on</li>
-            <li class="no">Audit logs</li>
-          </ul>
-          <a class="btn pick" href="https://github.com/apps/grug-tribe/installations/new">Start Pro →</a>
-        </div>
-
         <div class="tier">
-          <div class="name">Org</div>
-          <div class="price"><b>$48</b><span>/mo · org</span></div>
-          <ul class="feats">
-            <li>Everything in Pro</li>
-            <li>Unlimited repos</li>
-            <li>Multi-org</li>
-            <li>Audit logs · SAML</li>
-            <li>Priority support</li>
-            <li>Custom personas (beta)</li>
-          </ul>
-          <a class="btn ghost pick" href="mailto:grug@grug.lol?subject=Grug%20Org%20plan">Talk to Grug →</a>
-        </div>
-
-        <div class="tier">
-          <div class="name serif" style="font-style:italic;">Self-host</div>
-          <div class="price"><b>$0</b><span>+ AWS bill (~$2/mo)</span></div>
-          <ul class="feats">
-            <li>AGPL-3.0 source</li>
-            <li>Pulumi up · 15 min</li>
-            <li>Your data, your VPC</li>
+          <div class="name">Self-host</div>
+          <div class="price"><b>$0</b><span>+ your own infra</span></div>
+          <ul>
+            <li>Bring your own models</li>
+            <li>Code never leaves your network</li>
             <li>All features unlocked</li>
-            <li class="no">Hosted SLA</li>
-            <li class="no">Skill marketplace</li>
           </ul>
-          <a class="btn ghost pick" href="https://github.com/quadseven/grug">Read the docs →</a>
+          <a class="btn ghost pick" href="https://github.com/quadseven/grug">Read the docs &rarr;</a>
         </div>
       </div>
     </section>
@@ -1631,9 +1594,9 @@
         <div class="foot-col">
           <h6>Product</h6>
           <a href="#features">Features</a>
-          <a href="#skills">Skills marketplace</a>
+          <a href="#skills">Skills</a>
           <a href="#dashboard">Dashboard</a>
-          <a href="#pricing">Pricing</a>
+          <a href="#free">Free</a>
         </div>
         <div class="foot-col">
           <h6>Open source</h6>
