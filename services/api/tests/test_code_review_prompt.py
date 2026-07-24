@@ -207,7 +207,7 @@ def test_positional_parse_drops_holes_rule_present():
 
 
 def test_doc_code_claim_drift_rule_present():
-    """Qodo/CR class: comment/env prose asserts wrong settle cap or bound."""
+    """LORE/CR class: comment/env prose asserts wrong settle cap or bound."""
     rule = next(
         (r for r in crp.RULES if r.name == "doc-code-claim-drift"),
         None,

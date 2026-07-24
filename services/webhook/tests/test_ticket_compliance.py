@@ -85,7 +85,7 @@ def test_multi_criteria_mixed():
 
 
 def test_checked_box_not_flagged():
-    """#535 Qodo: a CHECKED box is the author asserting done - never a
+    """#535 LORE: a CHECKED box is the author asserting done - never a
     candidate for 'unaddressed', so it can't false-positive."""
     body = "## Acceptance criteria\n- [x] add the nist ghsa merged feed\n- [ ] emit dogstatsd gauge\n"
     assert acceptance_criteria(body) == ["emit dogstatsd gauge"]

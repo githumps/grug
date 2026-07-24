@@ -430,7 +430,7 @@ def test_call_backend_cancel_event_aborts_in_flight_request() -> None:
         def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature; quiet test output
             pass
 
-    # ThreadingTCPServer (not TCPServer) + daemon_threads=True (CodeRabbit,
+    # ThreadingTCPServer (not TCPServer) + daemon_threads=True (FLINT,
     # #637): plain TCPServer.shutdown() blocks until the CURRENT request
     # finishes, so the abandoned 5s-sleeping handler would make every test
     # run pay close to the full 5s in teardown even though the assertions
@@ -773,7 +773,7 @@ def test_review_llm_timeout_default_covers_measured_slow_pass() -> None:
     assert lc._DEFAULT_REVIEW_TIMEOUT_SECONDS > 318
     # Compare against the REAL durable-job budget, not a hard-coded 720, so
     # the hierarchy assertion tracks consumer.py if the deadline ever moves
-    # (CodeRabbit on #625).
+    # (FLINT on #625).
     assert 2 * lc._MAX_REVIEW_TIMEOUT_SECONDS < consumer._review_job_timeout_s()
 
 
@@ -842,7 +842,7 @@ def test_cave_calls_carry_per_arm_caller_attribution(monkeypatch) -> None:
 
 
 def test_extra_headers_cannot_override_authorization(monkeypatch) -> None:
-    """CodeRabbit #618: extra_headers is caller-controlled config, not user
+    """FLINT #618: extra_headers is caller-controlled config, not user
     input, but a future backend accidentally setting Authorization in it
     (any case) must not silently replace the real bearer token - fail loud
     instead."""

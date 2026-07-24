@@ -667,7 +667,7 @@ def _ledger_sk(finding_class: str, pr: int, reviewer: str, digest: str) -> str:
     # zero-pad pr so lexicographic == numeric ordering within a class; the
     # trailing digest is CONTENT-derived (not ingest order) so the same
     # finding always maps to the same key - true idempotency across a
-    # reordered corpus (Qodo review #536).
+    # reordered corpus (LORE review #536).
     return f"{finding_class}#{pr:07d}#{reviewer}#{digest}"
 
 
@@ -854,7 +854,7 @@ def put_learning(
     # this value AS TEXT, and lexicographic == chronological only when every
     # stored stamp shares one format/offset. A caller-supplied stamp in
     # another offset or precision would misorder the newest-first prompt
-    # window (Qodo correctness).
+    # window (LORE correctness).
     now = _normalize_utc_iso(created_at)
     ttl = int(datetime.now(timezone.utc).timestamp() + _LEARNING_TTL_DAYS * 86400)
     with get_pool().connection() as conn:
@@ -919,7 +919,7 @@ def get_learning_by_source_comment(
     """The learning taught by a specific reply comment, or None. Lets an SQS
     redelivery detect that this reply was already classified-and-stored, so
     it skips the non-deterministic classifier instead of re-running it and
-    possibly storing a second, differently-worded rule (Qodo reliability)."""
+    possibly storing a second, differently-worded rule (LORE reliability)."""
     if not source_comment_id:
         return None
     for row in list_learnings(repo):
@@ -1031,7 +1031,7 @@ def release_dep_watch_report(install_id: int, repo: str) -> None:
 
 def _list_flag_enabled_repos(install_id: int, flag: str) -> list[dict[str, Any]]:
     """Repo rows with `flag`=true - the shared store-driven targeting
-    pattern used by Pulse/dep_watch/reopen_watch (CodeRabbit DRY finding,
+    pattern used by Pulse/dep_watch/reopen_watch (FLINT DRY finding,
     PR #744: list_dep_watch_repos and list_reopen_watch_repos were
     identical except for the flag column name)."""
     with get_pool().connection() as conn:

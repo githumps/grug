@@ -71,7 +71,7 @@ def test_ask_empty_question_posts_usage(monkeypatch):
 
 
 def test_ask_enqueues_async_not_inline(monkeypatch):
-    """#528 Qodo: the LLM Q&A must NOT run inline in the webhook path - ask
+    """#528 LORE: the LLM Q&A must NOT run inline in the webhook path - ask
     ENQUEUES to the consumer with the question + comment_id for dedup."""
     fake = _FakeHttp(); monkeypatch.setattr(interactive, "httpx", fake)
     asks = []
@@ -87,7 +87,7 @@ def test_ask_enqueues_async_not_inline(monkeypatch):
 
 
 def test_enqueue_failure_not_claimed(monkeypatch):
-    """#528 Qodo: claim happens AFTER enqueue, so an enqueue crash leaves the
+    """#528 LORE: claim happens AFTER enqueue, so an enqueue crash leaves the
     comment un-claimed (a retry can re-attempt) instead of silently lost."""
     monkeypatch.setattr(interactive, "httpx", _FakeHttp())
     claimed = []

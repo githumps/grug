@@ -1841,7 +1841,7 @@ def test_review_stack_and_summary_omit_empty_agent_prompt():
 
 
 def test_review_stack_degraded_empty_findings_not_nothing_to_remediate():
-    """CodeRabbit #665: degraded + empty findings is not a clean clear pass."""
+    """FLINT #665: degraded + empty findings is not a clean clear pass."""
     from personas.code_reviewer.persona import CodeReviewEvaluation
     ev = CodeReviewEvaluation(
         findings=(),
@@ -2314,7 +2314,7 @@ def test_deep_review_refreshes_stack_comment_with_tier1_findings(monkeypatch):
     """#730: the PR-timeline stack comment is refreshed after deep findings
     publish, so the canonical projection includes deep findings.
 
-    Regression for CodeRabbit finding: the deep-phase stack refresh must
+    Regression for FLINT finding: the deep-phase stack refresh must
     use the combined (Tier-1 + deep) evaluation, not just novel_deep, so
     Tier-1 findings are preserved in the refreshed stack body."""
     deep_llm = _deep_llm_with_finding()

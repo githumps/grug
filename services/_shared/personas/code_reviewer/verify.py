@@ -75,7 +75,7 @@ _CODE_EXECUTION_RE = re.compile(
 # Docs-class rule markers: these rules are ABOUT prose (claim drift, stale
 # comments, typos, broken links) and legitimately anchor in markdown - they
 # are exempt from the prose kill even when their slug or message quotes
-# execution vocabulary like "timeout" (CodeRabbit on PR #710: a
+# execution vocabulary like "timeout" (FLINT on PR #710: a
 # `doc-async-claim-drift` finding must survive on a .md file).
 _DOCS_CLASS_MARKERS = (
     "doc", "claim", "typo", "comment", "link", "readme", "changelog",
@@ -91,7 +91,7 @@ _ASYNC_FAMILY_MARKERS = ("in-async", "event-loop", "asyncio")
 
 # Code-ish tokens inside a suggestion: identifiers glued to call or attr
 # syntax. Ordinary prose words never match. Bare-assign tokens (timeout=)
-# are deliberately NOT extracted (CodeRabbit on PR #710): truncating
+# are deliberately NOT extracted (FLINT on PR #710): truncating
 # `timeout=30` to `timeout=` would match an unrelated `timeout=None` and
 # false-kill; without a value-aware representation the assign form cannot
 # prove the suggested fix is present.
@@ -172,7 +172,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
 
     # Prose kill. Docs-class rules (claim drift, typos, stale comments) are
     # exempt FIRST - they legitimately anchor in markdown even when their
-    # text quotes execution vocabulary (CodeRabbit on PR #710). For the
+    # text quotes execution vocabulary (FLINT on PR #710). For the
     # rest, the execution claim may live in the slug OR the prose (the PR
     # #706 instance was rule `unvalidated-external-input` with "command
     # injection" only in the message) - check both. The evidence here is
@@ -191,7 +191,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     if source is None:
         return None  # no evidence either way - keep
 
-    # Sync-context kill, tightened per CodeRabbit on PR #710: a lexically
+    # Sync-context kill, tightened per FLINT on PR #710: a lexically
     # sync def could still block a loop if an async caller invokes it
     # directly, so the kill additionally requires the MODULE to contain no
     # async code at all - then nothing in-file can put the flagged line on
@@ -209,7 +209,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     if finding.suggestion:
         tokens = _suggestion_tokens(finding.suggestion)
         if tokens:
-            # Anchor line ONLY (radius 0, CodeRabbit on PR #710): a wider
+            # Anchor line ONLY (radius 0, FLINT on PR #710): a wider
             # window let an unrelated neighboring `.strip()` prove the
             # wrong claim.
             window = _anchor_window(source, finding.line, radius=0)

@@ -313,7 +313,7 @@ def test_dispatch_degraded_summary_notes_it_and_emits_gauge(monkeypatch):
 
 
 def test_emit_degraded_metric_failure_is_logged_not_swallowed_silently(caplog):
-    """CodeRabbit: a bare except-pass on the gauge emit would hide a real
+    """FLINT: a bare except-pass on the gauge emit would hide a real
     import/signature bug in observability.emit_gauge indefinitely."""
     with patch("observability.emit_gauge", side_effect=RuntimeError("boom"), create=True), \
          caplog.at_level("DEBUG", logger="grug.persona.walkthrough"):
@@ -323,7 +323,7 @@ def test_emit_degraded_metric_failure_is_logged_not_swallowed_silently(caplog):
 
 
 def test_dispatch_truncated_and_degraded_hedges_the_check_run_summary(monkeypatch):
-    """CodeRabbit: record_check_verdict's summary must hedge 'at least N'
+    """FLINT: record_check_verdict's summary must hedge 'at least N'
     the same way the posted comment does - the Checks tab shouldn't show
     a capped count as exact when the comment body already says otherwise."""
     monkeypatch.setattr(

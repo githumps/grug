@@ -81,7 +81,7 @@ def test_entitled_voice_sage_granted_when_currently_entitled():
 
 
 def test_entitled_voice_sage_revoked_when_no_longer_entitled():
-    # The write-time gate can't revoke; use-time re-check must (Qodo #1).
+    # The write-time gate can't revoke; use-time re-check must (LORE #1).
     assert vp.entitled_voice(
         {"elder_voice": "sage"}, check_entitlement=lambda: False
     ) == "caveman"
@@ -125,7 +125,7 @@ def test_build_messages_defaults_to_caveman():
 
 
 def test_sage_prompt_build_degrades_instead_of_crashing_import(monkeypatch):
-    # A voice-swap failure must NOT crash llm_client import (Qodo #2): it would
+    # A voice-swap failure must NOT crash llm_client import (LORE #2): it would
     # take down every review, not just the paid voice. Degrade to caveman.
     def _boom(prompt, voice):
         raise ValueError("caveman VOICE block not found")

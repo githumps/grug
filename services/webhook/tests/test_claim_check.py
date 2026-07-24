@@ -1,4 +1,4 @@
-"""Tests for deterministic docs/code claim consistency (Qodo/CR class)."""
+"""Tests for deterministic docs/code claim consistency (LORE/CR class)."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ _DEEP_INCLUSIVE = (
 
 class TestSettleCapDrift:
     def test_flags_comment_claiming_5_when_code_is_3(self):
-        """The exact #664 Qodo miss: k8s comment says 5s, code is min(base, 3)."""
+        """The exact #664 LORE miss: k8s comment says 5s, code is min(base, 3)."""
         hunks = (
             _hunk(
                 "k8s/webhook-deployment.yaml",
@@ -256,7 +256,7 @@ class TestNonClaimNoise:
         assert out == ()
 
     def test_fixture_added_gt_threshold_does_not_poison_deep_fact(self):
-        """CodeRabbit: test/fixture files must not overwrite policy facts."""
+        """FLINT: test/fixture files must not overwrite policy facts."""
         hunks = (
             _hunk(
                 "k8s/consumer-deployment.yaml",

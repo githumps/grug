@@ -24,7 +24,7 @@ _CLOSES_RE = re.compile(r"\b(?:closes|closed|close|fixes|fixed|fix|resolves|reso
 # UNCHECKED acceptance-criteria lines only: `- [ ] text`. A CHECKED box
 # (`- [x]`) is the author asserting that criterion is already done -
 # flagging it would contradict them and manufacture false positives
-# (Qodo review #535), so only open boxes are cross-checked.
+# (LORE review #535), so only open boxes are cross-checked.
 _BOX_RE = re.compile(r"^\s*[-*]\s*\[ \]\s+(.+?)\s*$")
 # Words too generic to be distinctive signal.
 #

@@ -231,7 +231,7 @@ def test_get_app_id_exposes_the_private_accessor(_stub_secrets):
 
 
 def test_app_id_strips_whitespace_from_the_raw_ssm_value(monkeypatch):
-    """Qodo review, PR #694: _get_ssm_secure_string does no normalization,
+    """LORE review, PR #694: _get_ssm_secure_string does no normalization,
     unlike several other SSM reads in secrets_loader.py. A stray trailing
     newline in the SSM parameter would make every performed_via_github_
     app.id string comparison in _find_marker_comment (#554/#560/#561)

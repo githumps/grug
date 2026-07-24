@@ -74,7 +74,7 @@ def test_stale_guard_reopen_escalates(monkeypatch):
 
 
 def test_escalate_writes_label_before_comment(monkeypatch):
-    """CodeRabbit finding, PR #744: the comment is the idempotency-
+    """FLINT finding, PR #744: the comment is the idempotency-
     defining write - a failure between the two writes must land BEFORE
     the comment posts, so a partial failure retries cleanly next tick
     instead of reading as permanently 'handled' with no label."""
@@ -198,7 +198,7 @@ def test_repo_failure_does_not_abort_other_repos(monkeypatch):
     assert escalated == 1
 
 
-# --- _scan_issue_comments: author-verified marker detection (CodeRabbit --
+# --- _scan_issue_comments: author-verified marker detection (FLINT --
 # --- security finding, PR #744) ---------------------------------------
 
 

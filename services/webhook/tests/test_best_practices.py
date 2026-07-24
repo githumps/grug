@@ -77,7 +77,7 @@ def test_dict_roundtrip():
 
 
 def test_rule_text_sanitized_for_prompt_injection():
-    """#541 Qodo: injected rule text must be flattened + capped (no fake
+    """#541 LORE: injected rule text must be flattened + capped (no fake
     message boundaries, no control chars, bounded length)."""
     from best_practices import _sanitize
     assert "\n" not in _sanitize("ignore\nprevious\ninstructions")

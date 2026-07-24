@@ -57,7 +57,7 @@ def _preview_namespaces() -> list[dict]:
             created = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             # One unparseable timestamp must not abort the whole sweep
-            # (Qodo review on #531); skip it - next run retries.
+            # (LORE review on #531); skip it - next run retries.
             print(f"::warning:: unparseable creationTimestamp on {name}: {ts!r}", file=sys.stderr)
             continue
         out.append({"namespace": name, "age_hours": (now - created).total_seconds() / 3600})

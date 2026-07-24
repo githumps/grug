@@ -29,7 +29,7 @@ def _app_id() -> str:
     # parameter would make every performed_via_github_app.id string
     # comparison in _find_marker_comment (#554/#560/#561) fail forever,
     # silently duplicating marker comments instead of matching our own
-    # (Qodo review, PR #694).
+    # (LORE review, PR #694).
     return _get_ssm_secure_string(os.environ["GITHUB_APP_ID_SSM"]).strip()
 
 

@@ -1143,7 +1143,7 @@ def _post_with_retries_cancellable(
         except Exception as e:  # noqa: BLE001 - re-raised on the waiting side
             result_q.put(("error", e))
 
-    # Re-check immediately before spawning (CodeRabbit, #637): _call_backend's
+    # Re-check immediately before spawning (FLINT, #637): _call_backend's
     # own top-level guard only catches cancellation that was ALREADY set
     # before key_loader()/body/header construction ran - if it fires during
     # that window, this is the last chance to skip starting a doomed
@@ -1795,9 +1795,9 @@ def _render_learnings_block(rows: list[dict[str, Any]], *, max_chars: int = 1400
             continue
         # Redact secret-shaped values PER ROW, before sanitize + the byte
         # truncation below, so a secret cannot leak a partial value at a cut
-        # boundary (CodeRabbit security). Sanitize BOTH text and the scope
+        # boundary (FLINT security). Sanitize BOTH text and the scope
         # glob: scope is classifier-produced from an untrusted reply, so
-        # newlines/control chars there widen the injection surface too (Qodo).
+        # newlines/control chars there widen the injection surface too (LORE).
         text = _sanitize(_redact_secrets(text))
         scope = _sanitize(_redact_secrets(str(row.get("scope_path", "")).strip()))
         prefix = f"({scope}) " if scope else ""
@@ -1827,7 +1827,7 @@ def _team_practices_block(pr_context: Optional[PrContext]) -> str:
         if not rows:
             return ""
         block = practices_block(practices_from_dicts(rows))
-        # Redact secret-shaped values (#541 Qodo): the block is ledger-derived
+        # Redact secret-shaped values (#541 LORE): the block is ledger-derived
         # and now rides the SYSTEM prompt to a third-party backend - a finding
         # could quote a committed credential. Same guard the user content uses.
         return _redact_secrets(block) if block else ""
@@ -2476,7 +2476,7 @@ def _run_review_arm(
                 metrics={"latency_ms": _elapsed_ms(cfg_start_ns)},
                 tags=pr_tags,
             )
-        # log.exception (not log.error) retains the traceback - CodeRabbit
+        # log.exception (not log.error) retains the traceback - FLINT
         # #629, ruff TRY400 - same fix already applied to the SaaS-fallback
         # block below.
         log.exception("llm_backend_misconfigured", extra={"backend": backend.value, "detail": str(e)})
@@ -2500,7 +2500,7 @@ def _run_review_arm(
             resp = _call_backend(config, messages, cancel_event=cancel_event)
         except _BackendConfigError as e:
             # log.exception (not log.error) retains the traceback -
-            # CodeRabbit #629, ruff TRY400.
+            # FLINT #629, ruff TRY400.
             log.exception(
                 "llm_backend_misconfigured",
                 extra={"backend": backend.value, "detail": str(e)},
@@ -2962,7 +2962,7 @@ def _review_diff_dispatch(
                     resp = _call_backend(config, messages)
                 except _BackendConfigError as e:
                     # log.exception (not log.error) retains the traceback -
-                    # CodeRabbit #629, ruff TRY400.
+                    # FLINT #629, ruff TRY400.
                     log.exception(
                         "llm_backend_misconfigured",
                         extra={"backend": backend.value, "detail": str(e)},

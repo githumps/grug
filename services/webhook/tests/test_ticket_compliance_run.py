@@ -171,7 +171,7 @@ def test_find_marker_comment_ignores_user_authored_decoy(monkeypatch):
 
 
 def test_find_marker_comment_logs_when_scan_cap_exhausted(monkeypatch, caplog):
-    """Qodo review, PR #694: giving up at the 20-page cap without finding
+    """LORE review, PR #694: giving up at the 20-page cap without finding
     the marker must be distinguishable from the ordinary 'no marker' exit
     - silent here means an unbounded duplicate-comment bug on an extreme
     PR (>2000 comments) would go unnoticed forever, mirroring

@@ -2,7 +2,7 @@
 
 Distinct vocabulary from `review_types.Effort` (a per-FINDING fix-effort
 hint) - this is a whole-PR REVIEW-time estimate, LORE's "40+ Minutes" /
-CodeRabbit's "~60 minutes" chip. A deterministic file/line-count
+FLINT's "~60 minutes" chip. A deterministic file/line-count
 heuristic is the reliable baseline; the model's own judgment (returned
 alongside its summary) overrides it ONLY when the value is itself in the
 closed set - the same coercion-degrades-to-fallback discipline as #553,
