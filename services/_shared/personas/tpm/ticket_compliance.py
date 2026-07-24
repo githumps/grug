@@ -27,11 +27,36 @@ _CLOSES_RE = re.compile(r"\b(?:closes|closed|close|fixes|fixed|fix|resolves|reso
 # (Qodo review #535), so only open boxes are cross-checked.
 _BOX_RE = re.compile(r"^\s*[-*]\s*\[ \]\s+(.+?)\s*$")
 # Words too generic to be distinctive signal.
+#
+# Bug (found 2026-07-24, live audit of grug#730/PR#734): this list used to be
+# a small hand-rolled set that MISSED ordinary English connectors like "but"
+# and "after" - so e.g. issue #730's unchecked criterion "Failure after model
+# completion but before publication is observable..." spuriously overlapped
+# a PR body/diff that never touched retry/idempotency at all, just because
+# "after" and "but" showed up somewhere incidental. Since `unaddressed_criteria`
+# only flags a criterion when its token set is NON-empty AND has ZERO overlap
+# with the diff signals, under-stopping can only ever suppress real findings
+# (spurious "addressed" matches) - it can never manufacture a false positive,
+# so this list should err toward completeness. Now a standard English
+# stopword set (NLTK's default `stopwords.words("english")`) merged with the
+# original domain-specific additions. The tokenizer (`_TOKEN_RE`) doesn't
+# match apostrophes, so contractions split at the apostrophe (e.g. "don't"
+# -> "don" + "t") - the stemmed halves are included below too.
 _STOP = frozenset("""
-a an the and or of to in on for with without via per is are be that this it
-its into from as at by not no new add adds added remove removes update updates
-should must when then than only ever never each any all both onto over under done works work exists present verified check checked
-uses use set sets get gets run runs make makes so speaks grug
+i me my myself we our ours ourselves you your yours yourself yourselves
+he him his himself she her hers herself it its itself they them their
+theirs themselves what which who whom this that these those am is are
+was were be been being have has had having do does did doing a an the
+and but if or because as until while of at by for with about against
+between into through during before after above below to from up down in
+out on off over under again further then once here there when where why
+how all any both each few more most other some such no nor not only own
+same so than too very s t can will just don should now d ll m o re ve y
+ain aren couldn didn doesn hadn hasn haven isn ma mightn mustn needn
+shan shouldn wasn weren won wouldn
+add adds added remove removes update updates onto done works work exists
+present verified check checked uses use set sets get gets run runs make
+makes speaks grug
 """.split())
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 
@@ -80,15 +105,33 @@ def diff_signals(changed_files: list[str], extra_text: str = "") -> set[str]:
     return sig
 
 
+_MIN_MATCH_TOKENS = 2
+
+
 def unaddressed_criteria(criteria: list[str], signals: set[str]) -> list[str]:
-    """Criteria whose distinctive tokens have NO overlap with the diff
-    signals - conservatively 'looks unaddressed'. A criterion with no
-    distinctive tokens of its own (all stopwords) is never flagged (we
-    can't judge it)."""
+    """Criteria whose distinctive tokens don't overlap the diff signals
+    ENOUGH to call them addressed - conservatively 'looks unaddressed'. A
+    criterion with no distinctive tokens of its own (all stopwords) is
+    never flagged (we can't judge it).
+
+    Requires at least `_MIN_MATCH_TOKENS` overlapping tokens, not just one.
+    Found live (2026-07-24, grug#730/PR#734): a single shared word is weak
+    evidence - two DIFFERENT criteria in the same issue can each contain
+    one word that also happens to appear in the PR's prose for an
+    unrelated reason (e.g. a criterion about failure-recovery matches on
+    "failure" alone because the diff mentions an unrelated "capture
+    failure" case), so a lone-token match let genuinely-unaddressed
+    criteria read as done. A criterion whose own distinctive vocabulary is
+    smaller than the threshold (rare) can't be held to a bar it
+    structurally cannot clear, so the bar is capped at its own token count.
+    """
     out = []
     for c in criteria:
         toks = _tokens(c)
-        if toks and not (toks & signals):
+        if not toks:
+            continue
+        needed = min(_MIN_MATCH_TOKENS, len(toks))
+        if len(toks & signals) < needed:
             out.append(c)
     return out
 
