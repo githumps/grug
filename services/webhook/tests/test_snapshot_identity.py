@@ -5,6 +5,7 @@ from __future__ import annotations
 from personas.code_reviewer.snapshot import (
     adaptive_elder_settle_seconds,
     normalize_intent_text,
+    review_freshness_id_from_pr,
     review_snapshot_id,
     review_snapshot_id_from_pr,
 )
@@ -117,3 +118,65 @@ def test_review_snapshot_id_from_pr_uses_normalized_body():
         "body": "intent",
     }
     assert review_snapshot_id_from_pr(pr) == review_snapshot_id_from_pr(pr2)
+
+
+# --- Base-branch churn must not cancel in-flight reviews -------------------
+# Regression tests for the Elder stall measured on quadseven/infra 2026-07-25:
+# eight merges in one session left Elder unable to publish on multiple PRs,
+# logging `code_review_stale_before_publish` with reviewed_head_sha ==
+# current_head_sha and only the snapshot differing. Root cause: `base_sha` is
+# the base-branch TIP, so every unrelated merge changed the snapshot_id of
+# EVERY open PR and cancelled their in-flight reviews.
+
+
+def _pr(*, base_sha: str, head_sha: str = "aaa111", title: str = "t", body: str = "b"):
+    return {
+        "base": {"sha": base_sha},
+        "head": {"sha": head_sha},
+        "title": title,
+        "body": body,
+    }
+
+
+def test_base_branch_move_changes_snapshot_id():
+    """Pins the CAUSE, so nobody 'simplifies' freshness back onto snapshot_id."""
+    a = review_snapshot_id_from_pr(_pr(base_sha="base_before"))
+    b = review_snapshot_id_from_pr(_pr(base_sha="base_after"))
+    assert a != b, "snapshot_id is expected to include base_sha"
+
+
+def test_base_branch_move_does_not_change_freshness_id():
+    """The fix: an unrelated merge must NOT invalidate a review."""
+    a = review_freshness_id_from_pr(_pr(base_sha="base_before"))
+    b = review_freshness_id_from_pr(_pr(base_sha="base_after"))
+    assert a == b, (
+        "a merge to the base branch cancelled an in-flight Elder review of "
+        "unchanged code - this is the stall from 2026-07-25"
+    )
+
+
+def test_new_commit_still_invalidates_freshness():
+    """Do not fix the stall by making freshness permanently constant."""
+    a = review_freshness_id_from_pr(_pr(base_sha="b", head_sha="aaa111"))
+    b = review_freshness_id_from_pr(_pr(base_sha="b", head_sha="bbb222"))
+    assert a != b, "a real push must still supersede an in-flight review"
+
+
+def test_intent_edits_still_invalidate_freshness():
+    """Title/body are the author's stated intent and still count."""
+    base = _pr(base_sha="b", title="orig", body="orig body")
+    assert review_freshness_id_from_pr(base) != review_freshness_id_from_pr(
+        _pr(base_sha="b", title="rewritten", body="orig body")
+    )
+    assert review_freshness_id_from_pr(base) != review_freshness_id_from_pr(
+        _pr(base_sha="b", title="orig", body="rewritten body")
+    )
+
+
+def test_freshness_still_ignores_bot_footers():
+    """The v2 HTML-comment normalisation must survive on the freshness path."""
+    a = review_freshness_id_from_pr(_pr(base_sha="b", body="## Why\n\nreal intent"))
+    b = review_freshness_id_from_pr(
+        _pr(base_sha="b", body="## Why\n\nreal intent\n\n<!-- bot footer -->")
+    )
+    assert a == b

@@ -1096,9 +1096,9 @@ def test_fetch_pr_diff_falls_back_when_immutable_compare_is_unavailable(
 
 def test_durable_dispatch_cancels_if_intent_moves_during_inference(monkeypatch):
     payload = _payload(action="review")
-    initial_id = cr_dispatch.review_snapshot_id_from_pr(payload["pull_request"])
+    initial_id = cr_dispatch.review_freshness_id_from_pr(payload["pull_request"])
     changed_pr = {**payload["pull_request"], "body": "Changed intent"}
-    changed_id = cr_dispatch.review_snapshot_id_from_pr(changed_pr)
+    changed_id = cr_dispatch.review_freshness_id_from_pr(changed_pr)
     monkeypatch.setattr(
         cr_dispatch,
         "review_diff",
@@ -1130,9 +1130,16 @@ def test_durable_dispatch_cancels_if_intent_moves_during_inference(monkeypatch):
 
 
 def test_durable_dispatch_rejects_stale_input_before_inference(monkeypatch):
+    # Was asserted against a base-sha-only change, which ENCODED the bug fixed
+    # in the base-churn PR: an unrelated merge to the base branch cancelled a
+    # review of unchanged code. Staleness now means the author pushed new code
+    # or rewrote their intent, so this drives it with a real head change.
     payload = _payload(action="review")
-    current_pr = {**payload["pull_request"], "base": {"sha": "new-base"}}
-    current_id = cr_dispatch.review_snapshot_id_from_pr(current_pr)
+    current_pr = {
+        **payload["pull_request"],
+        "head": {**payload["pull_request"]["head"], "sha": "newhead0000"},
+    }
+    current_id = cr_dispatch.review_freshness_id_from_pr(current_pr)
     monkeypatch.setattr(
         cr_dispatch,
         "_fetch_current_review_snapshot",
@@ -1161,7 +1168,7 @@ def test_durable_dispatch_rejects_ineligible_pr_before_inference(
     monkeypatch, state, draft,
 ):
     payload = _payload(action="review")
-    snapshot_id = cr_dispatch.review_snapshot_id_from_pr(payload["pull_request"])
+    snapshot_id = cr_dispatch.review_freshness_id_from_pr(payload["pull_request"])
     monkeypatch.setattr(
         cr_dispatch,
         "_fetch_current_review_snapshot",
