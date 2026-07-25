@@ -76,7 +76,6 @@ from personas.code_reviewer.persona import (
     CodeReviewEvaluation, Finding, evaluate_diff, with_extra_findings, with_findings,
 )
 from personas.code_reviewer.snapshot import review_freshness_id_from_pr
-from personas.code_reviewer.snapshot import review_snapshot_id_from_pr
 from personas.code_reviewer.verify import verify_findings
 from personas.tribe import CHECK_ELDER
 from adapters.install_store import (  # type: ignore
