@@ -395,6 +395,24 @@ def list_installation_repos(install_token: str) -> list[dict]:
         if not repos:
             break
         for r in repos:
+            # ARCHIVED repos are excluded from the denominator. GitHub
+            # rejects every write to an archived repo, so grug can never
+            # create the ruleset that would make it enforced - it emits
+            # `enforcement_type:none` forever and pins the enforcement-gap
+            # monitor red permanently. Live proof: `quadseven/grugthink`
+            # was archived 2026-07-18 and the monitor has been in Alert
+            # since 2026-07-17T21:21, unfixable by any action.
+            #
+            # This is a DENOMINATOR correctness fix, not a way to hide a
+            # gap: an archived repo has no PRs to merge, so there is no
+            # enforcement to be missing. The other two repos in that alert
+            # are live and genuinely unenforced - they stay counted.
+            if r.get("archived"):
+                log.info(
+                    "installation_repo_archived_skipped",
+                    extra={"repo": r.get("full_name", "")},
+                )
+                continue
             out.append({
                 "id": r.get("id"),
                 "full_name": r.get("full_name", ""),

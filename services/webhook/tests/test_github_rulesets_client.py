@@ -635,6 +635,39 @@ def test_list_installation_repos_single_page_shape_and_auth():
     assert headers["Authorization"] == "Bearer tok"
 
 
+def test_list_installation_repos_excludes_archived():
+    """An archived repo can never be enforced - GitHub rejects every write
+    to it, so grug cannot create the ruleset that would make it green. Left
+    in the denominator it emits `enforcement_type:none` forever and pins the
+    enforcement-gap monitor red permanently. Live case: quadseven/grugthink
+    was archived 2026-07-18; the monitor alerted from 2026-07-17T21:21 with
+    no action able to clear it."""
+    from github_rulesets_client import list_installation_repos
+
+    body = {"total_count": 3, "repositories": [
+        {"id": 10, "full_name": "o/live", "default_branch": "main"},
+        {"id": 11, "full_name": "o/archived", "default_branch": "main", "archived": True},
+        {"id": 12, "full_name": "o/also-live", "default_branch": "main", "archived": False},
+    ]}
+    with patch("httpx.get", return_value=_ok_response(body)):
+        out = list_installation_repos("tok")
+    assert [r["full_name"] for r in out] == ["o/live", "o/also-live"]
+
+
+def test_list_installation_repos_absent_archived_key_is_not_archived():
+    """Defensive: a payload without the key must count as LIVE, not be
+    silently dropped. Excluding on a missing field would empty the whole
+    denominator and read as 'everything enforced'."""
+    from github_rulesets_client import list_installation_repos
+
+    body = {"total_count": 1, "repositories": [
+        {"id": 10, "full_name": "o/a", "default_branch": "main"},
+    ]}
+    with patch("httpx.get", return_value=_ok_response(body)):
+        out = list_installation_repos("tok")
+    assert [r["full_name"] for r in out] == ["o/a"]
+
+
 def test_list_installation_repos_paginates_until_short_page():
     from github_rulesets_client import list_installation_repos
 
