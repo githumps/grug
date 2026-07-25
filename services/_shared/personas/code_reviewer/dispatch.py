@@ -75,6 +75,7 @@ from personas.code_reviewer.judge import (
 from personas.code_reviewer.persona import (
     CodeReviewEvaluation, Finding, evaluate_diff, with_extra_findings, with_findings,
 )
+from personas.code_reviewer.snapshot import review_freshness_id_from_pr
 from personas.code_reviewer.snapshot import review_snapshot_id_from_pr
 from personas.code_reviewer.verify import verify_findings
 from personas.tribe import CHECK_ELDER
@@ -214,7 +215,9 @@ def _fetch_current_review_snapshot(
     if not head_sha:
         raise ValueError("GitHub PR response has no head SHA")
     return (
-        review_snapshot_id_from_pr(body),
+        # Freshness, not full snapshot: a base-branch move must not
+        # invalidate a review of unchanged code. See review_freshness_id.
+        review_freshness_id_from_pr(body),
         head_sha,
         str(body.get("state") or ""),
         bool(body.get("draft", False)),
@@ -1421,7 +1424,9 @@ def dispatch_code_review(
     author_login = str((pr.get("user") or {}).get("login") or "")
     installation_id = int(installation["id"])
     base_sha = str((pr.get("base") or {}).get("sha", ""))
-    snapshot_id = review_snapshot_id_from_pr(pr)
+    # Base-insensitive: every merge to the base branch used to change this
+    # and cancel every in-flight review. See review_freshness_id.
+    snapshot_id = review_freshness_id_from_pr(pr)
     pr_context: PrContext = {
         "installation_id": installation_id,
         "repo": f"{owner}/{repo_name}",

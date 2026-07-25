@@ -71,6 +71,66 @@ def review_snapshot_id_from_pr(pr: Mapping[str, Any]) -> str:
     )
 
 
+def review_freshness_id(
+    *,
+    head_sha: str,
+    title: str,
+    body: str,
+) -> str:
+    """Identity for "is an in-flight review still worth publishing?".
+
+    Deliberately EXCLUDES base_sha, which is the one input the PR author does
+    not control and which changes constantly on a busy repo.
+
+    `base_sha` is `pr.base.sha`, the base branch TIP. It moves every time ANY
+    other PR merges to the base branch. Because `review_snapshot_id` hashes it,
+    a single merge to main changed the snapshot_id of EVERY open PR, which made
+    every in-flight Elder review look stale, which cancelled it, which
+    re-enqueued it against the same head - and on a repo with a busy afternoon
+    that loop never converges.
+
+    Measured on quadseven/infra 2026-07-25: eight merges in one session, and
+    Elder failed to publish on multiple PRs with `reviewed_head_sha ==
+    current_head_sha` and only the snapshot differing. The user-facing error
+    even read "superseded by a newer commit" when no new commit existed.
+
+    What still invalidates a review, and should:
+      * head_sha  - the author pushed new code
+      * title     - stated intent changed
+      * body      - stated intent changed
+
+    What no longer does:
+      * base_sha  - somebody else merged something unrelated
+
+    The trade-off is explicit: a base move CAN change the effective diff
+    (GitHub diffs against the merge base). Publishing a review computed against
+    a slightly older base is a small, bounded staleness. NEVER publishing one is
+    unbounded. Elder is advisory, so the former is clearly the better failure
+    mode - and a real base change that touches the same lines will surface on
+    the next push anyway.
+    """
+    material = json.dumps(
+        [
+            _SNAPSHOT_VERSION,
+            head_sha,
+            normalize_intent_text(title),
+            normalize_intent_text(body),
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return f"v1:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def review_freshness_id_from_pr(pr: Mapping[str, Any]) -> str:
+    """Build the base-insensitive freshness identity from GitHub PR JSON."""
+    return review_freshness_id(
+        head_sha=str((pr.get("head") or {}).get("sha") or ""),
+        title=str(pr.get("title") or ""),
+        body=str(pr.get("body") or ""),
+    )
+
+
 def adaptive_elder_settle_seconds(
     pr: Mapping[str, Any],
     *,

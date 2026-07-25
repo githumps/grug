@@ -39,6 +39,7 @@ from github_app_auth import with_install_token_retry
 from github_checks_client import CheckRunResult, post_check_run
 from personas.code_reviewer.dispatch import dispatch_code_review
 from personas.code_reviewer.snapshot import (
+    review_freshness_id_from_pr,
     review_snapshot_id,
     review_snapshot_id_from_pr,
 )
@@ -1004,7 +1005,7 @@ def _review_claim_heartbeat_loop(
 
 def _review_staleness_watch_loop(
     install_id: int, owner: str, repo_name: str, pr_number: int,
-    expected_snapshot_id: str,
+    expected_freshness_id: str,
     stop: threading.Event,
     cancel: threading.Event,
 ) -> None:
@@ -1033,7 +1034,12 @@ def _review_staleness_watch_loop(
                 },
             )
             continue
-        if review_snapshot_id_from_pr(latest) != expected_snapshot_id:
+        # Base-insensitive comparison: `review_snapshot_id_from_pr` hashes
+        # base_sha, so ANY unrelated merge to the base branch changed it and
+        # cancelled this in-flight review. Measured on quadseven/infra
+        # 2026-07-25: eight merges in one session left Elder unable to
+        # publish, cancelling and re-enqueuing against an identical head.
+        if review_freshness_id_from_pr(latest) != expected_freshness_id:
             cancel.set()
             log.info(
                 "elder_review_cancelled_mid_flight",
@@ -1144,13 +1150,13 @@ def _stop_review_claim_heartbeat(
 
 def _start_staleness_watch(
     install_id: int, owner: str, repo_name: str, pr_number: int,
-    expected_snapshot_id: str,
+    expected_freshness_id: str,
 ) -> _StalenessWatch:
     stop = threading.Event()
     cancel = threading.Event()
     thread = threading.Thread(
         target=_review_staleness_watch_loop,
-        args=(install_id, owner, repo_name, pr_number, expected_snapshot_id, stop, cancel),
+        args=(install_id, owner, repo_name, pr_number, expected_freshness_id, stop, cancel),
         name="review-staleness-watch",
         daemon=True,
     )
@@ -1337,8 +1343,12 @@ def _run_hot_review(
         # results discarded (see _call_backend's docstring for why this is
         # "stop waiting on it", not "truly kill it"), but THIS job no
         # longer holds its queue slot / SQS message hostage to them.
+        # Watch on the BASE-INSENSITIVE identity. Passing current_snapshot_id
+        # here meant any unrelated merge to the base branch cancelled this
+        # review mid-generation, then re-enqueued it against an identical head.
         watch = _start_staleness_watch(
-            install_id, owner, repo_name, pr_number, current_snapshot_id,
+            install_id, owner, repo_name, pr_number,
+            review_freshness_id_from_pr(after),
         )
         try:
             result = dispatch_code_review(
