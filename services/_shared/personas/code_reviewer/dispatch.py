@@ -64,6 +64,7 @@ from personas.code_reviewer.claim_check import (
     scan_claim_checks,
 )
 from personas.code_reviewer.complexity import scan_complexity
+from personas.code_reviewer.lint import scan_ruff
 from personas.code_reviewer.cross_file import (
     extract_symbols, fetch_cross_file_context,
 )
@@ -358,6 +359,31 @@ _CLAIM_HINT_RE = re.compile(
     r"(?i)(?:settle|steady\s+hunt|swift\s+hunt|deep[_\s-]?diff|"
     r"GRUG_DEEP_DIFF|GRUG_ELDER_SETTLE|min\(\s*base)",
 )
+
+
+def _merge_lint_evidence(evaluation, hunks, file_contents):
+    """Fold deterministic ruff findings into the evaluation (#681, epic #707).
+
+    RECALL work: ruff catches the mechanical class the model skims past, and
+    cannot hallucinate because the findings are measured rather than
+    generated. Merged with the other deterministic sources - i.e. AFTER the
+    verification pass and refute gate, both of which exist to police MODEL
+    judgment and should not second-guess a linter.
+
+    Extracted rather than inlined so it costs `dispatch_code_review` ONE
+    branch instead of four: that function already measures cyclomatic 61 /
+    cognitive 62 against caps of 15/25, and its decomposition is #725's job,
+    not this slice's. Inert unless GRUG_LINT_EVIDENCE=ruff.
+    """
+    try:
+        lint_findings = scan_ruff(hunks, file_contents or {})
+    except Exception:  # noqa: BLE001 - lint evidence must never break a review
+        log.warning("code_review_lint_scan_failed", exc_info=True)
+        return evaluation
+    if not lint_findings:
+        return evaluation
+    log.info("code_review_lint_findings", extra={"count": len(lint_findings)})
+    return with_extra_findings(evaluation, lint_findings)
 
 
 def _enrich_claim_check_sources(
@@ -1767,6 +1793,8 @@ def dispatch_code_review(
                 "count": len(complexity_findings),
             },
         )
+
+    evaluation = _merge_lint_evidence(evaluation, hunks, file_contents)
 
     # Deterministic docs/code claim check: catch comment/env prose that
     # asserts the wrong settle cap or deep-diff bound (the LORE/CR class
