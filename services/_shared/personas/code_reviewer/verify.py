@@ -25,6 +25,19 @@ evidence contradicts:
   of the finding's own ``suggestion`` already appears verbatim on the
   anchored line itself - the marking describes a fix that is already
   in the code under review.
+- ``mitigation_present``: an interpolation-injection claim (ssrf, url,
+  injection, traversal) whose anchored line is an f-string in which EVERY
+  interpolation is already wrapped in a canonical sanitizer. This is the
+  sibling of ``fix_already_present`` for the case where the mitigation is
+  present in a DIFFERENT form than the one the model proposed - the reason
+  ``fix_already_present`` misses it, since that check is token-matched
+  against the model's own suggestion. Live instance: PR #766 published
+  three HIGH ssrf markings against
+  ``f"https://api.github.com/repos/{quote(owner, safe='')}/..."``, each
+  claiming the value was interpolated "without validation" while
+  ``quote(..., safe='')`` sat inline on the very line cited. The
+  suggestion said "validate"/"allowlist", which appears nowhere, so no
+  token matched and all three shipped.
 
 Inconclusive is NOT a kill: a missing file, an unparseable module, a
 module-level line, or a suggestion with no code tokens all keep the
@@ -101,6 +114,51 @@ _CODE_TOKEN_RE = re.compile(
 )
 
 
+# Rule-slug/message markers for claims that an interpolated value reaches a
+# sensitive sink unsanitised. Kept deliberately narrow: only families whose
+# canonical mitigation is a WRAPPING CALL that is visible on the line.
+_INTERPOLATION_INJECTION_MARKERS = (
+    "ssrf", "url", "injection", "traversal", "unvalidated", "untrusted",
+)
+
+# Canonical sanitizers that neutralise a value being interpolated into a
+# URL/path. Only wrapping calls belong here - a flag or a comparison cannot
+# be proven correct from one line.
+_SANITIZER_CALLS = (
+    "quote", "quote_plus", "urlencode", "urllib.parse.quote",
+    "shlex.quote", "escape", "quote_from_bytes",
+)
+
+# `{...}` interpolation groups inside an f-string. Nested braces are not
+# handled on purpose: a nested-brace line is INCONCLUSIVE, and inconclusive
+# keeps the finding.
+_FSTRING_INTERP_RE = re.compile(r"\{([^{}]+)\}")
+
+
+def _all_interpolations_sanitized(line: str) -> bool | None:
+    """True if EVERY `{...}` on the line is wrapped in a known sanitizer.
+
+    None (inconclusive -> keep) when the line has no interpolation at all,
+    or carries nested braces this cannot reason about. Requiring EVERY
+    interpolation to be wrapped is the load-bearing part: one bare
+    interpolation is exactly the vulnerability being reported, so a
+    partially-sanitized line must NOT be killed.
+    """
+    if "{" not in line:
+        return None
+    groups = _FSTRING_INTERP_RE.findall(line)
+    if not groups:
+        return None  # braces present but not a simple interpolation - unknown
+    for g in groups:
+        expr = g.split("!")[0].split(":")[0].strip()
+        if not any(
+            expr.startswith(f"{c}(") or expr.startswith(f"{c} (")
+            for c in _SANITIZER_CALLS
+        ):
+            return False
+    return True
+
+
 def _is_prose_file(path: str) -> bool:
     return path.lower().endswith(_PROSE_SUFFIXES)
 
@@ -166,6 +224,60 @@ def _anchor_window(source: str, line: int, radius: int = 2) -> str:
     return "\n".join(lines[lo:hi])
 
 
+def _kills_as_non_code_file(finding: "Finding") -> bool:
+    """Execution-class claim anchored in a document format. Docs-class rules
+    are exempt FIRST - they legitimately anchor in markdown even when their
+    text quotes execution vocabulary (FLINT on PR #710). The execution claim
+    may live in the slug OR the message (the PR #706 instance was rule
+    `unvalidated-external-input` with "command injection" only in the
+    message). Evidence is the PATH itself, so no source is needed.
+    """
+    if not _is_prose_file(finding.file):
+        return False
+    if _rule_matches(finding.rule_name, _DOCS_CLASS_MARKERS):
+        return False
+    return bool(
+        _CODE_EXECUTION_RE.search(finding.rule_name.lower())
+        or _CODE_EXECUTION_RE.search(finding.message.lower())
+    )
+
+
+def _kills_as_sync_context(finding: "Finding", source: str) -> bool:
+    """Async-context claim on a line that nothing in-file can put on a loop.
+
+    Tightened per FLINT on PR #710: a lexically sync def could still block a
+    loop if an async caller invokes it directly, so the kill ALSO requires the
+    module to contain zero async constructs. Cross-file async callers of an
+    all-sync module remain a residual risk, accepted under the
+    inconclusive-keeps bias and monitored via the false-kill scoreboard.
+    """
+    if _is_prose_file(finding.file):
+        return False
+    if not _rule_matches(finding.rule_name, _ASYNC_FAMILY_MARKERS):
+        return False
+    return (
+        _enclosing_chain_is_sync(source, finding.line) is True
+        and not _module_has_async(source)
+    )
+
+
+def _kills_as_mitigation_present(finding: "Finding", source: str) -> bool:
+    """Interpolation-injection claim on a line where EVERY interpolation is
+    already wrapped in a canonical sanitizer - the mitigation is present in a
+    different form than the suggestion named, which is why
+    `fix_already_present` cannot see it (PR #766's three ssrf markings).
+    """
+    if _is_prose_file(finding.file):
+        return False
+    if not (
+        _rule_matches(finding.rule_name, _INTERPOLATION_INJECTION_MARKERS)
+        or _rule_matches(finding.message, _INTERPOLATION_INJECTION_MARKERS)
+    ):
+        return False
+    window = _anchor_window(source, finding.line, radius=0)
+    return _all_interpolations_sanitized(window) is True
+
+
 def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     """Return a kill reason, or None to keep."""
     source = contents.get(finding.file)
@@ -178,14 +290,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     # injection" only in the message) - check both. The evidence here is
     # the PATH itself (present by construction), so this check does not
     # need `source`.
-    if (
-        _is_prose_file(finding.file)
-        and not _rule_matches(finding.rule_name, _DOCS_CLASS_MARKERS)
-        and (
-            _CODE_EXECUTION_RE.search(finding.rule_name.lower())
-            or _CODE_EXECUTION_RE.search(finding.message.lower())
-        )
-    ):
+    if _kills_as_non_code_file(finding):
         return "non_code_file"
 
     if source is None:
@@ -198,12 +303,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     # an event loop. Cross-file async callers of a module with zero async
     # remain a residual risk, accepted under the inconclusive-keeps bias
     # and monitored via the false-kill scoreboard.
-    if (
-        not _is_prose_file(finding.file)
-        and _rule_matches(finding.rule_name, _ASYNC_FAMILY_MARKERS)
-        and _enclosing_chain_is_sync(source, finding.line) is True
-        and not _module_has_async(source)
-    ):
+    if _kills_as_sync_context(finding, source):
         return "sync_context"
 
     if finding.suggestion:
@@ -215,6 +315,12 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
             window = _anchor_window(source, finding.line, radius=0)
             if all(t in window for t in tokens):
                 return "fix_already_present"
+
+    # Mitigation-present kill. Same anchor-line-only discipline as
+    # fix_already_present (radius 0), and the same asymmetric bias: only a
+    # line where EVERY interpolation is wrapped can contradict the claim.
+    if _kills_as_mitigation_present(finding, source):
+        return "mitigation_present"
 
     return None
 
