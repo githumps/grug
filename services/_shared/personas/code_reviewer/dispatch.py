@@ -64,6 +64,7 @@ from personas.code_reviewer.claim_check import (
     scan_claim_checks,
 )
 from personas.code_reviewer.complexity import scan_complexity
+from personas.code_reviewer.lint import scan_ruff
 from personas.code_reviewer.cross_file import (
     extract_symbols, fetch_cross_file_context,
 )
@@ -1766,6 +1767,24 @@ def dispatch_code_review(
                 "pr": f"{owner}/{repo_name}#{pull_number}",
                 "count": len(complexity_findings),
             },
+        )
+
+    # Deterministic lint evidence (#681, epic #707). RECALL work: ruff finds
+    # the mechanical class the model skims past, and cannot hallucinate
+    # because the findings are measured rather than generated. Merged here
+    # with the other deterministic sources, i.e. AFTER the verification pass
+    # and refute gate, both of which exist to police MODEL judgment. OFF
+    # unless GRUG_LINT_EVIDENCE=ruff.
+    try:
+        lint_findings = scan_ruff(hunks, file_contents or {})
+    except Exception:  # noqa: BLE001 - lint evidence must never break a review
+        log.warning("code_review_lint_scan_failed", exc_info=True)
+        lint_findings = ()
+    if lint_findings:
+        evaluation = with_extra_findings(evaluation, lint_findings)
+        log.info(
+            "code_review_lint_findings",
+            extra={"count": len(lint_findings)},
         )
 
     # Deterministic docs/code claim check: catch comment/env prose that
