@@ -82,6 +82,7 @@ class RepoConfigPayload(BaseModel):
     walkthrough_enabled: bool | None = Field(default=None)
     dep_watch_enabled: bool | None = Field(default=None)
     reopen_watch_enabled: bool | None = Field(default=None)
+    guard_hygiene_watch_enabled: bool | None = Field(default=None)
 
 
 class RerunRequest(BaseModel):
@@ -465,6 +466,7 @@ def update_repo_config(
         walkthrough_enabled=body.walkthrough_enabled,
         dep_watch_enabled=body.dep_watch_enabled,
         reopen_watch_enabled=body.reopen_watch_enabled,
+        guard_hygiene_watch_enabled=body.guard_hygiene_watch_enabled,
     )
     log.info(
         "repo_config_updated",

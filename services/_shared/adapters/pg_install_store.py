@@ -189,7 +189,9 @@ def list_allowlisted_installs() -> list[int]:
 # Repo-level flags that are NOT persona enable/blocking pairs (those live
 # in _DEFAULT_PERSONA_CONFIG, locked to the registry). Writable through
 # set_repo_config; read with an explicit default in get_repo_config.
-_EXTRA_REPO_FLAGS = frozenset({"dep_watch_enabled", "reopen_watch_enabled"})
+_EXTRA_REPO_FLAGS = frozenset({
+    "dep_watch_enabled", "reopen_watch_enabled", "guard_hygiene_watch_enabled",
+})
 
 # Repo-level flags whose value is a STRING, not a bool (the persona flags and
 # _EXTRA_REPO_FLAGS are all bool). elder_voice (#288/#578) is "caveman" | "sage".
@@ -242,8 +244,13 @@ def get_repo_config(install_id: int, repo_id: int) -> dict[str, Any]:
     }
     cfg["enforcement_ruleset_id"] = int(rid) if rid is not None else None
     cfg["force_disable_enforcement"] = bool(item.get("force_disable_enforcement", False))
-    cfg["dep_watch_enabled"] = bool(item.get("dep_watch_enabled", False))
-    cfg["reopen_watch_enabled"] = bool(item.get("reopen_watch_enabled", False))
+    # Derived from _EXTRA_REPO_FLAGS rather than one hand-written line per
+    # flag (#655). The old form needed an edit in TWO places to add a flag,
+    # and nothing enforced the pair - a flag added to _EXTRA_REPO_FLAGS but
+    # missed here would validate on write and then read back as absent,
+    # silently disabling the feature it gates. All such flags default False.
+    for _flag in _EXTRA_REPO_FLAGS:
+        cfg[_flag] = bool(item.get(_flag, False))
     # Elder voice pack (#288/#578): stored only for entitled installs that
     # opted in; every other repo reads the caveman free default.
     cfg["elder_voice"] = str(item.get("elder_voice") or "caveman")
@@ -1081,6 +1088,54 @@ def list_reopen_watch_repos(install_id: int) -> list[dict[str, Any]]:
     """Repo rows with reopen_watch_enabled=true (grug#730 audit finding) -
     same store-driven targeting pattern as dep_watch/pulse."""
     return _list_flag_enabled_repos(install_id, "reopen_watch_enabled")
+
+
+def list_hygiene_watch_repos(install_id: int) -> list[dict[str, Any]]:
+    """Repo rows with guard_hygiene_watch_enabled=true (#655) - same
+    store-driven targeting pattern as dep_watch/pulse."""
+    return _list_flag_enabled_repos(install_id, "guard_hygiene_watch_enabled")
+
+
+_HYGIENE_WATCH_TTL_DAYS = 7
+
+
+def claim_hygiene_watch_report(install_id: int, repo: str) -> bool:
+    """Win-once weekly claim for a Guard hygiene quarantine report (#655) -
+    same shape as claim_dep_watch_report. A separate `sk` namespace so the
+    two weekly reports never contend for one claim."""
+    pg_base.maybe_purge_expired()
+    ttl = int(
+        datetime.now(timezone.utc).timestamp() + _HYGIENE_WATCH_TTL_DAYS * 86400
+    )
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO grug_kv (pk, sk, data, ttl)
+            VALUES (%(pk)s, %(sk)s, %(data)s, %(ttl)s)
+            ON CONFLICT (pk, sk) DO UPDATE
+                SET data = %(data)s, ttl = %(ttl)s
+                WHERE grug_kv.ttl IS NOT NULL
+                  AND grug_kv.ttl <= EXTRACT(EPOCH FROM now())
+            RETURNING pk
+            """,
+            {
+                "pk": _inst_pk(install_id),
+                "sk": f"HYGIENEWATCH#{repo}",
+                "data": Jsonb({"ttl": ttl}),
+                "ttl": ttl,
+            },
+        ).fetchone()
+    return row is not None
+
+
+def release_hygiene_watch_report(install_id: int, repo: str) -> None:
+    """Release a hygiene-watch claim whose report WRITE definitively failed -
+    the claim must represent a FILED report, not an attempt. Best-effort."""
+    with get_pool().connection() as conn:
+        conn.execute(
+            "DELETE FROM grug_kv WHERE pk = %s AND sk = %s",
+            (_inst_pk(install_id), f"HYGIENEWATCH#{repo}"),
+        )
 
 
 def claim_pulse_nudge(install_id: int, repo: str, pr_number: int) -> bool:
