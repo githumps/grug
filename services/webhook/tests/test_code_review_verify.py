@@ -405,3 +405,85 @@ def test_thread_deadlock_rule_in_sync_code_survives():
     kept, killed = verify_findings((f,), {"services/x.py": src})
     assert kept == (f,)
     assert killed == ()
+
+
+# --- class 4: mitigation present in a DIFFERENT form than the suggestion
+# (the live grug PR #766 ssrf family) --------------------------------------
+#
+# PR #766 published THREE high-severity ssrf markings against a URL where
+# every interpolation was already `quote(..., safe='')`. class 3
+# (fix_already_present) structurally cannot catch these: it token-matches the
+# model's OWN suggestion, which said "validate"/"allowlist" - words that
+# appear nowhere on the line.
+
+_SSRF_SANITIZED = (
+    "from urllib.parse import quote\n"
+    "\n"
+    "def _discover_files(token, owner, repo):\n"
+    "    url = f\"https://api.github.com/repos/{quote(owner, safe=\'\')}/{quote(repo, safe=\'\')}/git/trees/HEAD\"\n"
+    "    return httpx.get(url, timeout=10)\n"
+)
+
+_SSRF_PARTIAL = (
+    "from urllib.parse import quote\n"
+    "\n"
+    "def _discover_files(token, owner, repo):\n"
+    "    url = f\"https://api.github.com/repos/{quote(owner, safe=\'\')}/{repo}/git/trees/HEAD\"\n"
+    "    return httpx.get(url, timeout=10)\n"
+)
+
+_SSRF_MSG = (
+    "Server-side request forgery. owner and repo are interpolated into the "
+    "GitHub API URL without validation."
+)
+
+
+def test_fully_sanitized_interpolations_are_killed():
+    f = _finding(
+        file="services/x.py", line=4, rule_name="ssrf", message=_SSRF_MSG,
+        suggestion="Validate owner/repo against an allowlist before use.",
+    )
+    kept, killed = verify_findings((f,), {"services/x.py": _SSRF_SANITIZED})
+    assert kept == ()
+    assert len(killed) == 1
+    assert killed[0].reason == "mitigation_present"
+
+
+def test_one_bare_interpolation_survives():
+    """Load-bearing negative: a PARTIALLY sanitized line is exactly the
+    reported vulnerability, so it must never be killed."""
+    f = _finding(
+        file="services/x.py", line=4, rule_name="ssrf", message=_SSRF_MSG,
+        suggestion="Validate owner/repo against an allowlist before use.",
+    )
+    kept, killed = verify_findings((f,), {"services/x.py": _SSRF_PARTIAL})
+    assert kept == (f,)
+    assert killed == ()
+
+
+def test_unrelated_rule_family_untouched_on_sanitized_line():
+    """Only interpolation-injection families qualify - a timeout finding on
+    the same sanitized line is a different claim and must survive."""
+    f = _finding(
+        file="services/x.py", line=4, rule_name="missing-timeout",
+        message="no timeout on the outbound request", suggestion="Add timeout=10.",
+    )
+    kept, killed = verify_findings((f,), {"services/x.py": _SSRF_SANITIZED})
+    assert kept == (f,)
+    assert killed == ()
+
+
+def test_line_without_interpolation_is_inconclusive():
+    f = _finding(
+        file="services/x.py", line=5, rule_name="ssrf", message=_SSRF_MSG,
+    )
+    kept, killed = verify_findings((f,), {"services/x.py": _SSRF_SANITIZED})
+    assert kept == (f,)
+    assert killed == ()
+
+
+def test_mitigation_kill_needs_the_file():
+    f = _finding(file="services/x.py", line=4, rule_name="ssrf", message=_SSRF_MSG)
+    kept, killed = verify_findings((f,), {})
+    assert kept == (f,)
+    assert killed == ()

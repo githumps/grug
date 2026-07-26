@@ -25,6 +25,19 @@ evidence contradicts:
   of the finding's own ``suggestion`` already appears verbatim on the
   anchored line itself - the marking describes a fix that is already
   in the code under review.
+- ``mitigation_present``: an interpolation-injection claim (ssrf, url,
+  injection, traversal) whose anchored line is an f-string in which EVERY
+  interpolation is already wrapped in a canonical sanitizer. This is the
+  sibling of ``fix_already_present`` for the case where the mitigation is
+  present in a DIFFERENT form than the one the model proposed - the reason
+  ``fix_already_present`` misses it, since that check is token-matched
+  against the model's own suggestion. Live instance: PR #766 published
+  three HIGH ssrf markings against
+  ``f"https://api.github.com/repos/{quote(owner, safe='')}/..."``, each
+  claiming the value was interpolated "without validation" while
+  ``quote(..., safe='')`` sat inline on the very line cited. The
+  suggestion said "validate"/"allowlist", which appears nowhere, so no
+  token matched and all three shipped.
 
 Inconclusive is NOT a kill: a missing file, an unparseable module, a
 module-level line, or a suggestion with no code tokens all keep the
@@ -99,6 +112,51 @@ _CODE_TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*\s*\("   # call:  strip(  /  to_thread(
     r"|\.[A-Za-z_][A-Za-z0-9_]*"     # attr:  .strip  /  .casefold
 )
+
+
+# Rule-slug/message markers for claims that an interpolated value reaches a
+# sensitive sink unsanitised. Kept deliberately narrow: only families whose
+# canonical mitigation is a WRAPPING CALL that is visible on the line.
+_INTERPOLATION_INJECTION_MARKERS = (
+    "ssrf", "url", "injection", "traversal", "unvalidated", "untrusted",
+)
+
+# Canonical sanitizers that neutralise a value being interpolated into a
+# URL/path. Only wrapping calls belong here - a flag or a comparison cannot
+# be proven correct from one line.
+_SANITIZER_CALLS = (
+    "quote", "quote_plus", "urlencode", "urllib.parse.quote",
+    "shlex.quote", "escape", "quote_from_bytes",
+)
+
+# `{...}` interpolation groups inside an f-string. Nested braces are not
+# handled on purpose: a nested-brace line is INCONCLUSIVE, and inconclusive
+# keeps the finding.
+_FSTRING_INTERP_RE = re.compile(r"\{([^{}]+)\}")
+
+
+def _all_interpolations_sanitized(line: str) -> bool | None:
+    """True if EVERY `{...}` on the line is wrapped in a known sanitizer.
+
+    None (inconclusive -> keep) when the line has no interpolation at all,
+    or carries nested braces this cannot reason about. Requiring EVERY
+    interpolation to be wrapped is the load-bearing part: one bare
+    interpolation is exactly the vulnerability being reported, so a
+    partially-sanitized line must NOT be killed.
+    """
+    if "{" not in line:
+        return None
+    groups = _FSTRING_INTERP_RE.findall(line)
+    if not groups:
+        return None  # braces present but not a simple interpolation - unknown
+    for g in groups:
+        expr = g.split("!")[0].split(":")[0].strip()
+        if not any(
+            expr.startswith(f"{c}(") or expr.startswith(f"{c} (")
+            for c in _SANITIZER_CALLS
+        ):
+            return False
+    return True
 
 
 def _is_prose_file(path: str) -> bool:
@@ -215,6 +273,21 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
             window = _anchor_window(source, finding.line, radius=0)
             if all(t in window for t in tokens):
                 return "fix_already_present"
+
+    # Mitigation-present kill. Same anchor-line-only discipline as
+    # fix_already_present (radius 0), and the same asymmetric bias: only a
+    # line where EVERY interpolation is wrapped can contradict the claim.
+    if (
+        not _is_prose_file(finding.file)
+        and (
+            _rule_matches(finding.rule_name, _INTERPOLATION_INJECTION_MARKERS)
+            or _rule_matches(finding.message, _INTERPOLATION_INJECTION_MARKERS)
+        )
+        and _all_interpolations_sanitized(
+            _anchor_window(source, finding.line, radius=0)
+        ) is True
+    ):
+        return "mitigation_present"
 
     return None
 
