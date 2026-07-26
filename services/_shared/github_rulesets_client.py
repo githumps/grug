@@ -413,6 +413,33 @@ def list_installation_repos(install_token: str) -> list[dict]:
                     extra={"repo": r.get("full_name", "")},
                 )
                 continue
+            # FORKS of third-party OSS are excluded for the same denominator
+            # reason. We fork upstream projects only to carry a patch branch
+            # that goes back upstream - the merge target for that work is the
+            # PARENT repo, not ours. There is no first-party PR workflow here
+            # for a DoR check to gate, so `enforcement_type:none` on a fork is
+            # not a gap, and enforcing a DoR body on an upstream-sync merge
+            # would be meaningless.
+            #
+            # Live proof (2026-07-26): the enforcement-gap monitor was red on
+            # four repos. Three - gluetun, flood, vibetunnel - are forks with
+            # ZERO PRs each; gluetun was forked that afternoon purely so
+            # production/docker/gluetun-portfix could build from a patch
+            # branch (upstream passteque/gluetun#3409), and it paged an hour
+            # later. The fourth, `yuzu-yard-sale`, is NOT a fork and stays
+            # counted - it is a genuine unenforced first-party repo.
+            #
+            # Note this differs from the archived case above: grug COULD
+            # write a ruleset to a fork. This is a deliberate policy call that
+            # forks are out of scope, not a capability limit - so it narrows
+            # the denominator by intent, and the non-fork gap above survives
+            # it, which is the check that it is not hiding anything.
+            if r.get("fork"):
+                log.info(
+                    "installation_repo_fork_skipped",
+                    extra={"repo": r.get("full_name", "")},
+                )
+                continue
             out.append({
                 "id": r.get("id"),
                 "full_name": r.get("full_name", ""),
