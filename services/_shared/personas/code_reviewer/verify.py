@@ -224,6 +224,60 @@ def _anchor_window(source: str, line: int, radius: int = 2) -> str:
     return "\n".join(lines[lo:hi])
 
 
+def _kills_as_non_code_file(finding: "Finding") -> bool:
+    """Execution-class claim anchored in a document format. Docs-class rules
+    are exempt FIRST - they legitimately anchor in markdown even when their
+    text quotes execution vocabulary (FLINT on PR #710). The execution claim
+    may live in the slug OR the message (the PR #706 instance was rule
+    `unvalidated-external-input` with "command injection" only in the
+    message). Evidence is the PATH itself, so no source is needed.
+    """
+    if not _is_prose_file(finding.file):
+        return False
+    if _rule_matches(finding.rule_name, _DOCS_CLASS_MARKERS):
+        return False
+    return bool(
+        _CODE_EXECUTION_RE.search(finding.rule_name.lower())
+        or _CODE_EXECUTION_RE.search(finding.message.lower())
+    )
+
+
+def _kills_as_sync_context(finding: "Finding", source: str) -> bool:
+    """Async-context claim on a line that nothing in-file can put on a loop.
+
+    Tightened per FLINT on PR #710: a lexically sync def could still block a
+    loop if an async caller invokes it directly, so the kill ALSO requires the
+    module to contain zero async constructs. Cross-file async callers of an
+    all-sync module remain a residual risk, accepted under the
+    inconclusive-keeps bias and monitored via the false-kill scoreboard.
+    """
+    if _is_prose_file(finding.file):
+        return False
+    if not _rule_matches(finding.rule_name, _ASYNC_FAMILY_MARKERS):
+        return False
+    return (
+        _enclosing_chain_is_sync(source, finding.line) is True
+        and not _module_has_async(source)
+    )
+
+
+def _kills_as_mitigation_present(finding: "Finding", source: str) -> bool:
+    """Interpolation-injection claim on a line where EVERY interpolation is
+    already wrapped in a canonical sanitizer - the mitigation is present in a
+    different form than the suggestion named, which is why
+    `fix_already_present` cannot see it (PR #766's three ssrf markings).
+    """
+    if _is_prose_file(finding.file):
+        return False
+    if not (
+        _rule_matches(finding.rule_name, _INTERPOLATION_INJECTION_MARKERS)
+        or _rule_matches(finding.message, _INTERPOLATION_INJECTION_MARKERS)
+    ):
+        return False
+    window = _anchor_window(source, finding.line, radius=0)
+    return _all_interpolations_sanitized(window) is True
+
+
 def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     """Return a kill reason, or None to keep."""
     source = contents.get(finding.file)
@@ -236,14 +290,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     # injection" only in the message) - check both. The evidence here is
     # the PATH itself (present by construction), so this check does not
     # need `source`.
-    if (
-        _is_prose_file(finding.file)
-        and not _rule_matches(finding.rule_name, _DOCS_CLASS_MARKERS)
-        and (
-            _CODE_EXECUTION_RE.search(finding.rule_name.lower())
-            or _CODE_EXECUTION_RE.search(finding.message.lower())
-        )
-    ):
+    if _kills_as_non_code_file(finding):
         return "non_code_file"
 
     if source is None:
@@ -256,12 +303,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     # an event loop. Cross-file async callers of a module with zero async
     # remain a residual risk, accepted under the inconclusive-keeps bias
     # and monitored via the false-kill scoreboard.
-    if (
-        not _is_prose_file(finding.file)
-        and _rule_matches(finding.rule_name, _ASYNC_FAMILY_MARKERS)
-        and _enclosing_chain_is_sync(source, finding.line) is True
-        and not _module_has_async(source)
-    ):
+    if _kills_as_sync_context(finding, source):
         return "sync_context"
 
     if finding.suggestion:
@@ -277,16 +319,7 @@ def _verify_one(finding: "Finding", contents: dict[str, str]) -> str | None:
     # Mitigation-present kill. Same anchor-line-only discipline as
     # fix_already_present (radius 0), and the same asymmetric bias: only a
     # line where EVERY interpolation is wrapped can contradict the claim.
-    if (
-        not _is_prose_file(finding.file)
-        and (
-            _rule_matches(finding.rule_name, _INTERPOLATION_INJECTION_MARKERS)
-            or _rule_matches(finding.message, _INTERPOLATION_INJECTION_MARKERS)
-        )
-        and _all_interpolations_sanitized(
-            _anchor_window(source, finding.line, radius=0)
-        ) is True
-    ):
+    if _kills_as_mitigation_present(finding, source):
         return "mitigation_present"
 
     return None
