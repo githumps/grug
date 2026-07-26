@@ -654,6 +654,56 @@ def test_list_installation_repos_excludes_archived():
     assert [r["full_name"] for r in out] == ["o/live", "o/also-live"]
 
 
+def test_list_installation_repos_excludes_forks():
+    """A fork of third-party OSS carries a patch branch whose merge target is
+    the PARENT repo, so there is no first-party PR for a DoR check to gate and
+    `enforcement_type:none` on it is not a gap. Live case 2026-07-26: the
+    enforcement-gap monitor was red on gluetun, flood and vibetunnel - all
+    forks with zero PRs - one hour after gluetun was forked to build the
+    portfix image."""
+    from github_rulesets_client import list_installation_repos
+
+    body = {"total_count": 3, "repositories": [
+        {"id": 10, "full_name": "o/first-party", "default_branch": "main"},
+        {"id": 11, "full_name": "o/gluetun", "default_branch": "main", "fork": True},
+        {"id": 12, "full_name": "o/other", "default_branch": "main", "fork": False},
+    ]}
+    with patch("httpx.get", return_value=_ok_response(body)):
+        out = list_installation_repos("tok")
+    assert [r["full_name"] for r in out] == ["o/first-party", "o/other"]
+
+
+def test_list_installation_repos_fork_exclusion_keeps_real_gaps():
+    """The exclusion must NARROW the denominator, not empty it. A non-fork,
+    non-archived repo is exactly the `yuzu-yard-sale` case from the same live
+    alert: a genuine unenforced first-party repo that has to stay counted, or
+    the exclusion would be hiding gaps rather than correcting the set."""
+    from github_rulesets_client import list_installation_repos
+
+    body = {"total_count": 2, "repositories": [
+        {"id": 11, "full_name": "o/fork", "default_branch": "main", "fork": True},
+        {"id": 12, "full_name": "o/yuzu-yard-sale", "default_branch": "main",
+         "fork": False, "archived": False},
+    ]}
+    with patch("httpx.get", return_value=_ok_response(body)):
+        out = list_installation_repos("tok")
+    assert [r["full_name"] for r in out] == ["o/yuzu-yard-sale"]
+
+
+def test_list_installation_repos_absent_fork_key_is_not_a_fork():
+    """Defensive, mirroring the archived case: a payload without the key must
+    count as first-party. Excluding on a missing field would empty the
+    denominator and read as 'everything enforced'."""
+    from github_rulesets_client import list_installation_repos
+
+    body = {"total_count": 1, "repositories": [
+        {"id": 10, "full_name": "o/a", "default_branch": "main"},
+    ]}
+    with patch("httpx.get", return_value=_ok_response(body)):
+        out = list_installation_repos("tok")
+    assert [r["full_name"] for r in out] == ["o/a"]
+
+
 def test_list_installation_repos_absent_archived_key_is_not_archived():
     """Defensive: a payload without the key must count as LIVE, not be
     silently dropped. Excluding on a missing field would empty the whole
