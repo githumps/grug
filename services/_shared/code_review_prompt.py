@@ -507,6 +507,33 @@ RULES: tuple[ReviewRule, ...] = (
         'printf "%s\\n" "$d"; } >> "$GITHUB_ENV"',
         severity="high",
     ),
+    # ── unbounded async fan-out (harvest 2026-07-27: macchina #2059/#2061) ──
+    ReviewRule(
+        name="unbounded-fanout-shared-backend",
+        bug_class="performance",
+        description="An `asyncio.gather` / `TaskGroup` / `as_completed` fan-out "
+        "whose WIDTH comes from input size (a comprehension over a list of "
+        "candidates, rows, files) and whose coroutines all call the SAME "
+        "shared or contended backend -- an LLM gateway, a rate-limited API, "
+        "one connection pool -- with no concurrency ceiling. Every call starts "
+        "at once, so the batch is bounded by the backend's saturation point, "
+        "not by parallelism: latency can be WORSE than sequential and other "
+        "consumers of that backend starve. Distinct from query-in-loop (that "
+        "is sequential N+1; this one is already parallel, just uncapped) and "
+        "from fire-and-forget-task (these ARE awaited). Fix: gate each call on "
+        "an `asyncio.Semaphore` sized by the backend's real capacity, and/or "
+        "cap the batch size. Do NOT flag a gather over a FIXED, small literal "
+        "set of distinct calls, or one whose callees hit unrelated backends.",
+        bad_example="verdicts = await asyncio.gather(\n"
+        "    *(self._judge(c) for c in candidates)  # N LLM calls, no ceiling\n"
+        ")",
+        good_example="sem = asyncio.Semaphore(MAX_CONCURRENCY)\n"
+        "async def _bounded(c):\n"
+        "    async with sem:\n"
+        "        return await self._judge(c)\n"
+        "verdicts = await asyncio.gather(*(_bounded(c) for c in candidates))",
+        severity="medium",
+    ),
 )
 
 

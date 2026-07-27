@@ -278,6 +278,24 @@ def test_env_file_static_delimiter_injection_rule_present():
     assert "env-file-static-delimiter-injection" in crp.build_system_prompt()
 
 
+def test_unbounded_fanout_shared_backend_rule_present():
+    """Weekly harvest 2026-07-27: an input-sized `asyncio.gather` whose
+    coroutines all hit ONE shared/contended backend has no ceiling, so the
+    batch is bounded by that backend's saturation point rather than by
+    parallelism -- latency can exceed the sequential version and other
+    consumers of the backend starve. macchina #2059 replaced sequential judge
+    calls with a bare gather; #2061 had to add an `asyncio.Semaphore` the same
+    day after `mode: schedule` still took 28.9s with calls clustering at the
+    8s timeout, a second consumer contending for the same model."""
+    rule = next(
+        (r for r in crp.RULES if r.name == "unbounded-fanout-shared-backend"),
+        None,
+    )
+    assert rule is not None, "unbounded-fanout-shared-backend missing from RULES"
+    assert rule.bug_class == "performance"
+    assert "unbounded-fanout-shared-backend" in crp.build_system_prompt()
+
+
 def test_voice_has_mandatory_bookend_structure():
     """#343: the voice instruction mandates the structural bookends that
     keep the caveman cadence from slipping to plain English under technical
