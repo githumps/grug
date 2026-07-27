@@ -51,6 +51,8 @@ def dispatch(
         return {"status": "no_op", "reason": "installation_repositories acknowledged"}
     if event_name == "pull_request":
         return _handle_pull_request(payload, delivery_id=delivery_id)
+    if event_name == "issues":
+        return _handle_issues(payload)
     if event_name == "issue_comment":
         return _handle_issue_comment(payload)
     if event_name == "pull_request_review_comment":
@@ -476,6 +478,79 @@ def _actor_has_write(
         # (mirrors the PR-fetch path's transport catch). F-01.
         raise
     return perm in _AUTHORIZED_ROLES
+
+
+def _handle_issues(payload: dict[str, Any]) -> dict[str, str]:
+    """Chief's ISSUE-time DoR advisory (epic #654 sibling; first non-PR
+    review surface grug has ever had).
+
+    Deliberately NOT routed through the REGISTRY loop. That loop is
+    PR-shaped end to end - it filters `spec.actions` against
+    `PR_UPDATE_ACTIONS`, builds a `PullRequestContext`, and calls
+    `dispatch_pull_request(ctx)`. This is a new SURFACE for an existing
+    persona (Chief already owns DoR), not a new persona, and there is
+    exactly one of them. Generalising the registry to a second event
+    shape on the first instance would be inventing a seam before the
+    rule of three; the second issue-time persona is when that pays.
+
+    Gated by its OWN flag rather than `tpm_enabled`. Chief being on for
+    pull requests must NOT silently start commenting on every issue in
+    the repo - that is a surprise, and a noisy one. Default OFF.
+    """
+    action = payload.get("action", "")
+    # `opened` is the moment the advice is cheapest. `edited` is what makes
+    # it self-healing: the author fixes the body and the SAME comment is
+    # refreshed or cleared in place (see issue_dor's marker handling).
+    if action not in ("opened", "edited"):
+        return {"status": "no_op", "reason": f"issues action={action} not gated"}
+
+    issue = payload.get("issue") or {}
+    # An `issues` event never fires for a PR, but a payload carrying
+    # `pull_request` would mean GitHub changed that; refuse rather than
+    # double-comment alongside the PR-time DoR check.
+    if issue.get("pull_request"):
+        return {"status": "no_op", "reason": "issues event on a PR"}
+
+    repo = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+    installation_id = installation.get("id")
+    owner = (repo.get("owner") or {}).get("login") or repo.get("full_name", "").split("/")[0]
+    repo_name = repo.get("name")
+    repo_id = repo.get("id")
+    issue_number = issue.get("number")
+
+    if not all([installation_id, owner, repo_name, issue_number]):
+        log.warning(
+            "issues_payload_incomplete",
+            extra={"installation_id": installation_id, "owner": owner,
+                   "repo": repo_name, "issue_number": issue_number},
+        )
+        return {"status": "skip", "reason": "incomplete issues payload"}
+
+    if not is_install_allowlisted(int(installation_id)):
+        return {"status": "no_op", "reason": "installer not allowlisted"}
+
+    # Unlike Chief's PR path (missing_repo_policy="enabled" - a missing id
+    # must not skip DoR), a missing repo_id here means SKIP: this surface
+    # writes a public comment, and defaulting a write-enabled surface ON
+    # for a malformed payload is the wrong direction to fail.
+    if repo_id is None:
+        return {"status": "no_op", "reason": "no repo_id - issue DoR fails closed"}
+    if not get_repo_config(int(installation_id), int(repo_id)).get(
+        "issue_dor_enabled", False
+    ):
+        return {"status": "no_op", "reason": "issue_dor_enabled off for repo"}
+
+    from github_app_auth import with_install_token_retry  # type: ignore
+    from personas.tpm.issue_dor import run_issue_dor
+
+    body = issue.get("body") or ""
+    return with_install_token_retry(
+        int(installation_id),
+        lambda token: run_issue_dor(
+            token, owner, repo_name, int(issue_number), body,
+        ),
+    ) or {"status": "skip", "reason": "token acquisition failed"}
 
 
 def _handle_issue_comment(payload: dict[str, Any]) -> dict[str, str]:

@@ -661,3 +661,81 @@ def test_review_reply_enqueue_sqs_failure_is_skip_not_500():
          patch("rerun.enqueue_learn", side_effect=_raise_enqueue):
         out = dispatch("pull_request_review_comment", _review_reply_payload())
     assert out["status"] == "skip" and out["reason"] == "enqueue_failed"
+
+
+# --- issues event: Chief's issue-time DoR surface ---------------------------
+# Grug's FIRST non-PR review surface. These pin the gates, not the rendering
+# (that lives in test_issue_dor.py) - a write-enabled surface reached by a
+# public webhook has to fail CLOSED on every ambiguity.
+
+def _issue_payload(**over):
+    p = {
+        "action": "opened",
+        "issue": {"number": 7, "body": "bare"},
+        "repository": {"id": 5, "name": "r", "owner": {"login": "o"}},
+        "installation": {"id": 1},
+    }
+    p.update(over)
+    return p
+
+
+@pytest.mark.parametrize("action", ["closed", "labeled", "assigned", "deleted"])
+def test_issues_only_gates_opened_and_edited(action):
+    out = dispatch("issues", _issue_payload(action=action))
+    assert out["status"] == "no_op" and "not gated" in out["reason"]
+
+
+def test_issues_event_carrying_a_pull_request_is_refused():
+    """An `issues` event never fires for a PR today. If GitHub ever changed
+    that, commenting here would DOUBLE up with the PR-time DoR check."""
+    out = dispatch("issues", _issue_payload(
+        issue={"number": 7, "body": "x", "pull_request": {"url": "..."}}))
+    assert out["status"] == "no_op" and "on a PR" in out["reason"]
+
+
+def test_issues_requires_allowlisted_install():
+    with patch("dispatcher.is_install_allowlisted", return_value=False):
+        out = dispatch("issues", _issue_payload())
+    assert out["status"] == "no_op" and "not allowlisted" in out["reason"]
+
+
+def test_issues_missing_repo_id_fails_closed():
+    """Chief's PR path treats a missing repo_id as ENABLED (a missing id
+    must not skip DoR). This surface WRITES a public comment, so it fails
+    the other way - defaulting a write ON for a malformed payload is the
+    wrong direction."""
+    with patch("dispatcher.is_install_allowlisted", return_value=True):
+        out = dispatch("issues", _issue_payload(
+            repository={"name": "r", "owner": {"login": "o"}}))
+    assert out["status"] == "no_op" and "fails closed" in out["reason"]
+
+
+def test_issues_is_off_unless_its_own_flag_is_on():
+    """Must NOT ride `tpm_enabled`: Chief being on for pull requests cannot
+    silently start commenting on every issue in the repo."""
+    with patch("dispatcher.is_install_allowlisted", return_value=True), \
+         patch("dispatcher.get_repo_config", return_value={"tpm_enabled": True}):
+        out = dispatch("issues", _issue_payload())
+    assert out["status"] == "no_op" and "issue_dor_enabled off" in out["reason"]
+
+
+def test_issues_dispatches_when_flag_on():
+    seen = {}
+
+    def _run(token, owner, repo, number, body):
+        seen.update(owner=owner, repo=repo, number=number, body=body)
+        return {"status": "ok", "reason": "advisory posted"}
+
+    with patch("dispatcher.is_install_allowlisted", return_value=True), \
+         patch("dispatcher.get_repo_config", return_value={"issue_dor_enabled": True}), \
+         patch("personas.tpm.issue_dor.run_issue_dor", _run), \
+         patch("github_app_auth.with_install_token_retry",
+               side_effect=lambda iid, fn: fn("tok")):
+        out = dispatch("issues", _issue_payload())
+    assert out["status"] == "ok"
+    assert seen == {"owner": "o", "repo": "r", "number": 7, "body": "bare"}
+
+
+def test_issues_incomplete_payload_skips():
+    out = dispatch("issues", _issue_payload(installation={}))
+    assert out["status"] == "skip"
