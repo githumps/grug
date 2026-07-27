@@ -83,6 +83,9 @@ class RepoConfigPayload(BaseModel):
     dep_watch_enabled: bool | None = Field(default=None)
     reopen_watch_enabled: bool | None = Field(default=None)
     guard_hygiene_watch_enabled: bool | None = Field(default=None)
+    # Chief's ISSUE-time DoR advisory (own flag, not tpm_enabled - turning
+    # Chief on for PRs must not start commenting on every issue).
+    issue_dor_enabled: bool | None = Field(default=None)
 
 
 class RerunRequest(BaseModel):
@@ -467,6 +470,7 @@ def update_repo_config(
         dep_watch_enabled=body.dep_watch_enabled,
         reopen_watch_enabled=body.reopen_watch_enabled,
         guard_hygiene_watch_enabled=body.guard_hygiene_watch_enabled,
+        issue_dor_enabled=body.issue_dor_enabled,
     )
     log.info(
         "repo_config_updated",
