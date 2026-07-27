@@ -106,10 +106,44 @@ class EvalCase:
 
 
 def build_cases(rows: Iterable[LedgerRow]) -> tuple[EvalCase, ...]:
-    """Group ledger rows into per-(repo, pr) EvalCases, (repo, pr)-sorted."""
+    """Group ledger rows into per-(repo, pr) EvalCases, (repo, pr)-sorted.
+
+    Rows with NO pr number are dropped here, and that is a real distinction
+    rather than a tidy-up. `LedgerRow.pr` became optional in #764 so that
+    consensus findings written outside a PR context stop being silently
+    deleted from the corpus - they carry a real verdict and MUST count
+    toward class precision. But this eval REPLAYS a case by fetching its
+    PR diff, and a row with no PR has no diff to replay: it is unscorable
+    by construction, not an error.
+
+    Without this filter those rows reached the runner, which fetched
+    `/pulls/None`, took a 404, and marked the case `errored` - and
+    `--record` refuses to write a baseline when ANY case errors, so six
+    recovered rows blocked every future baseline re-record.
+
+    It also removes a latent crash. The old `sorted(grouped)` compares
+    `(repo, pr)` tuples, so one repo holding both a `None` and an int pr
+    raises `TypeError: '<' not supported between 'int' and 'NoneType'` and
+    kills the entire eval. That is masked today only because the PR-less
+    rows say `quadseven/grug` while the older rows say `githumps/grug`
+    (the pre-rename name) - a coincidence, not a guarantee.
+    """
     grouped: dict[tuple[str, int], list[LedgerRow]] = {}
+    dropped = 0
     for r in rows:
+        if r.pr is None:
+            dropped += 1
+            continue
         grouped.setdefault((r.repo, r.pr), []).append(r)
+    if dropped:
+        # Logged, never silent: a shrinking denominator that nobody
+        # announced is how corpus rot hides (same reasoning as
+        # `eval_corpus_pr_unfetchable`).
+        log.info(
+            "eval_corpus_rows_without_pr_skipped rows=%d - not replayable "
+            "(no diff to fetch); still counted by class_precision",
+            dropped,
+        )
 
     cases: list[EvalCase] = []
     for repo, pr in sorted(grouped):
