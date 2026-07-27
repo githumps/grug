@@ -738,3 +738,65 @@ def test_diff_to_hunks_converts_unified_diff():
     assert len(hunks) == 1
     assert hunks[0].path == "x.py"
     assert hunks[0].body.startswith("@@")
+
+
+# --- #764 fallout: PR-less ledger rows are unscorable, not errors ------------
+
+def test_build_cases_skips_rows_with_no_pr():
+    """`LedgerRow.pr` became optional in #764 so consensus findings written
+    outside a PR context stop being deleted from the corpus. They carry a
+    real verdict and must count toward class precision - but this eval
+    REPLAYS a case by fetching its PR diff, and a row with no PR has no
+    diff. Unscorable by construction, not an error.
+
+    Left in, they reached the runner, which fetched `/pulls/None`, took a
+    404, and marked the case errored - and `--record` refuses to write a
+    baseline when ANY case errors. Six recovered rows blocked every future
+    re-record."""
+    from elder_eval.corpus import build_cases
+    from ledger import LedgerRow
+
+    def _row(pr, cls="silent-failure"):
+        return LedgerRow(
+            repo="quadseven/grug", pr=pr, reviewer="codex", severity="HIGH",
+            finding_class=cls, finding="x", verdict="fixed", evidence="e",
+            ts="2026-07-21T00:00:00Z",
+        )
+
+    cases = build_cases([_row(None), _row(10), _row(None)])
+    assert [c.pr for c in cases] == [10]
+
+
+def test_build_cases_does_not_crash_on_mixed_none_and_int_pr():
+    """Latent crash guard. The grouping key is `(repo, pr)`, so ONE repo
+    holding both a None and an int pr made `sorted(grouped)` raise
+    `TypeError: '<' not supported between 'int' and 'NoneType'` and kill
+    the whole eval. Masked today only because the PR-less rows say
+    `quadseven/grug` and the older rows say `githumps/grug` - a
+    coincidence, not a guarantee."""
+    from elder_eval.corpus import build_cases
+    from ledger import LedgerRow
+
+    rows = [
+        LedgerRow(repo="same/repo", pr=None, reviewer="c", severity="HIGH",
+                  finding_class="silent-failure", finding="a", verdict="fixed",
+                  evidence="e", ts="2026-07-21T00:00:00Z"),
+        LedgerRow(repo="same/repo", pr=7, reviewer="c", severity="HIGH",
+                  finding_class="silent-failure", finding="b", verdict="fixed",
+                  evidence="e", ts="2026-07-20T00:00:00Z"),
+    ]
+    cases = build_cases(rows)   # must not raise
+    assert [c.pr for c in cases] == [7]
+
+
+def test_committed_corpus_yields_no_prless_cases():
+    """End-to-end on the REAL corpus: the six #764-recovered rows must not
+    produce a case, or `--record` stays blocked."""
+    from pathlib import Path
+    from elder_eval.corpus import build_cases
+    from ledger import parse_jsonl
+
+    p = Path(__file__).resolve().parents[3] / "logs" / "review-ledger.jsonl"
+    cases = build_cases(parse_jsonl(p.read_text()))
+    assert all(c.pr is not None for c in cases)
+    assert not any("#None" in c.case_id for c in cases)

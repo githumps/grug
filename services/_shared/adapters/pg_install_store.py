@@ -191,6 +191,10 @@ def list_allowlisted_installs() -> list[int]:
 # set_repo_config; read with an explicit default in get_repo_config.
 _EXTRA_REPO_FLAGS = frozenset({
     "dep_watch_enabled", "reopen_watch_enabled", "guard_hygiene_watch_enabled",
+    # Chief's ISSUE-time DoR advisory. Its OWN flag, not `tpm_enabled`:
+    # turning Chief on for pull requests must not silently start
+    # commenting on every issue in the repo. Default OFF.
+    "issue_dor_enabled",
 })
 
 # Repo-level flags whose value is a STRING, not a bool (the persona flags and
