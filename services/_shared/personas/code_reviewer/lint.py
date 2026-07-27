@@ -6,10 +6,27 @@ markings but adds no coverage. This module adds coverage the model cannot
 reliably reproduce: a real linter over the changed files, whose findings
 never hallucinate because they are not generated - they are measured.
 
-Ruff first, because it is already the fleet's Python linter (provisioned to
-every repo via #995's standard `.pre-commit-config.yaml`), so a finding here
-is a rule the repo has ALREADY adopted rather than an opinion Elder is
-importing. That makes the marking arguable-with rather than noise.
+Ruff, because it is already the fleet's Python linter (provisioned to every
+repo via #995's standard `.pre-commit-config.yaml`) and grug already depends
+on the binary - so this adds coverage with no new dependency and nothing
+vendored.
+
+WHAT IS SELECTED, AND WHY THAT CHANGED. This module originally ran ruff with
+no `--select`, i.e. ruff's defaults. Measured against a file with five
+planted vulnerabilities, those defaults caught 1 of 5 - missing SQL
+injection, unsafe pickle, non-cryptographic randomness and an insecure hash.
+It now selects flake8-bandit (`S`), flake8-bugbear (`B`) and the async checks
+(`ASYNC`): 132 rules aimed squarely at the recall gap above, and 5 of 5 on
+that same file. See `_SELECT`/`_IGNORE` for the licence position and the
+measured basis for every exclusion.
+
+An honest caveat that used to be stated the other way round: the fleet's
+pre-commit adopts ruff's DEFAULTS, not `S`/`B`/`ASYNC`. So a finding from
+this module is NOT "a rule the repo already adopted" - it is grug asserting
+a rule the repo has not opted into. That is defensible because the finding
+is MEASURED rather than generated (a `noqa` settles it in one line), but it
+is a stronger claim than before and the finding text says so plainly instead
+of borrowing authority it does not have.
 
 WHY THIS IS NOT sast.py. `scan_semgrep` produces `Candidate`s that go
 through the exploitability judge, which is correct for security findings.
@@ -42,6 +59,7 @@ import tempfile
 
 from personas.code_reviewer.diff_parser import DiffHunk
 from personas.code_reviewer.persona import Finding
+from review_types import Severity  # single source (#250)
 # Reuse the canonical added-lines walk rather than a third copy of it
 # (standard-pattern-reuse-or-elect): complexity._changed_by_file already
 # walks the unified diff body and returns new-side ADDED line numbers.
@@ -61,7 +79,96 @@ _RULE = "lint-violation"
 
 # Advisory, same as complexity: a lint nit must never be the thing that
 # blocks a merge on its own.
-_SEVERITY = "medium"
+_SEVERITY: Severity = "medium"
+
+# --- rule selection: the RECALL fix -------------------------------------
+#
+# Ruff was previously invoked with NO `--select`, so it ran its DEFAULTS.
+# MEASURED, not assumed (ruff 0.16, `--isolated`, against a file containing
+# five planted vulnerabilities): the defaults caught 1 of the 5, and missed
+# SQL injection (S608), unsafe pickle (S301), non-crypto randomness (S311)
+# and an insecure hash (S324). Explicit `--select S` caught 5 of 5.
+#
+# (An earlier draft of this comment claimed the defaults were `E4,E7,E9,F`
+# with zero security coverage. That is wrong for ruff 0.16 - the defaults
+# are broader and do include some `S` rules, S110 among them. Recorded
+# because a file whose premise is "measured, not generated" has no business
+# carrying an unverified claim about its own tool.)
+#
+# Context for why this matters: #707 measured Elder's recall at 1.8% with 0
+# of 24 critical findings caught, and grug's entire SAST layer is 10
+# hand-written semgrep rules in ONE language.
+#
+# Ruff already vendors ports of flake8-bandit (73 security rules),
+# flake8-bugbear (43 real-bug rules) and its async checks (16) - all under
+# ruff's MIT licence, in a binary grug ALREADY depends on. Selecting them
+# costs nothing and needs no vendoring.
+#
+# ATTRIBUTION: rule content originates in ruff (https://github.com/astral-sh/ruff,
+# MIT), which ports flake8-bandit (Apache-2.0) and flake8-bugbear (MIT). We
+# invoke the tool and map its output; no rule text is copied into this repo.
+#
+# NOT USED, deliberately: the semgrep community registry. The "Semgrep Rules
+# License v1.0" is PROPRIETARY - it grants use for "internal business
+# purposes" only, forbids distribution, and forbids making the rules
+# "available to others as a service". grug is a public AGPL repo (vendoring
+# = distribution) AND a GitHub App reviewing other people's repos (= as a
+# service), so that registry is doubly off-limits. grug's own `grug-*` rules
+# in services/webhook/sast_rules/ stay hand-written for exactly this reason.
+_SELECT = "S,B,ASYNC"
+
+# Measured against grug's own tree before choosing (4425 raw violations ->
+# 125 after these exclusions, a 98% cut) - every entry here earned its place
+# with a number, not a hunch:
+#   S101 - `assert` used. 4284 of the 4425, and 4269 of those in tests,
+#          where assert IS the idiom. On its own it is 97% of the noise.
+#   B008 - function call in an argument default. FastAPI's `Depends()` is
+#          exactly that and is the FRAMEWORK'S REQUIRED form, so this fires
+#          on correct code across every route in services/api.
+#   S603/S607 - subprocess call / partial executable path. Whether input is
+#          trusted is not decidable from a diff, and grug shells out to
+#          ruff/semgrep/gh on purpose. A known recurring false-positive
+#          class; re-enable only with a trust model behind it.
+_IGNORE = "S101,B008,S603,S607"
+
+# Severity per rule family. A string-concatenated SQL query and a missing
+# `strict=` on zip() are not the same event, and flattening both to "medium"
+# is what makes a finding source easy to ignore wholesale.
+_HIGH_PREFIXES = (
+    "S1",   # hardcoded secrets/passwords (S105-S107), try-except-pass (S110)
+    "S3",   # weak crypto / insecure hash / unsafe URL scheme (S31x, S32x)
+    "S5",   # unsafe deserialisation + weak SSL/TLS defaults
+    "S6",   # injection: SQL (S608), shell, Jinja autoescape off
+    "S7",   # XML/XXE
+)
+
+
+def _severity_for(code: str) -> Severity:
+    """`high` for the security families, `medium` for the rest.
+
+    Deliberately prefix-based rather than an exhaustive per-code table: a
+    ruff upgrade that adds S6xx rules should inherit the right severity
+    automatically instead of silently defaulting to medium, which is the
+    direction that loses a real finding.
+    """
+    if code.startswith("S") and any(code.startswith(p) for p in _HIGH_PREFIXES):
+        return "high"
+    return _SEVERITY
+
+
+def _rule_name_for(code: str) -> str:
+    """Machine-readable finding class, so the #595 scoreboard can measure
+    precision PER CLASS. Everything used to be `lint-violation`, which made
+    'security findings are accurate, style nits are noisy' impossible to
+    see in the data - and therefore impossible to act on."""
+    if code.startswith("ASYNC"):
+        return "lint-async"
+    if code.startswith("S"):
+        return "lint-security"
+    if code.startswith("B"):
+        return "lint-bug"
+    return _RULE
+
 
 _TIMEOUT_S = 30
 _MAX_SCAN_BYTES = 1_000_000
@@ -122,7 +229,8 @@ def scan_ruff(
         with tempfile.TemporaryDirectory(prefix="grug-lint-") as tmp:
             _write(tmp, kept)
             proc = subprocess.run(
-                ["ruff", "check", "--output-format", "json", "--no-cache", tmp],
+                ["ruff", "check", "--select", _SELECT, "--ignore", _IGNORE,
+                 "--output-format", "json", "--no-cache", tmp],
                 capture_output=True, text=True, timeout=_TIMEOUT_S,
                 check=False,
             )
@@ -178,12 +286,14 @@ def _map_results(
             Finding(
                 file=path,
                 line=row,
-                severity=_SEVERITY,
-                rule_name=_RULE,
+                severity=_severity_for(code),
+                rule_name=_rule_name_for(code),
                 message=(
-                    f"ruff `{code}`: {msg}. Deterministic lint finding - this "
-                    f"rule is already configured for the fleet, so it is not "
-                    f"an opinion Elder is importing."
+                    f"ruff `{code}`: {msg}. Deterministic finding - MEASURED by "
+                    f"ruff (MIT), not generated by a model, so it cannot be a "
+                    f"hallucination. Disagree with the rule rather than with "
+                    f"whether the code matches it. Silence it with "
+                    f"`# noqa: {code}` and a reason if it is wrong here."
                 ),
                 suggestion=None,
                 effort=None,
