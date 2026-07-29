@@ -13,6 +13,8 @@ the 2026-06-14 outage unpaged:
 
 from __future__ import annotations
 
+import pathlib
+
 import pulumi
 
 from components.dd_monitors import (
@@ -442,3 +444,35 @@ def test_only_three_monitors_can_page_and_every_handle_is_recovery_gated():
                 )
 
     return pulumi.Output.all(*messages).apply(_check)
+
+
+def test_composition_root_cannot_smuggle_an_ungated_recipient() -> None:
+    """A monitor defined in __main__ bypasses the component's tiering entirely.
+
+    #789 moved page/digest and recovery-gating into dd_monitors, which covers
+    every monitor the component builds. It could not cover
+    `grug-cave-fallback-fired`, which is constructed directly in __main__ and
+    therefore kept a bare, ungated handle: 21 monitors became 4 rather than 3,
+    and the survivor pinged on recovery. That was only caught by querying
+    Datadog AFTER the deploy reported success.
+
+    So pin the structure instead of the outcome: the handle may be referenced
+    exactly twice in the composition root, to define it and to hand it to
+    create_all. Any third use is a monitor building its own message, which
+    means it opted out of the tiering without anyone deciding that.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent / "__main__.py"
+    src = root.read_text()
+    uses = [
+        line.strip()
+        for line in src.splitlines()
+        if "_dd_notify" in line and not line.strip().startswith("#")
+    ]
+    assert len(uses) == 2, (
+        "_dd_notify is used %d times in __main__.py, expected 2 "
+        "(the definition and the create_all argument). A monitor built here "
+        "does not go through _page()/_DIGEST, so it can page ungated:\n  %s"
+        % (len(uses), "\n  ".join(uses))
+    )
+    assert uses[0].startswith("_dd_notify ="), uses[0]
+    assert uses[1] == "notify_handle=_dd_notify,", uses[1]
