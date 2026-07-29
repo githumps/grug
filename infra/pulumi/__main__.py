@@ -463,7 +463,15 @@ _cave_fallback_fired_monitor = _datadog.Monitor(
     type="log alert",
     name="[grug-webhook] Cave fallback fired (1h)",
     message=(
-        f"{_dd_notify}\n"
+        # No recipient: digest tier, like the 17 in dd_monitors. This monitor's
+        # own comment above calls it informational (P4), and it fires when the
+        # BACKSTOP WORKED -- both cloud backends were down and the fallback
+        # caught it. That is automation succeeding, which must never page.
+        #
+        # It lives here rather than in the component, which is why the tiering
+        # sweep in #789 missed it: the component's `_page` / `_DIGEST` split
+        # could not reach a monitor defined in the composition root. Found by
+        # querying Datadog after that deploy went green, not by reading code.
         "Elder's owned cave fallback was enqueued >= 1 time in the last hour — "
         "both cloud LLM backends were down and the backstop kicked in. Expected "
         "to be rare; sustained firing means the SaaS backends are persistently "
