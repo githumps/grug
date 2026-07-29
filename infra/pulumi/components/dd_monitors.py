@@ -24,6 +24,43 @@ from dataclasses import dataclass
 import pulumi
 import pulumi_datadog as datadog
 
+# Digest tier carries no recipient at all. These monitors still evaluate and
+# still show their state in Datadog; they simply notify nobody, so they are
+# something you look at when you are already investigating rather than
+# something that interrupts you.
+#
+# All 21 grug monitors used to page. Applying infra's ALERTING-STANDARD.md bar
+# -- users are affected or data is at risk, AND nothing automatic will fix it
+# -- leaves exactly three that qualify:
+#
+#   - zero ready replicas          grug is down and Kubernetes already failed
+#   - /livez uptime synthetic      grug is down as far as users can tell
+#   - Elder fallback failed        a review was DROPPED; nothing retries it
+#
+# The rest are automation working as designed and must not wake anyone. A DLQ
+# with messages means retries did their job and gave up deliberately. A
+# CrashLoopBackOff is Kubernetes restarting something. "Deploy auto-rollback
+# fired" is the rollback SUCCEEDING -- paging on that is paging on a system
+# healing itself, which is the single most common false page there is.
+_DIGEST = ""
+
+
+def _page(handle: str) -> str:
+    """Wrap a recipient so Datadog only notifies on ALERT, never on recovery.
+
+    Datadog picks recipients from the RENDERED message, so a recovery message
+    containing no handle notifies nobody. Doing this here rather than at the
+    call site makes it structural: a caller cannot pass a plain handle and
+    silently get two pings per incident.
+
+    is_no_data is included because several monitors here use ABSENCE as the
+    signal (notify_no_data=True), where no data IS the failure.
+    """
+    return (
+        "{{#is_alert}}" + handle + "{{/is_alert}}"
+        "{{#is_no_data}}" + handle + "{{/is_no_data}}"
+    )
+
 
 @dataclass
 class _MonitorBundle:
@@ -246,7 +283,6 @@ class _DeployMonitorBundle:
 def create_deploy_monitors(
     *,
     env: str,
-    notify_handle: str,
     provider: datadog.Provider,
 ) -> _DeployMonitorBundle:
     """#499 release-chain monitors. In the component so the synth test
@@ -256,7 +292,7 @@ def create_deploy_monitors(
         type="metric alert",
         name="[grug] Deploy auto-rollback fired",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A grug deploy's post-apply synthetic FAILED and the last-good "
             "digests were re-applied (or a manual rollback dispatch ran). "
             "Prod is on the PREVIOUS images - the bad merge is still on "
@@ -288,7 +324,6 @@ class _QueueMonitorBundle:
 def create_owned_queue_monitors(
     *,
     env: str,
-    notify_handle: str,
     provider: datadog.Provider,
 ) -> _QueueMonitorBundle:
     """The owned-gauge queue monitor family (#379): one monitor per queue
@@ -321,7 +356,7 @@ def create_owned_queue_monitors(
             resource_name,
             type="metric alert",
             name=display_name,
-            message=f"{notify_handle}\n{body}\n{runbook}",
+            message=f"{_DIGEST}\n{body}\n{runbook}",
             query=query,
             tags=[f"env:{env}", f"service:{service}", "team:grug"],
             notify_no_data=notify_no_data,
@@ -439,7 +474,7 @@ def create_all(
         type="metric alert",
         name="[grug] Workload has zero ready replicas (10min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_page(notify_handle)}\n"
             "A grug workload (grug-webhook / grug-api / grug-consumer) has had "
             "ZERO ready replicas for 10 minutes — that service is down "
             "(crashloop, image pull, scheduling, or a failing readiness probe). "
@@ -471,7 +506,7 @@ def create_all(
         type="metric alert",
         name="[grug] Pod in CrashLoopBackOff (5min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A grug pod is in CrashLoopBackOff — it is repeatedly failing to "
             "start. Check the pod's recent logs and `kubectl describe`.\n"
             "Runbook: docs/RUNBOOK.md#crashloop"
@@ -493,7 +528,7 @@ def create_all(
         type="metric alert",
         name="[grug] Pod restarting repeatedly (>3 in 10min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A grug pod gained more than 3 restarts in 10 minutes — it is "
             "flapping (OOMKill, a crashing thread, or a transient dependency). "
             "Check the pod's restart reason and recent logs.\n"
@@ -520,7 +555,7 @@ def create_all(
         type="metric alert",
         name="[grug-poller] CronJob has not succeeded in 60min",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "The grug-poller CronJob (runs every 15m) has not completed "
             "successfully in over an hour — reaction/stuck-PR reconciliation "
             "has stopped. Check the most recent grug-poller Job's logs.\n"
@@ -546,7 +581,7 @@ def create_all(
         type="log alert",
         name="[grug-webhook] HMAC signature-verify failures > 0.1/min (10min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "Webhook is rejecting GitHub deliveries on signature mismatch. "
             "Either the App webhook secret rotated and SSM is stale, OR "
             "an outside party is probing /webhook/github.\n"
@@ -572,7 +607,7 @@ def create_all(
         type="log alert",
         name="[grug] Roles Anywhere credential acquisition failing (15min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A grug workload cannot acquire (or prove) Roles Anywhere "
             "credentials - broken cert chain, stuck renewal, wrong "
             "identity, or Roles Anywhere outage. Pods fail loud at boot; "
@@ -598,7 +633,7 @@ def create_all(
         type="log alert",
         name="[grug-webhook] Async persona offload failures > 0 (15min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "An async persona handoff failed (Elder/Guard enqueue or worker) OR "
             "the in-cluster Cave secret judge failed closed (#439 - secret "
             "candidates suppressed this pass, never sent to SaaS). "
@@ -634,7 +669,7 @@ def create_all(
         type="log alert",
         name="[grug-webhook] Persona dispatch unhandled failure > 0 (15min)",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A persona blew through its webhook dispatch entry - the "
             "delivery was ACKed 200 with result=unhandled_error, so GitHub "
             "and the replay sweep both consider it delivered (ADR-0010 "
@@ -673,7 +708,7 @@ def create_all(
         type="log alert",
         name="[grug-webhook] Elder fallback failed — review dropped for real (30m)",
         message=(
-            f"{notify_handle}\n"
+            f"{_page(notify_handle)}\n"
             "A PR review was dropped AND Elder's owned cave fallback did not "
             "heal it — the Cave answered degraded, the fallback enqueue failed, "
             "or a large diff couldn't spill to S3. (Clouds-down alone is "
@@ -710,7 +745,7 @@ def create_all(
         type="metric alert",
         name="[grug] Enforcement gap — repo with enforcement_type:none > 1h",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "A TPM-enabled repo has had no enforcement for >1 hour. "
             "PRs can merge without passing the DoR check.\n"
             "Runbook: docs/RUNBOOK.md#enforcement-gap"
@@ -736,7 +771,7 @@ def create_all(
         type="log alert",
         name="[grug] CF auth-boundary mismatch > 10 in 10min",
         message=(
-            f"{notify_handle}\n"
+            f"{_DIGEST}\n"
             "X-Grug-CF-Secret mismatches detected on non-/livez requests. "
             "Either CF Worker binding ↔ SSM param drifted (rotation in "
             "progress?) or someone is probing the Function URL directly.\n"
@@ -769,7 +804,7 @@ def create_all(
         status="live",
         locations=["aws:us-east-1"],
         message=(
-            f"{notify_handle}\n"
+            f"{_page(notify_handle)}\n"
             f"Synthetic uptime check on {livez_url} "
             "failing. GitHub webhook deliveries may be dropping.\n"
             "Runbook: docs/RUNBOOK.md#uptime-fail"
