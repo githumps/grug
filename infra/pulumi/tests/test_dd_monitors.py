@@ -314,7 +314,6 @@ def test_owned_queue_monitors_no_data_pager_placement():
     provider = datadog.Provider("test-dd-queues", api_key="x", app_key="y")
     bundle = dd_monitors.create_owned_queue_monitors(
         env="prod",
-        notify_handle="@webhook-grug-discord-monitoring",
         provider=provider,
     )
 
@@ -364,7 +363,7 @@ def test_deploy_monitor_pin():
 
     provider = datadog.Provider("test-dd-deploy", api_key="x", app_key="y")
     bundle = dd_monitors.create_deploy_monitors(
-        env="prod", notify_handle="@webhook-grug-discord-monitoring",
+        env="prod",
         provider=provider,
     )
 
@@ -376,3 +375,70 @@ def test_deploy_monitor_pin():
     return pulumi.Output.all(
         bundle.rollback_fired.query, bundle.rollback_fired.notify_no_data,
     ).apply(check)
+
+
+@pulumi.runtime.test
+def test_only_three_monitors_can_page_and_every_handle_is_recovery_gated():
+    """Pin the alert tiering, because its failure mode is silence, not noise.
+
+    All 21 grug monitors used to carry a bare handle. That meant two pings per
+    incident (broke, then fixed itself) and a page for things like "deploy
+    auto-rollback fired", which is the rollback SUCCEEDING. Applying infra's
+    ALERTING-STANDARD bar leaves exactly three that qualify.
+
+    Both halves matter and neither is visible in review:
+    - a monitor that quietly regains a handle starts paging again
+    - a handle outside {{#is_alert}} notifies on RECOVERY, which is the
+      specific behaviour that made the Discord channel unreadable
+    """
+    import pulumi_datadog as datadog
+
+    from components import dd_monitors
+
+    handle = "@webhook-grug-discord-monitoring"
+    provider = datadog.Provider("test-dd-tiers", api_key="x", app_key="y")
+    bundle = dd_monitors.create_all(
+        env="prod",
+        notify_handle=handle,
+        webhook_public_url="https://webhook.example/webhook/github",
+        api_public_url="https://api.example",
+        provider=provider,
+    )
+
+    paging = {
+        "workload_not_ready": bundle.workload_not_ready,
+        "elder_llm_degraded": bundle.elder_llm_degraded,
+    }
+    silent = {
+        "crashloop": bundle.crashloop,
+        "restart_spike": bundle.restart_spike,
+        "poller_cronjob": bundle.poller_cronjob,
+        "sig_verify_fail": bundle.sig_verify_fail,
+        "elder_offload_fail": bundle.elder_offload_fail,
+        "persona_dispatch_unhandled": bundle.persona_dispatch_unhandled,
+        "enforcement_gap": bundle.enforcement_gap,
+        "cf_secret_mismatch": bundle.cf_secret_mismatch,
+        "credential_acquisition_fail": bundle.credential_acquisition_fail,
+    }
+
+    names = list(paging) + list(silent)
+    messages = [m.message for m in list(paging.values()) + list(silent.values())]
+
+    def _check(vals):
+        for name, msg in zip(names, vals):
+            msg = msg or ""
+            if name in paging:
+                assert handle in msg, f"{name} is page tier but carries no handle"
+                # The handle must sit INSIDE the alert block, or Datadog
+                # renders it on the recovery notification too.
+                gated = f"{{{{#is_alert}}}}{handle}" in msg or (
+                    "{{#is_alert}}" in msg and "{{/is_alert}}" in msg
+                )
+                assert gated, f"{name} handle is not recovery-gated"
+            else:
+                assert handle not in msg, (
+                    f"{name} is digest tier and must notify nobody; "
+                    "it regained a recipient"
+                )
+
+    return pulumi.Output.all(*messages).apply(_check)

@@ -424,6 +424,11 @@ _dd_discord = _datadog.Webhook(
     payload='{"content": "$EVENT_TITLE\\n$EVENT_MSG\\n$LINK"}',
     opts=pulumi.ResourceOptions(provider=_dd_provider),
 )
+# Plain handle on purpose. dd_monitors decides BOTH whether a given monitor may
+# page at all and how the recipient is recovery-gated, so those properties are
+# structural rather than dependent on what this file happens to pass in. See
+# `_page` / `_DIGEST` there, and infra's production/docs/ALERTING-STANDARD.md,
+# which this repo consumes as the upstream contract.
 _dd_notify = "@webhook-grug-discord-monitoring"
 
 monitors = dd_monitors.create_all(
@@ -440,14 +445,12 @@ monitors = dd_monitors.create_all(
 # telemetry-health monitor is the family's ONLY no-data pager.
 _queue_monitors = dd_monitors.create_owned_queue_monitors(
     env=env,
-    notify_handle=_dd_notify,
     provider=_dd_provider,
 )
 
 # Release-chain monitors (#499): rollback-fired pager.
 _deploy_monitors = dd_monitors.create_deploy_monitors(
     env=env,
-    notify_handle=_dd_notify,
     provider=_dd_provider,
 )
 
