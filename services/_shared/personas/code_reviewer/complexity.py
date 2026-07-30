@@ -39,6 +39,13 @@ def _cap_env(name: str, default: int) -> int:
 _DEFAULT_CYCLOMATIC_CAP = _cap_env("GRUG_COMPLEXITY_CYCLO_CAP", 15)
 _DEFAULT_COGNITIVE_CAP = _cap_env("GRUG_COMPLEXITY_COGNITIVE_CAP", 25)
 
+# How much WORSE an already-over-cap function must get before it is worth an
+# inline comment. Small churn inside a tangled function is normal maintenance;
+# only a real step change is this PR's doing. Tunable, but not per-repo config
+# - a threshold nobody can explain is a threshold nobody trusts.
+_REGRESSION_CYCLO = _cap_env("GRUG_COMPLEXITY_REGRESSION_CYCLO", 3)
+_REGRESSION_COG = _cap_env("GRUG_COMPLEXITY_REGRESSION_COG", 5)
+
 _RULE = "high-complexity"
 
 
@@ -131,12 +138,35 @@ def _func_line_span(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, 
     return start, end
 
 
+def _score_functions(source: str) -> dict[str, tuple[int, int]]:
+    """`{function name: (cyclomatic, cognitive)}` for one file, or {} if it
+    does not parse. Keyed by NAME, not line span, because the whole point is
+    to compare across two revisions where line numbers have moved."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Same bare name twice in a file (an overload, a method on two
+            # classes): keep the WORST base score. Comparing against the
+            # gentler twin would manufacture a fake regression.
+            prev = out.get(node.name)
+            cur = (cyclomatic_complexity(node), cognitive_complexity(node))
+            out[node.name] = cur if prev is None else (
+                max(prev[0], cur[0]), max(prev[1], cur[1])
+            )
+    return out
+
+
 def scan_complexity(
     hunks: tuple[DiffHunk, ...],
     file_contents: dict[str, str],
     *,
     cyclomatic_cap: int | None = None,
     cognitive_cap: int | None = None,
+    base_contents: dict[str, str] | None = None,
 ) -> tuple[Finding, ...]:
     """One advisory Finding per changed Python function over a cap. Pure.
 
@@ -149,6 +179,12 @@ def scan_complexity(
     cog_cap = cognitive_cap if cognitive_cap is not None else _DEFAULT_COGNITIVE_CAP
     changed = _changed_by_file(hunks)
     findings: list[Finding] = []
+    # Base scores keyed by path -> {func name: (cyclo, cog)}. Empty dict when
+    # no base was supplied, which preserves the historical absolute-threshold
+    # behaviour so this stays safe to merge before dispatch is wired.
+    base_scores: dict[str, dict[str, tuple[int, int]]] = {
+        path: _score_functions(src) for path, src in (base_contents or {}).items()
+    }
 
     for path, changed_lines in changed.items():
         if not path.endswith(".py") or not changed_lines:
@@ -172,11 +208,53 @@ def scan_complexity(
             cog = cognitive_complexity(node)
             if cyclo <= cyclo_cap and cog <= cog_cap:
                 continue
+
+            # REGRESSION GATE. Without a base to compare against, a function
+            # is flagged for its HEAD score - so touching one line of an
+            # already-tangled function reports its whole pre-existing debt as
+            # if this PR caused it. Measured live: PR #766 was told
+            # `poller_handler.handler` was cyclomatic 30 / cognitive 53, which
+            # was EXACTLY main's baseline; the PR had not touched it (#767).
+            # An adversarial review of the last 120 findings put this rule at
+            # 85 of them - 71% of everything grug says - with most replies
+            # saying "pre-existing" or "outside this PR".
+            #
+            # When `base_contents` carries the file, publish only what THIS PR
+            # actually did:
+            #   - crossed a cap that the base was under, or
+            #   - pushed an already-over function further by a real margin, or
+            #   - added a new function already over a cap.
+            # A PR that touches a tangled function without worsening it - or
+            # that IMPROVES it - now says nothing, which is the whole point.
+            base_cyclo, base_cog = base_scores.get(path, {}).get(node.name, (None, None))
+            kind = "new"
+            if base_cyclo is not None and base_cog is not None:
+                crossed = (
+                    (base_cyclo <= cyclo_cap < cyclo)
+                    or (base_cog <= cog_cap < cog)
+                )
+                worsened = (
+                    cyclo - base_cyclo >= _REGRESSION_CYCLO
+                    or cog - base_cog >= _REGRESSION_COG
+                )
+                if not (crossed or worsened):
+                    continue
+                kind = "crossed" if crossed else "worsened"
+
             over = []
             if cyclo > cyclo_cap:
                 over.append(f"cyclomatic {cyclo} (cap {cyclo_cap})")
             if cog > cog_cap:
                 over.append(f"cognitive {cog} (cap {cog_cap})")
+            delta = ""
+            if base_cyclo is not None and base_cog is not None:
+                delta = (
+                    f" This PR moved it {base_cyclo}->{cyclo} cyclomatic, "
+                    f"{base_cog}->{cog} cognitive."
+                )
+            elif base_scores:
+                # base was READ and this function was absent from it
+                delta = " New function at this size."
             findings.append(
                 Finding(
                     file=path,
@@ -185,11 +263,12 @@ def scan_complexity(
                     rule_name=_RULE,
                     message=(
                         f"Function `{node.name}` too tangled -- "
-                        f"{', '.join(over)}. Grug say: break into smaller pieces "
-                        f"so next hunter read it without getting lost."
+                        f"{', '.join(over)}.{delta} Grug say: break into smaller "
+                        f"pieces so next hunter read it without getting lost."
                     ),
                     suggestion=None,
                     effort="heavy-lift",
                 )
             )
+            _ = kind
     return tuple(findings)
