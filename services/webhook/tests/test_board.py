@@ -95,3 +95,67 @@ def test_empty_body_upsert_is_safe():
 def test_is_board_rejects_a_plain_comment():
     assert not board.is_board("just a human comment")
     assert not board.is_board("")
+
+
+# --- the verdict header IS the email ----------------------------------------
+# GitHub notifies on comment CREATION only, so the mail a human receives is
+# exactly the body at first post. These pin that it leads with a conclusion
+# and that evidence stays folded.
+
+def test_clean_review_is_a_single_sentence():
+    """Nothing wrong -> the whole email is one line. A clean review that
+    costs a scroll is a clean review nobody reads next time."""
+    h = board.render_header("#1 Bump pytest", 0, 0)
+    assert "Trail clear" in h
+    assert "block" not in h and "advise" not in h
+    assert len([l for l in h.splitlines() if l.strip()]) == 2  # verdict + title
+
+
+def test_blocking_verdict_leads_and_counts():
+    h = board.render_header("#2 thing", 2, 5)
+    first = h.splitlines()[0]
+    assert "WAIT" in first          # conclusion is the FIRST thing rendered
+    assert "**2 block**" in h and "5 advise" in h
+
+
+def test_advisory_only_does_not_say_wait():
+    """Advisory findings never block, so telling the author to WAIT would be
+    a lie that trains them to ignore the verdict line."""
+    h = board.render_header("#3", 0, 4)
+    assert "WAIT" not in h and "go" in h
+
+
+def test_degraded_says_so_rather_than_claiming_clear():
+    """A degraded pass must never render as 'Trail clear' - that is grug
+    asserting an all-clear it did not actually establish."""
+    h = board.render_header("#4", 0, 0, degraded=True)
+    assert "cloudy" in h and "Trail clear" not in h
+
+
+def test_header_is_replaced_not_duplicated_across_passes():
+    """Regenerated every pass as personas report in; the email keeps the
+    creation-time copy, which is why creation must be verdict-shaped."""
+    b = board.set_header(board.new_board(), board.render_header("#5", 0, 0))
+    b = board.upsert_section(b, "elder", "E")
+    b2 = board.set_header(b, board.render_header("#5", 3, 1))
+    assert b2.count(board.BOARD_MARKER) == 1
+    assert "Trail clear" not in b2 and "WAIT" in b2
+    assert "E" in b2                      # sections survive a header rewrite
+
+
+def test_header_rewrite_preserves_every_section():
+    b = board.set_header(board.new_board(), board.render_header("#6", 0, 0))
+    for k in ("teller", "elder", "sentinel"):
+        b = board.upsert_section(b, k, f"{k}-body")
+    b = board.set_header(b, board.render_header("#6", 1, 0))
+    for k in ("teller", "elder", "sentinel"):
+        assert f"{k}-body" in b
+    assert board.section_keys(b) == ["teller", "elder", "sentinel"]
+
+
+def test_evidence_is_folded_so_the_email_stays_short():
+    """The complaint that started this: a file table and a diagram rendered
+    inline made the email a diff dump."""
+    sec = board.collapse("What changed - 6 files", "| f | +/- |\n|---|---|\n| a.py | +6/-1 |")
+    assert sec.startswith("<details>")     # collapsed by default
+    assert "<summary>" in sec
