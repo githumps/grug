@@ -97,3 +97,74 @@ class TestScanComplexity:
     def test_missing_full_file_content_skipped(self):
         hunks = (_hunk("services/x.py", 3, ["        return 3"]),)
         assert scan_complexity(hunks, {}) == ()   # no content -> can't measure
+
+
+# --- regression gate: publish what THIS PR did, not pre-existing debt --------
+
+def _tangled(extra: int = 0) -> str:
+    body = "\n".join(f"    if x{i}: pass" for i in range(18 + extra))
+    return f"def handler(x):\n{body}\n    return 1\n"
+
+
+def _one_hunk() -> tuple[DiffHunk, ...]:
+    return (DiffHunk(file_path="a.py", new_start=1, new_lines=frozenset(),
+                     body="@@ -1 +1 @@\n+    if x0: pass\n"),)
+
+
+def test_touching_a_tangled_function_without_worsening_it_is_silent():
+    """The measured failure. PR #766 was told `poller_handler.handler` was
+    cyclomatic 30 / cognitive 53 - EXACTLY main's baseline, which the PR had
+    not touched (#767). An adversarial audit put this rule at 85 of the last
+    120 findings, most replies saying "pre-existing"."""
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()},
+                          base_contents={"a.py": _tangled()})
+    assert out == ()
+
+
+def test_improving_a_tangled_function_is_silent():
+    """Still over cap, but better than base. Nagging someone for reducing
+    complexity is the fastest way to teach them to ignore the rule."""
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()},
+                          base_contents={"a.py": _tangled(10)})
+    assert out == ()
+
+
+def test_material_worsening_is_reported_with_the_delta():
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled(6)},
+                          base_contents={"a.py": _tangled()})
+    assert len(out) == 1
+    assert "moved it" in out[0].message      # states what THIS PR did
+    assert "->" in out[0].message
+
+
+def test_new_function_over_cap_is_reported():
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()},
+                          base_contents={"a.py": "def other():\n    pass\n"})
+    assert len(out) == 1
+    assert "New function" in out[0].message
+
+
+def test_absent_base_preserves_absolute_behaviour():
+    """Backward compatible: safe to merge before dispatch is wired, and a
+    base-fetch failure degrades to the old behaviour rather than going
+    silent - silence on a fetch error would hide real regressions."""
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()})
+    assert len(out) == 1
+
+
+def test_duplicate_function_names_compare_against_the_worst_base():
+    """Two `handler`s in one file (a method on two classes). Comparing the
+    tangled head against the GENTLER twin would manufacture a fake
+    regression, so the base keeps the worst score."""
+    base = _tangled(8) + "\nclass B:\n    def handler(self):\n        return 1\n"
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()}, base_contents={"a.py": base})
+    assert out == ()
+
+
+def test_unparseable_base_degrades_to_absolute_not_silence():
+    """A base that does not parse must not be read as 'no complexity there',
+    which would turn every touched function into a fake new-function finding
+    or, worse, silently swallow a real one."""
+    out = scan_complexity(_one_hunk(), {"a.py": _tangled()},
+                          base_contents={"a.py": "def broken(:\n"})
+    assert len(out) == 1
