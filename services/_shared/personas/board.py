@@ -136,3 +136,84 @@ def collapse(summary: str, markdown: str, *, open_by_default: bool = False) -> s
         f"<details{attr}>\n<summary>{summary}</summary>\n\n"
         f"{markdown.strip()}\n\n</details>"
     )
+
+# --- the verdict header: this IS the email ---------------------------------
+#
+# GitHub notifies on comment CREATION, never on edit. So the email a human
+# receives is EXACTLY the body at the moment the board is first posted, and
+# every later persona pass is silent. Two consequences drive everything here:
+#
+#   1. The first body must lead with a VERDICT, not with evidence. Today the
+#      first thing posted is Teller's walkthrough - a file table plus a
+#      mermaid diagram - so the email is maximum noise and zero conclusion.
+#   2. Everything that is evidence rather than conclusion must be FOLDED, so
+#      the mail client renders a few lines instead of a diff dump.
+#
+# The header is regenerated on every pass (`set_header`), so the comment stays
+# accurate as personas report in - the email just froze the earliest version,
+# which is why that version has to be worth reading on its own.
+
+_HEADER_END = "<!-- /grug-header -->"
+
+# Caveman voice, one line, verdict first. Kept deliberately short: this is a
+# subject line, not a paragraph.
+_VERDICT_BLOCK = "Grug say **WAIT**. Something here bite tribe later."
+_VERDICT_ADVISE = "Grug say **go**, but Grug leave few marks for hunter."
+_VERDICT_CLEAR = "Grug look hard. **Trail clear.**"
+_VERDICT_DEGRADED = "Grug eyes cloudy this pass - **read for self**."
+
+
+def verdict_line(blocking: int, advisory: int, *, degraded: bool = False) -> str:
+    """One caveman sentence. Never more - the email is a notification, not a
+    report, and the report is one click away in the folded sections."""
+    if degraded:
+        return _VERDICT_DEGRADED
+    if blocking:
+        return _VERDICT_BLOCK
+    if advisory:
+        return _VERDICT_ADVISE
+    return _VERDICT_CLEAR
+
+
+def tally_line(blocking: int, advisory: int) -> str:
+    """The counts, in words a human can act on. Empty when there is nothing
+    to count, so a clean review stays a single sentence."""
+    parts = []
+    if blocking:
+        parts.append(f"**{blocking} block**")
+    if advisory:
+        parts.append(f"{advisory} advise")
+    return " - ".join(parts)
+
+
+def render_header(
+    title: str, blocking: int, advisory: int, *, degraded: bool = False,
+) -> str:
+    """The whole visible email: a verdict sentence, an optional tally, and the
+    PR title. Three lines at most."""
+    lines = [f"### {verdict_line(blocking, advisory, degraded=degraded)}"]
+    tally = tally_line(blocking, advisory)
+    if tally:
+        lines.append("")
+        lines.append(tally)
+    if title:
+        lines.append("")
+        lines.append(f"_{title}_")
+    return "\n".join(lines)
+
+
+def set_header(body: str, header: str) -> str:
+    """Replace the header region, leaving every section untouched.
+
+    Regenerated on each pass so the comment stays true as personas report in.
+    The EMAIL keeps whatever the header said at creation - which is precisely
+    why the creating persona must post a verdict rather than evidence.
+    """
+    block = f"{BOARD_MARKER}\n{header.rstrip()}\n{_HEADER_END}"
+    if _HEADER_END in body:
+        idx = body.index(_HEADER_END) + len(_HEADER_END)
+        return block + body[idx:]
+    if BOARD_MARKER in body:
+        idx = body.index(BOARD_MARKER) + len(BOARD_MARKER)
+        return block + body[idx:]
+    return block + "\n" + body
