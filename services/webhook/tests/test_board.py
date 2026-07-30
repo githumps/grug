@@ -1,0 +1,97 @@
+"""Unified review board: one comment per PR, one email per PR.
+
+The properties worth pinning are the ones that make the board SAFE to have
+several personas writing into the same comment concurrently:
+  - a persona rewrites only the bytes between its own delimiters
+  - order is fixed, so the comment does not reshuffle between passes
+  - an unknown section from a newer/older grug is preserved, never dropped
+"""
+from __future__ import annotations
+
+from personas import board
+
+
+def test_new_board_starts_with_the_marker():
+    """The comment-finder matches on the marker alone, so it must be first
+    and must not depend on parsing anything else."""
+    b = board.new_board()
+    assert b.startswith(board.BOARD_MARKER)
+    assert board.is_board(b)
+
+
+def test_upsert_inserts_then_replaces_in_place():
+    b = board.new_board()
+    b = board.upsert_section(b, "elder", "first")
+    assert "first" in b
+    b2 = board.upsert_section(b, "elder", "second")
+    assert "second" in b2 and "first" not in b2
+    assert b2.count("<!-- grug-sec:elder -->") == 1
+
+
+def test_a_persona_never_touches_another_persona_section():
+    """The concurrency guarantee. Two personas writing the same comment can
+    only clobber their OWN region."""
+    b = board.new_board()
+    b = board.upsert_section(b, "elder", "ELDER-BODY")
+    b = board.upsert_section(b, "teller", "TELLER-BODY")
+    b = board.upsert_section(b, "elder", "ELDER-REWRITTEN")
+    assert "TELLER-BODY" in b
+    assert "ELDER-REWRITTEN" in b and "ELDER-BODY" not in b
+
+
+def test_sections_render_in_fixed_order_regardless_of_arrival():
+    """A board whose layout moves between passes is one nobody learns to
+    skim. Arrival order must not decide render order."""
+    b = board.new_board()
+    for key in ("sentinel", "elder", "chief"):     # deliberately reversed
+        b = board.upsert_section(b, key, f"{key}-body")
+    assert board.section_keys(b) == ["chief", "elder", "sentinel"]
+    assert b.index("chief-body") < b.index("elder-body") < b.index("sentinel-body")
+
+
+def test_unknown_section_is_preserved_not_dropped():
+    """An older or newer grug may have written a section this version does
+    not know about. Dropping it would silently delete a persona's output."""
+    b = board.new_board()
+    b = board.upsert_section(b, "elder", "e")
+    b = board.upsert_section(b, "from-the-future", "keep me")
+    b = board.upsert_section(b, "elder", "e2")
+    assert "keep me" in b
+    assert "from-the-future" in board.section_keys(b)
+
+
+def test_section_body_containing_another_marker_cannot_run_past_its_close():
+    """Non-greedy match + escaped delimiters: a section quoting another
+    section's marker text must not swallow the rest of the board."""
+    b = board.new_board()
+    b = board.upsert_section(b, "elder", "quoting <!-- grug-sec:teller --> inline")
+    b = board.upsert_section(b, "guard", "GUARD-BODY")
+    b = board.upsert_section(b, "elder", "clean")
+    assert "GUARD-BODY" in b
+    assert "clean" in b
+
+
+def test_collapse_keeps_blank_lines_so_github_renders_markdown():
+    """Without the blank lines GitHub does not render markdown inside
+    <details> - the section degrades to literal asterisks and pipes. This is
+    the most common way a folded section looks broken."""
+    out = board.collapse("Summary", "| a | b |\n|---|---|")
+    assert "<summary>Summary</summary>\n\n" in out
+    assert out.rstrip().endswith("\n\n</details>")
+
+
+def test_collapse_can_default_open():
+    assert "<details open>" in board.collapse("s", "b", open_by_default=True)
+    assert "<details>" in board.collapse("s", "b")
+
+
+def test_empty_body_upsert_is_safe():
+    """Defensive: a board comment whose body was manually emptied must not
+    raise - it rebuilds rather than crashing the review."""
+    out = board.upsert_section("", "elder", "x")
+    assert "x" in out and "<!-- grug-sec:elder -->" in out
+
+
+def test_is_board_rejects_a_plain_comment():
+    assert not board.is_board("just a human comment")
+    assert not board.is_board("")
