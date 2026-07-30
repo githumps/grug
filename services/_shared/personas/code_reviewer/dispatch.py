@@ -303,6 +303,35 @@ def _review_snapshot_freshness_failure(
 _MAX_CONTEXT_FILES = 20
 
 
+def _fetch_base_contents(
+    installation_id: int, owner: str, repo_name: str, pull_number: int,
+    changed_paths: tuple[str, ...], base_ref: str,
+) -> dict[str, str]:
+    """Same files at the BASE revision, so complexity can report what THIS PR
+    did rather than a function's pre-existing debt (#767).
+
+    Returns {} on any failure, which `scan_complexity` reads as "no base" and
+    falls back to the old absolute behaviour. That direction is deliberate:
+    going SILENT on a fetch error would hide real regressions, whereas falling
+    back only restores the previous noise level.
+    """
+    if not (base_ref and changed_paths):
+        return {}
+    try:
+        return with_install_token_retry(
+            installation_id,
+            lambda token: _fetch_file_contents(
+                token, owner, repo_name, changed_paths, base_ref
+            ),
+        ) or {}
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        log.info(
+            "code_review_base_contents_unavailable",
+            extra={"pr": f"{owner}/{repo_name}#{pull_number}", "error": str(e)},
+        )
+        return {}
+
+
 def _fetch_file_contents(
     install_token: str,
     owner: str,
@@ -1645,22 +1674,10 @@ def dispatch_code_review(
     # and falls back to the old absolute behaviour. That direction is
     # deliberate: going SILENT on a fetch error would hide real regressions,
     # whereas falling back only restores the previous noise level.
-    base_file_contents: dict[str, str] = {}
-    base_ref = str(pr_context.get("base_sha") or "")
-    if base_ref and changed_paths:
-        try:
-            base_file_contents = with_install_token_retry(
-                installation_id,
-                lambda token: _fetch_file_contents(
-                    token, owner, repo_name, changed_paths, base_ref
-                ),
-            ) or {}
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            log.info(
-                "code_review_base_contents_unavailable",
-                extra={"pr": f"{owner}/{repo_name}#{pull_number}", "error": str(e)},
-            )
-            base_file_contents = {}
+    base_file_contents = _fetch_base_contents(
+        installation_id, owner, repo_name, pull_number,
+        changed_paths, str(pr_context.get("base_sha") or ""),
+    )
 
     # Cross-file context (#468): resolve the diff's changed defs + external
     # calls to the UNCHANGED files that define/call them, so the Elder can

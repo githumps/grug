@@ -160,6 +160,93 @@ def _score_functions(source: str) -> dict[str, tuple[int, int]]:
     return out
 
 
+def _is_regression(
+    base_cyclo: int | None, base_cog: int | None,
+    cyclo: int, cog: int, cyclo_cap: int, cog_cap: int,
+) -> bool:
+    """Did THIS PR cause the over-cap state, or was it already there?
+
+    No base (fetch failed, unparseable, or new file) -> True, i.e. fall back
+    to the old absolute behaviour. Going SILENT on a missing base would hide
+    real regressions; falling back only restores the previous noise level.
+    """
+    if base_cyclo is None or base_cog is None:
+        return True
+    crossed = (base_cyclo <= cyclo_cap < cyclo) or (base_cog <= cog_cap < cog)
+    worsened = (
+        cyclo - base_cyclo >= _REGRESSION_CYCLO
+        or cog - base_cog >= _REGRESSION_COG
+    )
+    return crossed or worsened
+
+
+def _delta_phrase(
+    base_cyclo: int | None, base_cog: int | None,
+    cyclo: int, cog: int, had_base: bool,
+) -> str:
+    """What the PR actually did, in words - the part that makes the finding
+    arguable-with instead of a bare threshold assertion."""
+    if base_cyclo is not None and base_cog is not None:
+        return (
+            f" This PR moved it {base_cyclo}->{cyclo} cyclomatic, "
+            f"{base_cog}->{cog} cognitive."
+        )
+    return " New function at this size." if had_base else ""
+
+
+def _scan_one_file(
+    path: str, source: str, changed_lines: set[int],
+    base: dict[str, tuple[int, int]], had_base: bool,
+    cyclo_cap: int, cog_cap: int,
+) -> list[Finding]:
+    """Findings for one file. Split out of `scan_complexity` because that
+    function tripped its OWN cap once the regression gate landed (19/30 vs
+    16/26 on main) - a complexity rule that cannot pass its own rule is not
+    one anybody will take seriously."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []  # unparseable (partial file, py2, generated) -> skip
+
+    out: list[Finding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        start, end = _func_line_span(node)
+        touched = {ln for ln in changed_lines if start <= ln <= end}
+        if not touched:
+            continue
+        cyclo = cyclomatic_complexity(node)
+        cog = cognitive_complexity(node)
+        if cyclo <= cyclo_cap and cog <= cog_cap:
+            continue
+
+        base_cyclo, base_cog = base.get(node.name, (None, None))
+        if not _is_regression(base_cyclo, base_cog, cyclo, cog, cyclo_cap, cog_cap):
+            continue
+
+        over = []
+        if cyclo > cyclo_cap:
+            over.append(f"cyclomatic {cyclo} (cap {cyclo_cap})")
+        if cog > cog_cap:
+            over.append(f"cognitive {cog} (cap {cog_cap})")
+        delta = _delta_phrase(base_cyclo, base_cog, cyclo, cog, had_base)
+        out.append(Finding(
+            file=path,
+            line=min(touched),
+            severity="medium",  # advisory: never blocks on its own
+            rule_name=_RULE,
+            message=(
+                f"Function `{node.name}` too tangled -- "
+                f"{', '.join(over)}.{delta} Grug say: break into smaller "
+                f"pieces so next hunter read it without getting lost."
+            ),
+            suggestion=None,
+            effort="heavy-lift",
+        ))
+    return out
+
+
 def scan_complexity(
     hunks: tuple[DiffHunk, ...],
     file_contents: dict[str, str],
@@ -168,107 +255,36 @@ def scan_complexity(
     cognitive_cap: int | None = None,
     base_contents: dict[str, str] | None = None,
 ) -> tuple[Finding, ...]:
-    """One advisory Finding per changed Python function over a cap. Pure.
+    """Advisory Findings for functions THIS PR pushed over a complexity cap.
 
-    Only functions whose line span overlaps a changed line are scanned (a diff
-    that just touches one method of a huge class doesn't flag the others). The
-    finding anchors on the SMALLEST changed line inside the function so it is
-    diff-anchored. `file_contents` is the #336 full-file-at-head fetch (needed
-    to see the WHOLE function, not just the diff hunk)."""
+    Only functions whose span overlaps a changed line are scanned, and the
+    finding anchors on the smallest changed line inside the function so it
+    stays diff-anchored. `file_contents` is the #336 full-file-at-head fetch.
+
+    REGRESSION GATE. Without a base, a function is flagged for its HEAD score,
+    so touching one line of an already-tangled function reported its entire
+    pre-existing debt as if this PR caused it. Measured: PR #766 was told
+    `poller_handler.handler` was cyclomatic 30 / cognitive 53 - exactly main's
+    baseline, on a function it had not touched (#767). An adversarial audit of
+    the last 120 findings put this rule at 85 of them, 71% of all output, with
+    most replies saying "pre-existing". With `base_contents`, only a crossed
+    cap, a material worsening, or a new over-cap function is published.
+
+    Pure: no IO.
+    """
     cyclo_cap = cyclomatic_cap if cyclomatic_cap is not None else _DEFAULT_CYCLOMATIC_CAP
     cog_cap = cognitive_cap if cognitive_cap is not None else _DEFAULT_COGNITIVE_CAP
-    changed = _changed_by_file(hunks)
-    findings: list[Finding] = []
-    # Base scores keyed by path -> {func name: (cyclo, cog)}. Empty dict when
-    # no base was supplied, which preserves the historical absolute-threshold
-    # behaviour so this stays safe to merge before dispatch is wired.
-    base_scores: dict[str, dict[str, tuple[int, int]]] = {
+    base_scores = {
         path: _score_functions(src) for path, src in (base_contents or {}).items()
     }
-
-    for path, changed_lines in changed.items():
-        if not path.endswith(".py") or not changed_lines:
-            continue
+    findings: list[Finding] = []
+    for path, changed_lines in _changed_by_file(hunks).items():
         source = file_contents.get(path)
-        if not source:
-            continue  # no full-file content -> can't measure whole functions
-        try:
-            tree = ast.parse(source)
-        except (SyntaxError, ValueError):
-            continue  # unparseable (partial file, py2, generated) -> skip
-
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            start, end = _func_line_span(node)
-            touched = {ln for ln in changed_lines if start <= ln <= end}
-            if not touched:
-                continue
-            cyclo = cyclomatic_complexity(node)
-            cog = cognitive_complexity(node)
-            if cyclo <= cyclo_cap and cog <= cog_cap:
-                continue
-
-            # REGRESSION GATE. Without a base to compare against, a function
-            # is flagged for its HEAD score - so touching one line of an
-            # already-tangled function reports its whole pre-existing debt as
-            # if this PR caused it. Measured live: PR #766 was told
-            # `poller_handler.handler` was cyclomatic 30 / cognitive 53, which
-            # was EXACTLY main's baseline; the PR had not touched it (#767).
-            # An adversarial review of the last 120 findings put this rule at
-            # 85 of them - 71% of everything grug says - with most replies
-            # saying "pre-existing" or "outside this PR".
-            #
-            # When `base_contents` carries the file, publish only what THIS PR
-            # actually did:
-            #   - crossed a cap that the base was under, or
-            #   - pushed an already-over function further by a real margin, or
-            #   - added a new function already over a cap.
-            # A PR that touches a tangled function without worsening it - or
-            # that IMPROVES it - now says nothing, which is the whole point.
-            base_cyclo, base_cog = base_scores.get(path, {}).get(node.name, (None, None))
-            kind = "new"
-            if base_cyclo is not None and base_cog is not None:
-                crossed = (
-                    (base_cyclo <= cyclo_cap < cyclo)
-                    or (base_cog <= cog_cap < cog)
-                )
-                worsened = (
-                    cyclo - base_cyclo >= _REGRESSION_CYCLO
-                    or cog - base_cog >= _REGRESSION_COG
-                )
-                if not (crossed or worsened):
-                    continue
-                kind = "crossed" if crossed else "worsened"
-
-            over = []
-            if cyclo > cyclo_cap:
-                over.append(f"cyclomatic {cyclo} (cap {cyclo_cap})")
-            if cog > cog_cap:
-                over.append(f"cognitive {cog} (cap {cog_cap})")
-            delta = ""
-            if base_cyclo is not None and base_cog is not None:
-                delta = (
-                    f" This PR moved it {base_cyclo}->{cyclo} cyclomatic, "
-                    f"{base_cog}->{cog} cognitive."
-                )
-            elif base_scores:
-                # base was READ and this function was absent from it
-                delta = " New function at this size."
-            findings.append(
-                Finding(
-                    file=path,
-                    line=min(touched),
-                    severity="medium",  # advisory: never blocks on its own
-                    rule_name=_RULE,
-                    message=(
-                        f"Function `{node.name}` too tangled -- "
-                        f"{', '.join(over)}.{delta} Grug say: break into smaller "
-                        f"pieces so next hunter read it without getting lost."
-                    ),
-                    suggestion=None,
-                    effort="heavy-lift",
-                )
-            )
-            _ = kind
+        if not path.endswith(".py") or not changed_lines or not source:
+            continue
+        findings.extend(_scan_one_file(
+            path, source, changed_lines,
+            base_scores.get(path, {}), bool(base_scores),
+            cyclo_cap, cog_cap,
+        ))
     return tuple(findings)
