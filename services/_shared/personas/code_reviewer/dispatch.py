@@ -1177,6 +1177,75 @@ def _stack_detail_lines(
     return "\n".join(lines)
 
 
+def _stack_status_line(
+    evaluation: CodeReviewEvaluation, n: int, sev_bits: str,
+) -> str:
+    """The board section's one-line status.
+
+    Extracted from `_review_stack_body` when adding the partial-coverage
+    branch pushed that function to cyclomatic 17 against a cap of 15 (caught
+    by Elder on grug#807). The coverage-vs-findings decision is a self
+    contained question, so it reads better named than inlined."""
+    if is_partial_coverage(evaluation.degraded_reason):
+        return (
+            f"Partial coverage - {n} marking(s) from the ground Grug walked"
+            if n
+            else "Partial coverage - no markings on the ground Grug walked"
+        )
+    if is_real_degradation(evaluation.degraded_reason):
+        return f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
+    if n == 0:
+        return "Clear - no markings published"
+    return f"**{n} actionable marking(s)** ({sev_bits})"
+
+
+def _stack_closing_note(evaluation: CodeReviewEvaluation) -> list[str]:
+    """The board section's tail: what to do next, or why there is nothing.
+
+    Exactly one of these applies, and a clean non-degraded pass gets NOTHING -
+    it used to get "No agent prompt - nothing to remediate.", the fifth
+    separate way one body said "no findings"."""
+    agent = _consolidated_agent_prompt(evaluation)
+    if agent:
+        # Only when there is something to fix - empty "Address each finding"
+        # shells are noise (and look broken).
+        return [
+            "",
+            agent,
+            "",
+            "---",
+            "",
+            "Inline comments carry Fix + agent prompt on each marking. "
+            "Autofix push is not enabled - apply suggestions or hand the agent "
+            "prompt to your coding agent.",
+            "",
+        ]
+    if is_partial_coverage(evaluation.degraded_reason):
+        # Elder DID review - just not all of it. "Grug could not see" would
+        # discard real work and read as a tool failure.
+        return [
+            "",
+            "---",
+            "",
+            "Some ground not walked this pass - part of the diff did not fit "
+            "one look. What Grug did walk is above. Grug not say trail safe "
+            "for ground Grug not walk.",
+            "",
+        ]
+    if is_real_degradation(evaluation.degraded_reason):
+        # Degraded with empty findings is not a clean review, and the one thing
+        # that must never happen is a reader taking it for one.
+        return [
+            "",
+            "---",
+            "",
+            "Review degraded - no usable findings were produced. "
+            "Grug not say trail safe. Grug say Grug could not see.",
+            "",
+        ]
+    return []
+
+
 def _review_stack_body(
     evaluation: CodeReviewEvaluation,
     *,
@@ -1199,18 +1268,7 @@ def _review_stack_body(
     sev_bits = ", ".join(
         f"{k}={by_sev[k]}" for k in ("critical", "high", "medium", "low") if k in by_sev
     ) or "none"
-    if is_partial_coverage(evaluation.degraded_reason):
-        status_line = (
-            f"Partial coverage - {n} marking(s) from the ground Grug walked"
-            if n
-            else "Partial coverage - no markings on the ground Grug walked"
-        )
-    elif is_real_degradation(evaluation.degraded_reason):
-        status_line = f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
-    elif n == 0:
-        status_line = "Clear - no markings published"
-    else:
-        status_line = f"**{n} actionable marking(s)** ({sev_bits})"
+    status_line = _stack_status_line(evaluation, n, sev_bits)
 
     # Ten, not twenty-five. <details> does NOT fold in Gmail - the raw
     # notification HTML for grug#799 carried a real <details>, and Gmail
@@ -1265,48 +1323,7 @@ def _review_stack_body(
     # No detail at all (a clean pass with no scope or suppression note) gets no
     # fold. An empty <details> renders as a disclosure triangle hiding nothing,
     # which reads as a bug in the tool.
-    # Only when there is something to fix - empty "Address each finding"
-    # shells are noise (and look broken).
-    agent = _consolidated_agent_prompt(evaluation)
-    if agent:
-        parts.extend([
-            "",
-            agent,
-            "",
-            "---",
-            "",
-            "Inline comments carry Fix + agent prompt on each marking. "
-            "Autofix push is not enabled - apply suggestions or hand the agent "
-            "prompt to your coding agent.",
-            "",
-        ])
-    elif is_partial_coverage(evaluation.degraded_reason):
-        # Elder DID review - just not all of it. "Grug could not see" would
-        # discard real work and read as a tool failure.
-        parts.extend([
-            "",
-            "---",
-            "",
-            "Some ground not walked this pass - part of the diff did not fit "
-            "one look. What Grug did walk is above. Grug not say trail safe "
-            "for ground Grug not walk.",
-            "",
-        ])
-    elif is_real_degradation(evaluation.degraded_reason):
-        # Degraded with empty findings is not a clean review, and the one thing
-        # that must never happen is a reader taking it for one.
-        parts.extend([
-            "",
-            "---",
-            "",
-            "Review degraded - no usable findings were produced. "
-            "Grug not say trail safe. Grug say Grug could not see.",
-            "",
-        ])
-    # Clean and non-degraded gets NOTHING here. It used to get "No agent
-    # prompt - nothing to remediate.", which was the fifth separate way one
-    # body said "no findings" (header, summary, status bullet, table
-    # placeholder, this). The header alone says it.
+    parts.extend(_stack_closing_note(evaluation))
 
     # Assemble a REAL board: marker, a delimited header, and Elder's content
     # inside its own `grug-sec:elder` region.
