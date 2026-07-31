@@ -132,6 +132,38 @@ def test_degraded_says_so_rather_than_claiming_clear():
     assert "cloudy" in h and "Trail clear" not in h
 
 
+def test_partial_coverage_does_not_claim_clear():
+    """Elder walked most of the trail but not all of it. Saying 'Trail clear'
+    would assert an all-clear over ground it never covered."""
+    h = board.render_header("#7", 0, 0, partial=True)
+    assert "Trail clear" not in h
+    assert "not walked" in h
+
+
+def test_partial_coverage_is_not_the_blackout_message():
+    """'Grug eyes cloudy - read for self' means Elder saw NOTHING. Using it
+    for a pass that reviewed most cohorts and published real findings tells
+    the author to ignore work that was actually done."""
+    partial = board.render_header("#8", 0, 0, partial=True)
+    blackout = board.render_header("#8", 0, 0, degraded=True)
+    assert "cloudy" in blackout
+    assert "cloudy" not in partial
+    assert partial != blackout
+
+
+def test_blocking_findings_outrank_partial_coverage():
+    """A blocking finding is the most actionable fact on the board - partial
+    coverage must not bury it behind a caveat."""
+    h = board.render_header("#9", 2, 0, partial=True)
+    assert "WAIT" in h.splitlines()[0]
+    assert "**2 block**" in h
+
+
+def test_total_blackout_still_outranks_partial():
+    h = board.render_header("#10", 0, 0, degraded=True, partial=True)
+    assert "cloudy" in h
+
+
 def test_header_is_replaced_not_duplicated_across_passes():
     """Regenerated every pass as personas report in; the email keeps the
     creation-time copy, which is why creation must be verdict-shaped."""

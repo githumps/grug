@@ -161,15 +161,32 @@ _VERDICT_BLOCK = "Grug say **WAIT**. Something here bite tribe later."
 _VERDICT_ADVISE = "Grug say **go**, but Grug leave few marks for hunter."
 _VERDICT_CLEAR = "Grug look hard. **Trail clear.**"
 _VERDICT_DEGRADED = "Grug eyes cloudy this pass - **read for self**."
+_VERDICT_PARTIAL = "Grug walk most of trail. **Some ground not walked.**"
 
 
-def verdict_line(blocking: int, advisory: int, *, degraded: bool = False) -> str:
+def verdict_line(
+    blocking: int, advisory: int, *, degraded: bool = False, partial: bool = False,
+) -> str:
     """One caveman sentence. Never more - the email is a notification, not a
-    report, and the report is one click away in the folded sections."""
+    report, and the report is one click away in the folded sections.
+
+    `degraded` means Elder saw NOTHING. `partial` means it walked most of the
+    diff but not all of it - a different fact, and it used to borrow the
+    blackout sentence. "Grug eyes cloudy - read for self" on a pass that
+    reviewed most cohorts and published real findings tells the author to
+    ignore work that was actually done.
+
+    Order matters: a blocking finding is the most actionable thing on the
+    board, so it outranks the coverage caveat. Partial coverage only
+    displaces `_VERDICT_CLEAR`, which is the one sentence it would make into
+    a lie - an all-clear over ground Elder never covered.
+    """
     if degraded:
         return _VERDICT_DEGRADED
     if blocking:
         return _VERDICT_BLOCK
+    if partial:
+        return _VERDICT_PARTIAL
     if advisory:
         return _VERDICT_ADVISE
     return _VERDICT_CLEAR
@@ -187,11 +204,18 @@ def tally_line(blocking: int, advisory: int) -> str:
 
 
 def render_header(
-    title: str, blocking: int, advisory: int, *, degraded: bool = False,
+    title: str,
+    blocking: int,
+    advisory: int,
+    *,
+    degraded: bool = False,
+    partial: bool = False,
 ) -> str:
     """The whole visible email: a verdict sentence, an optional tally, and the
     PR title. Three lines at most."""
-    lines = [f"### {verdict_line(blocking, advisory, degraded=degraded)}"]
+    lines = [
+        f"### {verdict_line(blocking, advisory, degraded=degraded, partial=partial)}"
+    ]
     tally = tally_line(blocking, advisory)
     if tally:
         lines.append("")

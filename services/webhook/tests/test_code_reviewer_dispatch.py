@@ -1927,7 +1927,47 @@ def test_partial_review_stays_advisory_but_publishes_validated_findings():
     assert len(result.comments) == 1
     title, summary = cr_dispatch._summary_markdown(evaluation)
     assert "coverage partial" in title
-    assert "still published" in summary
+    # The findings Elder DID validate are published, not withheld because
+    # coverage was incomplete.
+    assert "published below" in summary
+    # Partial coverage must not borrow the blackout vocabulary: Elder saw
+    # most of this diff, so "could not see" would discard real work.
+    assert "could not see" not in summary
+
+
+def test_board_speaks_partial_coverage_not_blackout():
+    """One event, one vocabulary. The board used to render partial coverage
+    with the total-blackout sentence ("Grug eyes cloudy - read for self"),
+    which tells the author to ignore a pass that produced real findings."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+
+    ev = CodeReviewEvaluation(
+        findings=(Finding(file="src/x.py", line=2, severity="medium",
+                          rule_name="null-deref", message="m", suggestion=None),),
+        conclusion="success",
+        degraded_reason="partial_review",
+    )
+
+    stack = cr_dispatch._review_stack_body(ev, conclusion="neutral")
+
+    assert "cloudy" not in stack
+    assert "could not see" not in stack
+    assert "Partial coverage" in stack
+    assert "not walked" in stack
+
+
+def test_board_still_speaks_blackout_for_a_real_outage():
+    """Splitting partial coverage out must not soften a genuine blackout."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+
+    ev = CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="all_failed",
+    )
+
+    stack = cr_dispatch._review_stack_body(ev, conclusion="neutral")
+
+    assert "cloudy" in stack
+    assert "could not see" in stack
 
 
 def test_summary_markdown_appends_bounded_consolidated_agent_prompt():

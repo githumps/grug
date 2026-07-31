@@ -698,12 +698,16 @@ def _summary_markdown(
     def hunt_title(title: str) -> str:
         return f"Living Hunt {living_range} - {title}" if living_range else title
 
-    if evaluation.degraded_reason == "partial_review":
+    if is_partial_coverage(evaluation.degraded_reason):
+        # Reached the PR again only after grug#806: this branch existed but
+        # rerun.py's fail-open re-posted "Elder skipped - partial_review" over
+        # it, so nobody ever saw it. Same event, same words as the board now.
         title = "WARN Elder review coverage partial"
         return hunt_title(title), (
-            "Grug reviewed part of the diff, but one or more bounded cohorts "
-            "did not return usable output. Validated markings from completed "
-            "cohorts are still published below; this check stays advisory."
+            "Grug walked part of the diff - some ground did not fit one look, "
+            "or a bounded cohort returned nothing usable. Validated markings "
+            "from the ground Grug walked are published below; this check stays "
+            "advisory. Coverage detail is in the table above."
         ) + held + hunt
     if evaluation.degraded_reason:
         title = f"WARN Grug eyes clouded ({evaluation.degraded_reason})"
@@ -1115,8 +1119,29 @@ _STACK_TABLE_ROWS = 10
 BENIGN_DEGRADATIONS = frozenset({"no_diff"})
 
 
+# Elder reviewed most of the diff but not all of it. Distinct from a real
+# degradation, where it saw nothing: the findings it DID publish are valid,
+# diff-anchored evidence, so the surfaces must not tell the author to
+# disregard the pass.
+PARTIAL_COVERAGE = "partial_review"
+
+
 def is_real_degradation(reason: str | None) -> bool:
     return bool(reason) and reason not in BENIGN_DEGRADATIONS
+
+
+def is_partial_coverage(reason: str | None) -> bool:
+    """Elder saw most of the diff, not none of it."""
+    return reason == PARTIAL_COVERAGE
+
+
+def is_blackout(reason: str | None) -> bool:
+    """Elder produced nothing usable this pass - the 'could not see' case.
+
+    Split out from `is_real_degradation` so partial coverage stops borrowing
+    the blackout vocabulary. Both are still 'news' for `worth_an_email`; they
+    are simply not the same news."""
+    return is_real_degradation(reason) and not is_partial_coverage(reason)
 
 
 def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
@@ -1174,7 +1199,13 @@ def _review_stack_body(
     sev_bits = ", ".join(
         f"{k}={by_sev[k]}" for k in ("critical", "high", "medium", "low") if k in by_sev
     ) or "none"
-    if is_real_degradation(evaluation.degraded_reason):
+    if is_partial_coverage(evaluation.degraded_reason):
+        status_line = (
+            f"Partial coverage - {n} marking(s) from the ground Grug walked"
+            if n
+            else "Partial coverage - no markings on the ground Grug walked"
+        )
+    elif is_real_degradation(evaluation.degraded_reason):
         status_line = f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
     elif n == 0:
         status_line = "Clear - no markings published"
@@ -1249,6 +1280,18 @@ def _review_stack_body(
             "prompt to your coding agent.",
             "",
         ])
+    elif is_partial_coverage(evaluation.degraded_reason):
+        # Elder DID review - just not all of it. "Grug could not see" would
+        # discard real work and read as a tool failure.
+        parts.extend([
+            "",
+            "---",
+            "",
+            "Some ground not walked this pass - part of the diff did not fit "
+            "one look. What Grug did walk is above. Grug not say trail safe "
+            "for ground Grug not walk.",
+            "",
+        ])
     elif is_real_degradation(evaluation.degraded_reason):
         # Degraded with empty findings is not a clean review, and the one thing
         # that must never happen is a reader taking it for one.
@@ -1281,7 +1324,8 @@ def _review_stack_body(
         board.new_board(),
         board.render_header(
             pr_title, blocking, advisory,
-            degraded=is_real_degradation(evaluation.degraded_reason),
+            degraded=is_blackout(evaluation.degraded_reason),
+            partial=is_partial_coverage(evaluation.degraded_reason),
         ),
     )
     return board.upsert_section(body, "elder", "\n".join(parts).strip())
