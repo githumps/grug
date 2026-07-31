@@ -48,7 +48,7 @@ from llm_client import (
     review_reasoner_diff,
 )
 from voice_pack import VoiceSelection, entitled_voice
-from review_types import EFFORTS
+from review_types import EFFORTS, SEVERITIES
 from personas.code_reviewer.dedup import (
     dedup_findings, finding_key, parse_rule, prior_keys_from_comments,
     rule_marker,
@@ -768,12 +768,14 @@ def _consolidated_agent_prompt(evaluation: CodeReviewEvaluation) -> str:
     return block
 
 
-# Derived from the shared vocabulary so a new effort level can never
-# silently drop its chip (the Severity-partition-assert drift class).
-_EFFORT_LABELS = {e: e.replace("-", " ") for e in EFFORTS}
-
 # Closed caveman-inspired chrome chips (FLINT-density scanability).
 # Identifiers and check *names* stay plain ASCII; Markings surface uses these.
+#
+# These two are hand-written, so they can drift from the shared vocabulary.
+# `_chip_vocabulary_drift()` is what stops that, and it is asserted in tests
+# against SEVERITIES/EFFORTS - a level added to review_types but not given a
+# chip here would otherwise fall through `.get()` to the bare identifier, and
+# nothing would say so.
 _SEVERITY_CHIP: dict[str, str] = {
     "critical": "💀 critical",
     "high": "🔥 high",
@@ -784,6 +786,21 @@ _EFFORT_CHIP: dict[str, str] = {
     "quick-win": "⚡ quick win",
     "heavy-lift": "🪨 heavy lift",
 }
+
+
+def _chip_vocabulary_drift() -> dict[str, frozenset[str]]:
+    """Vocabulary levels with no chip. Empty dict means no drift.
+
+    Returned rather than asserted at import so a drifted chip table degrades
+    to the bare identifier in production (ugly) instead of refusing to import
+    dispatch (fatal). The test is where it must fail loudly.
+    """
+    return {
+        k: v for k, v in {
+            "severity": SEVERITIES - set(_SEVERITY_CHIP),
+            "effort": EFFORTS - set(_EFFORT_CHIP),
+        }.items() if v
+    }
 
 
 def _severity_chip(severity: str) -> str:
