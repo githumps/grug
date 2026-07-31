@@ -2480,7 +2480,11 @@ def test_clean_review_body_is_three_lines_and_has_no_empty_fold():
     assert "Trail clear" in body
     assert "block" not in body                          # no counts on a clean pass
     assert "<details" not in body
-    assert len([l for l in body.splitlines() if l.strip()]) == 3
+    # Count only what a reader SEES: the region delimiters are HTML comments
+    # and render as nothing.
+    visible = [l for l in body.splitlines()
+               if l.strip() and not l.strip().startswith("<!--")]
+    assert len(visible) == 2, visible                    # verdict + PR title
 
 
 def test_table_and_detail_bullets_are_blank_line_separated():
@@ -2526,6 +2530,52 @@ def test_findings_open_the_section_clean_leaves_it_folded():
     assert "<details open>" in cr_dispatch._review_stack_body(blocking, conclusion="failure")
     clean = CodeReviewEvaluation(findings=(), conclusion="success")
     assert "<details open>" not in cr_dispatch._review_stack_body(clean, conclusion="success")
+
+
+def test_elder_body_is_mergeable_by_the_board_client():
+    """What Elder PRODUCES must be something board_client can MERGE.
+
+    It was not. The body was a flat `marker + header + content` string with no
+    region delimiters, so `extract_section(body, "elder")` returned None,
+    `_upsert_review_stack_comment` skipped the merge path, and Elder PATCHed
+    the COMPLETE body - deleting Chief's section on every pass. Confirmed
+    against the live boards on #797/#798/#799: `grug-board` present, not one
+    `grug-sec:` region among them.
+
+    The board_client unit tests all passed throughout, because they call the
+    client directly. Nothing asserted the two halves fit together.
+    """
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    for ev in (
+        CodeReviewEvaluation(findings=(
+            Finding(file="a.py", line=1, severity="high", rule_name="r",
+                    message="m", suggestion=None),
+        ), conclusion="failure"),
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        CodeReviewEvaluation(findings=(), conclusion="neutral",
+                             degraded_reason="all_failed"),
+    ):
+        body = cr_dispatch._review_stack_body(ev, conclusion="neutral",
+                                              pr_title="t")
+        assert cr_dispatch.board.extract_section(body, "elder") is not None
+        assert cr_dispatch.board.extract_header(body) is not None
+
+
+def test_elder_pass_does_not_delete_chiefs_section():
+    """End-to-end on the two modules together: Chief writes, Elder writes,
+    Chief's words survive. This is the property #797 claimed and did not have."""
+    from personas import board, board_client
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    existing = board.upsert_section(
+        board.set_header(board.new_board(), "### old"), "chief", "CHIEF-SAYS-THIS")
+    elder_body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        conclusion="success", pr_title="t",
+    )
+    merged = board.upsert_section(
+        existing, "elder", board.extract_section(elder_body, "elder") or "")
+    assert "CHIEF-SAYS-THIS" in merged
+    assert board_client.LEGACY_MARKERS      # legacy path still reachable
 
 
 def test_legacy_elder_stack_comment_is_still_located():

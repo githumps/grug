@@ -1145,17 +1145,7 @@ def _review_stack_body(
     # buried under it.
     blocking = sum(1 for f in findings if f.severity in ("high", "critical"))
     advisory = len(findings) - blocking
-    parts = [
-        # MARKER FIRST. Without it `_find_stack_comment_id` cannot match, so
-        # every pass would POST a NEW comment instead of editing - i.e. more
-        # emails, the exact opposite of the point. Caught by
-        # test_review_stack_body_has_marker_and_actionable_count.
-        board.BOARD_MARKER,
-        board.render_header(
-            pr_title, blocking, advisory,
-            degraded=bool(evaluation.degraded_reason),
-        ),
-    ]
+    parts: list[str] = []
     # Phase, Status and Check-run used to live in the fold. All three were cut:
     # Status restated the summary line verbatim, Phase ("Tier-1 coder arm") is
     # internal vocabulary that means nothing to the author, and the check-run
@@ -1212,7 +1202,27 @@ def _review_stack_body(
     # prompt - nothing to remediate.", which was the fifth separate way one
     # body said "no findings" (header, summary, status bullet, table
     # placeholder, this). The header alone says it.
-    return "\n".join(parts)
+
+    # Assemble a REAL board: marker, a delimited header, and Elder's content
+    # inside its own `grug-sec:elder` region.
+    #
+    # This used to be a flat `marker + header + content` string. It looked
+    # right and was wrong: with no region delimiters,
+    # `board.extract_section(body, "elder")` returned None, so
+    # `_upsert_review_stack_comment` skipped the merge path entirely and
+    # PATCHed the COMPLETE body - deleting Chief's section on every pass.
+    # Verified against the live boards on #797, #798 and #799: all three carry
+    # `grug-board` and not one `grug-sec:` region. The board_client unit tests
+    # never caught it because they call the client directly; nothing asserted
+    # that what Elder actually produces is something the client can merge.
+    body = board.set_header(
+        board.new_board(),
+        board.render_header(
+            pr_title, blocking, advisory,
+            degraded=bool(evaluation.degraded_reason),
+        ),
+    )
+    return board.upsert_section(body, "elder", "\n".join(parts).strip())
 
 
 def _find_stack_comment_id(
