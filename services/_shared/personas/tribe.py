@@ -19,11 +19,11 @@ from __future__ import annotations
 CHECK_CHIEF = "Grug - Chief"
 CHECK_ELDER = "Grug - Elder"
 CHECK_GUARD = "Grug - Guard"
-CHECK_WARDER = "Grug - Warder"
+CHECK_WARDER = "Grug - Totem"
 CHECK_SMASHER = "Grug - Smasher"
 CHECK_TELLER = "Grug - Teller"
-CHECK_PULSE = "Grug - Pulse"
-CHECK_SENTINEL = "Grug - Sentinel"
+CHECK_PULSE = "Grug - Drum"
+CHECK_SENTINEL = "Grug - Haunt"
 
 # Pre-polish / em-dash titles still live on some rulesets and old check-runs.
 _EM = "\u2014"  # historical em dash used in early "Grug - X" titles
@@ -39,6 +39,16 @@ LEGACY_CHECK_SMASHER_EM = f"Grug {_EM} Smasher"
 LEGACY_CHECK_TELLER_EM = f"Grug {_EM} Teller"
 LEGACY_CHECK_PULSE_EM = f"Grug {_EM} Pulse"
 
+# 2026-07-30 rename (#791 follow-up): Warder/Pulse/Sentinel were three
+# near-synonyms for "watcher" and read as sci-fi rather than tribe. The prior
+# ASCII titles are demoted to aliases here rather than deleted - a live
+# check-run, or a ruleset naming the old context, must keep resolving. No
+# ruleset required any of these three (verified across grug/macchina/infra:
+# only `Grug - Chief` is required), which is why this rename is safe at all.
+LEGACY_CHECK_WARDER_ASCII = "Grug - Warder"
+LEGACY_CHECK_PULSE_ASCII = "Grug - Pulse"
+LEGACY_CHECK_SENTINEL_ASCII = "Grug - Sentinel"
+
 # primary -> aliases that mean the same gate (detection + healing only -
 # post_check_run no longer dual-posts these, grug#687)
 _CHECK_ALIASES: dict[str, tuple[str, ...]] = {
@@ -53,10 +63,11 @@ _CHECK_ALIASES: dict[str, tuple[str, ...]] = {
         LEGACY_CHECK_ELDER_EM_SHORT,
     ),
     CHECK_GUARD: (LEGACY_CHECK_GUARD_EM,),
-    CHECK_WARDER: (LEGACY_CHECK_WARDER_EM,),
+    CHECK_WARDER: (LEGACY_CHECK_WARDER_EM, LEGACY_CHECK_WARDER_ASCII),
     CHECK_SMASHER: (LEGACY_CHECK_SMASHER_EM,),
     CHECK_TELLER: (LEGACY_CHECK_TELLER_EM,),
-    CHECK_PULSE: (LEGACY_CHECK_PULSE_EM,),
+    CHECK_PULSE: (LEGACY_CHECK_PULSE_EM, LEGACY_CHECK_PULSE_ASCII),
+    CHECK_SENTINEL: (LEGACY_CHECK_SENTINEL_ASCII,),
 }
 
 # alias -> primary (for reverse lookup when reading old rulesets)

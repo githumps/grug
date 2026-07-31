@@ -40,3 +40,30 @@ def test_registry_matches_modules():
     assert elder == tribe.CHECK_ELDER
     assert chief == tribe.CHECK_CHIEF
     assert guard == tribe.CHECK_GUARD
+
+
+def test_renamed_checks_keep_their_old_titles_as_aliases():
+    """A live check-run, or a ruleset naming the old context, must keep
+    resolving after the rename. Verified before renaming that no ruleset
+    REQUIRED any of these three (only `Grug - Chief` is required across
+    grug/macchina/infra) - but a stale reference must still resolve, not
+    silently detach."""
+    from personas import tribe
+
+    assert tribe.CHECK_SENTINEL == "Grug - Haunt"
+    assert tribe.CHECK_WARDER == "Grug - Totem"
+    assert tribe.CHECK_PULSE == "Grug - Drum"
+
+    for legacy, primary in (
+        ("Grug - Sentinel", tribe.CHECK_SENTINEL),
+        ("Grug - Warder", tribe.CHECK_WARDER),
+        ("Grug - Pulse", tribe.CHECK_PULSE),
+    ):
+        assert tribe._ALIAS_TO_PRIMARY.get(legacy) == primary, legacy
+
+
+def test_chief_title_is_untouched():
+    """`Grug - Chief` is the ONE required status check in every ruleset.
+    Renaming it would silently detach enforcement fleet-wide."""
+    from personas import tribe
+    assert tribe.CHECK_CHIEF == "Grug - Chief"

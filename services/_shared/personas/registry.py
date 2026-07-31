@@ -183,7 +183,7 @@ REGISTRY: tuple[PersonaSpec, ...] = (
     ),
     PersonaSpec(
         key="warder",
-        canonical="warder",
+        canonical="totem",
         check_run_name=CHECK_WARDER,
         enabled_flag="warder_enabled",
         enabled_default=False,  # tracer: opt-in per repo (#471)
@@ -197,7 +197,7 @@ REGISTRY: tuple[PersonaSpec, ...] = (
     ),
     PersonaSpec(
         key="sentinel",
-        canonical="sentinel",
+        canonical="haunt",
         # No real check-run posts (comment-only, like Teller/Pulse); this
         # name is the roster/Activity-feed identity record_check_verdict
         # carries.
@@ -250,7 +250,7 @@ REGISTRY: tuple[PersonaSpec, ...] = (
     ),
     PersonaSpec(
         key="pulse",
-        canonical="pulse",
+        canonical="drum",
         check_run_name=CHECK_PULSE,
         enabled_flag="pulse_enabled",
         enabled_default=False,  # tracer: opt-in per repo (#472)

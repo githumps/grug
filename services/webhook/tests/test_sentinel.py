@@ -251,7 +251,13 @@ def test_sentinel_registered_on_closed_action_enabled_by_default():
     assert spec.enabled_default is True
     assert spec.missing_repo_policy == "enabled"
     assert spec.blocking_flag is None
-    assert spec.check_run_name == "Grug - Sentinel"
+    # Renamed 2026-07-30: Warder/Pulse/Sentinel were three near-synonyms for
+    # "watcher" and read sci-fi rather than tribe. The persona KEY is unchanged
+    # (ADR-0002: key is historical, canonical is the display identity), so no
+    # flag, module, or store row moved.
+    assert spec.check_run_name == "Grug - Haunt"
+    assert spec.canonical == "haunt"
+    assert spec.key == "sentinel"
 
 
 # --- evidence gate: never warn about zero findings ---------------------------
