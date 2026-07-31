@@ -72,9 +72,9 @@ def changelog_markdown(groups: dict[str, list[str]], *, since: str) -> str:
     """Render the drafted changelog section. Caveman-voiced header,
     conventional grouped body."""
     if not groups:
-        return f"No commits found since `{since}`. Grug Warder rest easy."
+        return f"No commits found since `{since}`. Grug Totem rest easy."
     order = ("breaking",) + _GROUPS + ("other",)
-    lines = [f"Grug Warder count the marks since `{since}`:"]
+    lines = [f"Grug Totem count the marks since `{since}`:"]
     titles = {
         "breaking": "BREAKING - tribe must know",
         "feat": "Features", "fix": "Fixes", "perf": "Performance",
@@ -160,7 +160,7 @@ def dispatch_warder_release(
         )
         title = "WARN Warder eyes clouded"
         summary = (
-            "Grug Warder could not read the marks (commit fetch failed). "
+            "Grug Totem could not read the marks (commit fetch failed). "
             "This only counsel — merge already done."
         )
         conclusion = "neutral"

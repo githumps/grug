@@ -72,6 +72,30 @@ def _blocking_failures(results: Sequence[CheckResult]) -> list[CheckResult]:
     return [r for r in results if not r.passed and r.name not in _ADVISORY_CHECKS]
 
 
+# DISPLAY ONLY - the key stays. `CheckResult.name` is load-bearing:
+# `_ADVISORY_CHECKS` keys off it to decide blocking-vs-warn, and Chief's
+# issue-time remedy text keys off it too. Renaming the values would silently
+# make `issue-link` blocking. Same split ADR-0002 draws for personas: the
+# caveman name is what a human reads, the key is what code matches on.
+_CHECK_DISPLAY: dict[str, str] = {
+    "why": "why hunt",
+    "acceptance": "what good look like",
+    "estimate": "how big",
+    "scope-fence": "where stop",
+    "issue-link": "which ticket",
+    "linked-issue-completeness": "ticket done",
+}
+
+
+def check_display_name(key: str) -> str:
+    """Caveman label for a check, falling back to the key.
+
+    Falls back rather than raising: a check added without a label should show
+    up looking plain, not take the whole Hunt Plan summary down with it.
+    """
+    return _CHECK_DISPLAY.get(key, key)
+
+
 def _summary(results: list[CheckResult]) -> tuple[str, str]:
     """Build (title, summary) markdown for the check-run output."""
     blocking = _blocking_failures(results)
@@ -88,7 +112,7 @@ def _summary(results: list[CheckResult]) -> tuple[str, str]:
             icon = "warn"
         else:
             icon = "fail"
-        lines.append(f"| {r.name} | {icon} | {r.detail} |")
+        lines.append(f"| {check_display_name(r.name)} | {icon} | {r.detail} |")
     return title, "\n".join(lines)
 
 

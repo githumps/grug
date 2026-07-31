@@ -178,9 +178,32 @@ def check_estimate(body: str) -> CheckResult:
 
 
 def check_scope_fence(body: str) -> CheckResult:
-    if _section_text(body, "Out of scope") is not None:
-        return CheckResult("scope-fence", True, "## Out of scope present")
-    return CheckResult("scope-fence", False, "missing ## Out of scope section")
+    """`## Out of scope` must actually FENCE something - i.e. not be empty.
+
+    This used to accept the heading alone, so pasting the template and leaving
+    the section blank passed the gate: the same "an unfilled template should
+    NOT pass" defect already fixed for bullets in #20 and enforced by
+    `check_why`'s word floor. Scope-fence was the one check in this module
+    still testing for presence rather than content. An empty fence is worse
+    than no fence - it reads as the author having considered scope and found
+    nothing to exclude.
+
+    NON-EMPTY is the whole bar, deliberately. A first pass required 3+ words
+    and the existing suite rejected it: `Deferred.` and `Not now.` are real
+    answers to "what is out of scope", and a gate that demands padding gets
+    padding. `## Why` earns its 5-word floor because a one-word why is never a
+    why; a one-word fence often is a fence.
+    """
+    text = _section_text(body, "Out of scope")
+    if text is None:
+        return CheckResult("scope-fence", False, "missing ## Out of scope section")
+    words = len(text.split())
+    if not words:
+        return CheckResult(
+            "scope-fence", False,
+            "## Out of scope is empty - name what this does NOT touch",
+        )
+    return CheckResult("scope-fence", True, f"## Out of scope has {words} words")
 
 
 def check_issue_link(body: str) -> CheckResult:

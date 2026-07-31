@@ -84,7 +84,8 @@ def test_summary_pass_renders_check_count():
     title, summary = persona._summary(results)
     assert "Hunt Plan ready" in title or "Chief pass" in title
     assert "all 2 checks" in title
-    assert "| why | pass |" in summary
+    # Caveman DISPLAY name; the key stays "why" (ADR-0002).
+    assert "| why hunt | pass |" in summary
 
 
 def test_summary_fail_counts_blocking():
@@ -96,8 +97,8 @@ def test_summary_fail_counts_blocking():
     title, summary = persona._summary(results)
     assert "Hunt Plan hold" in title or "Chief hold" in title
     assert "2/3 plan checks fail" in title or "2/3 blocking" in title
-    assert "| why | pass |" in summary
-    assert "| acceptance | fail |" in summary
+    assert "| why hunt | pass |" in summary
+    assert "| what good look like | fail |" in summary
 
 
 def test_summary_table_header_present():
@@ -477,3 +478,29 @@ def test_tpm_evaluation_rejects_incoherent_passed_conclusion():
             results=(CheckResult("why", True, "ok"),),
             conclusion="success",
         )
+
+
+def test_check_display_names_are_caveman_but_keys_are_not():
+    """DISPLAY renames, key stays (ADR-0002).
+
+    `CheckResult.name` is load-bearing: `_ADVISORY_CHECKS` keys off it to
+    decide blocking-vs-warn, and Chief's issue-time remedy text keys off it
+    too. Renaming the VALUES would silently make `issue-link` blocking.
+    """
+    assert persona.check_display_name("scope-fence") == "where stop"
+    assert persona.check_display_name("issue-link") == "which ticket"
+    # The advisory split still keys off the real name, not the label.
+    assert "issue-link" in persona._ADVISORY_CHECKS
+    assert persona._blocking_failures(
+        [CheckResult("issue-link", False, "x")]) == []
+    # Unknown check degrades to its key rather than taking the summary down.
+    assert persona.check_display_name("brand-new") == "brand-new"
+
+
+def test_every_check_has_a_display_name():
+    """A check added without a label renders as a bare key next to caveman
+    siblings - findable now rather than in an email."""
+    from personas.tpm.dor_checks import run_all
+    body = "## Why\nreal reason goes here\n## Acceptance criteria\n- [ ] a\n- [ ] b\n- [ ] c\nSize: M\n## Out of scope\nnot the db\n"
+    for r in run_all(body):
+        assert persona.check_display_name(r.name) != r.name, r.name

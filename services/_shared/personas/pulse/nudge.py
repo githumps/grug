@@ -37,10 +37,16 @@ _FETCH_TIMEOUT = 10
 _DOR_CHECK_NAME = CHECK_CHIEF
 _DOR_CHECK_NAMES = frozenset(acceptable_check_names(CHECK_CHIEF))
 
+# "Grug Drum", not "Grug Pulse": the #798 rename changed the CHECK TITLE and
+# stopped there, so the persona's own voice kept the old name in the one place
+# a human actually reads it. The marker below is a KEY, not a name - every
+# nudge already posted carries it, and renaming it would make this module
+# blind to its own prior comments and double-post. Display renames, key stays
+# (ADR-0002).
 _NUDGE_BODY = (
-    "Grug Pulse see this PR sleep {days} sunrises. Plan is ready (Chief "
-    "nod long ago) but no grug touch it. Tribe forget? If hunt is dead, "
-    "close it - open trails confuse the tribe.\n\n"
+    "Grug Drum beat for this PR - it sleep {days} sunrises. Plan is ready "
+    "(Chief nod long ago) but no grug touch it. Tribe forget? If hunt is "
+    "dead, close it - open trails confuse the tribe.\n\n"
     "<!-- grug-pulse-nudge -->"
 )
 
@@ -201,7 +207,7 @@ def run_pulse_for_install(
                     pr_number=pr_number,
                     head_sha=head_sha,
                     conclusion="neutral",
-                    summary=f"Pulse nudge - PR quiet {_STALE_DAYS}+ days",
+                    summary=f"Drum nudge - PR quiet {_STALE_DAYS}+ days",
                     findings_count=0,
                     blocking=False,
                     degraded_reason=None,

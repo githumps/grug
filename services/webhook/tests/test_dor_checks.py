@@ -286,3 +286,31 @@ def test_linked_issue_no_fetcher_fails_open():
     r = check_linked_issue_completeness(body)
     assert r.passed
     assert "fail-open" in r.detail
+
+
+def test_empty_out_of_scope_section_does_not_pass():
+    """The unfilled-template defect, in the one check that still had it.
+
+    `check_acceptance` rejects empty bullets (#20: "an unfilled template
+    should NOT pass") and `check_why` has a word floor. `check_scope_fence`
+    only tested PRESENCE - so pasting the template and leaving the section
+    blank passed the gate. An empty fence is worse than no fence: it reads as
+    the author having considered scope and found nothing to exclude.
+    """
+    from personas.tpm.dor_checks import check_scope_fence
+    assert not check_scope_fence("## Out of scope\n").passed
+    assert not check_scope_fence("## Out of scope\n\n## Next\nx").passed
+    assert not check_scope_fence("## Out of scope\n   \n").passed
+
+
+def test_terse_out_of_scope_still_passes():
+    """NON-EMPTY is the whole bar, deliberately.
+
+    A first attempt required 3+ words and this suite rejected it: `Deferred.`
+    and `Not now.` are real answers, and a gate that demands padding gets
+    padding. `## Why` earns its 5-word floor because a one-word why is never a
+    why; a one-word fence often is a fence.
+    """
+    from personas.tpm.dor_checks import check_scope_fence
+    for terse in ("Deferred.", "Not now.", "nothing", "stuff"):
+        assert check_scope_fence(f"## Out of scope\n{terse}").passed, terse
