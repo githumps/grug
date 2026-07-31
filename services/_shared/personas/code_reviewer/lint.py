@@ -73,6 +73,33 @@ log = logging.getLogger("grug.code_reviewer.lint")
 #   GRUG_LINT_EVIDENCE=ruff
 # Mirrors sast.py's GRUG_SAST_ENGINE gate rather than inventing a new
 # mechanism (standard-pattern-reuse-or-elect).
+#
+# TWO REASONS IT IS STILL OFF, both measured 2026-07-31 - recorded here so the
+# next person does not re-run the same experiment:
+#
+# 1. `ruff` IS NOT IN THE RUNTIME IMAGE. Verified against the live consumer:
+#    `exec: "ruff": executable file not found in $PATH`. So setting the env var
+#    alone changes nothing - every call would take the FileNotFoundError path
+#    below and return (). Shipping the binary is a prerequisite, not a detail.
+#
+# 2. ON THIS CODEBASE THE SELECTION FOUND NOTHING REAL. Run against
+#    `services/` with the exact _SELECT/_IGNORE below: 127 findings, 34 outside
+#    tests, and not ONE confirmable true positive on inspection.
+#      S105/S106 (72) - fired on NAMES: `SECRET_HEADER` (a header name),
+#                       `EXPOSED_SECRET` (one of grug's own SAST rule names).
+#                       67 of 72 were in test files.
+#      S608 (13)      - "SQL injection" on f-strings interpolating the module
+#                       constant `TTL_LIVE`, with every user value bound via
+#                       `%s`. Correct, safe code.
+#      B023 (2)       - real pattern, but both closures are invoked
+#                       SYNCHRONOUSLY inside the same loop iteration.
+#      ASYNC (0)      - clean.
+#
+# The `B` family is the only one worth revisiting (5 source findings, all
+# style-grade); `S` measured 0/29 and should be dropped from _SELECT before
+# anyone turns this on. Left as-is rather than re-tuned blind: changing the
+# selection without a fresh measurement is how the last speculative source got
+# to 71% of all output (#767).
 _ENABLED = os.getenv("GRUG_LINT_EVIDENCE", "").strip().lower() == "ruff"
 
 _RULE = "lint-violation"
@@ -248,7 +275,12 @@ def scan_ruff(
             results = json.loads(proc.stdout or "[]")
             prefix = tmp.rstrip("/") + "/"
     except FileNotFoundError:
-        log.info("lint_ruff_binary_missing")
+        # WARNING, not info: reaching here means someone set
+        # GRUG_LINT_EVIDENCE=ruff and is getting silent nothing, because the
+        # binary is not in the image (measured 2026-07-31). An operator who
+        # deliberately enabled a finding source deserves to see why it produced
+        # none, rather than reading an info line nobody greps for.
+        log.warning("lint_ruff_binary_missing_but_enabled")
         return ()
     except subprocess.TimeoutExpired:
         log.warning("lint_ruff_timeout", extra={"timeout_s": _TIMEOUT_S})
