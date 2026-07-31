@@ -1950,11 +1950,28 @@ def test_agent_prompt_blocks_are_fence_breakout_safe():
     assert "````" in summary
 
 
-def test_effort_labels_derive_from_shared_vocabulary():
-    """A new effort level can never silently drop its chip - labels derive
-    from review_types.EFFORTS."""
-    from review_types import EFFORTS
-    assert frozenset(cr_dispatch._EFFORT_LABELS) == EFFORTS
+def test_chips_cover_the_whole_shared_vocabulary():
+    """A level added to review_types must not silently lose its chip.
+
+    This guard used to assert against `_EFFORT_LABELS`, a derived dict that
+    NOTHING used - so it could never drift and the test could never fail. The
+    dicts actually rendered, `_SEVERITY_CHIP` and `_EFFORT_CHIP`, are
+    hand-written and had no guard at all: a new severity would have fallen
+    through `.get()` to the bare identifier with nothing to say so. The guard
+    was watching a decoy.
+    """
+    assert cr_dispatch._chip_vocabulary_drift() == {}
+
+    # And it can actually fail - a guard nobody has seen go red is a guess.
+    from review_types import SEVERITIES
+    original = dict(cr_dispatch._SEVERITY_CHIP)
+    try:
+        cr_dispatch._SEVERITY_CHIP.pop(next(iter(SEVERITIES)))
+        assert cr_dispatch._chip_vocabulary_drift() != {}
+    finally:
+        cr_dispatch._SEVERITY_CHIP.clear()
+        cr_dispatch._SEVERITY_CHIP.update(original)
+    assert cr_dispatch._chip_vocabulary_drift() == {}
 
 
 
