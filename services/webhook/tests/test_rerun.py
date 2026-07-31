@@ -621,6 +621,85 @@ def test_hot_review_freshness_outage_fail_open_completes_and_finishes(monkeypatc
     release.assert_not_called()
 
 
+def test_partial_review_keeps_elders_own_check_instead_of_overwriting_it(monkeypatch):
+    """A partial-coverage review ALREADY published a complete check carrying
+    real cohort coverage. It used to fall through to the "Unknown skip"
+    fail-open branch, which re-posted a generic "Elder skipped -
+    partial_review" over it - replacing real content with less, and leaving
+    the check and the board saying different things about the same pass."""
+    pr = _pr_data(head_sha="fresh-head")
+    fetches = iter((pr, pr))
+
+    def _fake_token_retry(iid, fn):
+        try:
+            return next(fetches)
+        except StopIteration:
+            return fn("tok")
+
+    posted: list = []
+    monkeypatch.setattr(rerun, "with_install_token_retry", _fake_token_retry)
+    monkeypatch.setattr(
+        rerun, "post_check_run",
+        lambda token, owner, repo, result, external_id=None: posted.append(result) or {"id": 1},
+    )
+    monkeypatch.setattr(rerun, "get_repo_config", lambda iid, rid: {})
+    acquire, complete, release = _patch_hot_claims(monkeypatch)
+    monkeypatch.setattr(
+        rerun,
+        "dispatch_code_review",
+        MagicMock(return_value={
+            "persona": "code_reviewer",
+            "result": "skipped",
+            "degraded_reason": "partial_review",
+        }),
+    )
+
+    status = rerun._run_one(_job(kind="review", settle_seconds=0))
+
+    assert status == "dispatched"
+    # No fail-open re-post: Elder's own check stands.
+    assert posted == []
+    complete.assert_called_once()
+    release.assert_not_called()
+
+
+def test_genuinely_unknown_skip_still_fails_open(monkeypatch):
+    """The fail-open net still catches reasons nobody modelled - it just no
+    longer swallows partial_review, which is a KNOWN, self-completing state."""
+    pr = _pr_data(head_sha="fresh-head")
+    fetches = iter((pr, pr))
+
+    def _fake_token_retry(iid, fn):
+        try:
+            return next(fetches)
+        except StopIteration:
+            return fn("tok")
+
+    posted: list = []
+    monkeypatch.setattr(rerun, "with_install_token_retry", _fake_token_retry)
+    monkeypatch.setattr(
+        rerun, "post_check_run",
+        lambda token, owner, repo, result, external_id=None: posted.append(result) or {"id": 1},
+    )
+    monkeypatch.setattr(rerun, "get_repo_config", lambda iid, rid: {})
+    acquire, complete, release = _patch_hot_claims(monkeypatch)
+    monkeypatch.setattr(
+        rerun,
+        "dispatch_code_review",
+        MagicMock(return_value={
+            "persona": "code_reviewer",
+            "result": "skipped",
+            "degraded_reason": "something_nobody_modelled",
+        }),
+    )
+
+    status = rerun._run_one(_job(kind="review", settle_seconds=0))
+
+    assert status == "fail_open_something_nobody_modelled"
+    assert len(posted) == 1
+    assert posted[0].conclusion == "neutral"
+
+
 def test_hot_review_freshness_outage_post_failure_raises_for_redrive(monkeypatch):
     """If the SAME brownout eats the neutral completion, the job must raise
     for redrive - otherwise the required check sticks in_progress forever
