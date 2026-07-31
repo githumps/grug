@@ -126,8 +126,43 @@ def _find_marker_comment(token: str, owner: str, repo: str, pr_number: int) -> i
     return None
 
 
+def _has_existing_advisory(
+    token: str, owner: str, repo: str, pr_number: int,
+) -> bool:
+    """Is a Chief advisory already published, in EITHER home?
+
+    Two homes because the migration is not retroactive: PRs advised before
+    #797 carry a standalone marker comment, PRs advised after carry a `chief`
+    section inside the board. Checking only one of them leaves the other
+    permanently stale.
+    """
+    try:
+        from personas import board, board_client
+        found = board_client.find_board(
+            token, owner, repo, pr_number, app_id=get_app_id(),
+        )
+        if found is not None and board.extract_section(found[1], "chief"):
+            return True
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        # Unknown, not absent. Falling through to the legacy check is the
+        # conservative read: worst case we skip one clear-up, versus posting a
+        # duplicate advisory on a PR that already has one.
+        log.warning(
+            "chief_board_lookup_failed",
+            extra={"pr": f"{owner}/{repo}#{pr_number}", "kind": type(e).__name__},
+        )
+    return _find_marker_comment(token, owner, repo, pr_number) is not None
+
+
+# Chief's verdict, used ONLY when Chief is the persona that creates the board.
+# It never overwrites Elder's, but if Chief is first then this line is the whole
+# email, and "Grug look." is not worth waking somebody for.
+_CHIEF_CREATE_HEADER = "### Grug say **HOLD**. Ticket not ready for hunt."
+
+
 def _upsert_comment(
     token: str, owner: str, repo: str, pr_number: int, body: str,
+    *, create_if_absent: bool = True,
 ) -> None:
     """Write Chief's advisory as a SECTION of the shared board (#791).
 
@@ -136,9 +171,10 @@ def _upsert_comment(
     comment that every persona edits, and GitHub never mails an edit, so
     folding Chief in costs zero additional notifications.
 
-    Chief passes NO header: only the persona that counts findings has the
+    Chief passes no `header`: only the persona that counts findings has the
     standing to rewrite the verdict line. Chief has an opinion about the
-    TICKET, not about the diff.
+    TICKET, not about the diff. It does pass `header_on_create`, because a
+    board Chief starts is still an email and needs a readable first line.
 
     Falls back to its own comment if the board write fails - an advisory that
     silently vanishes is worse than one in the wrong place.
@@ -149,6 +185,14 @@ def _upsert_comment(
             token, owner, repo, pr_number,
             key="chief",
             section=body.replace(_MARKER, "").strip(),
+            header_on_create=_CHIEF_CREATE_HEADER,
+            create_if_absent=create_if_absent,
+            # WITHOUT this, `_MARKER` is a legacy board marker, so a human who
+            # quotes it in a PR discussion looks exactly like the board and
+            # gets their comment overwritten. `_find_marker_comment` has always
+            # checked app identity (#560); moving to the board in #797 dropped
+            # the check on the way past.
+            app_id=get_app_id(),
         )
         return
     except (httpx.HTTPStatusError, httpx.RequestError) as e:
@@ -241,7 +285,19 @@ def run_ticket_compliance(
         return {"checked": len(refs), "flagged": {n: len(g) for n, g in all_unaddressed.items()}}
 
     # Nothing unaddressed. If a stale advisory exists, clear it; else no-op.
-    if _find_marker_comment(token, owner, repo, pr_number) is not None:
-        _upsert_comment(token, owner, repo, pr_number, _cleared_body(refs))
+    #
+    # Must check the BOARD as well as the legacy marker. Chief's section is
+    # written with `_MARKER` stripped (it would be a stray marker mid-board),
+    # so once Chief moved onto the board in #797 `_find_marker_comment` could
+    # never see its own advisory again and this clear path went dead: flag a
+    # PR, fix the criteria, and the stale advisory sat there forever.
+    if _has_existing_advisory(token, owner, repo, pr_number):
+        _upsert_comment(
+            token, owner, repo, pr_number, _cleared_body(refs),
+            # Clearing is only meaningful against something already posted, and
+            # a board created just to announce "nothing wrong" is an email
+            # with no news in it.
+            create_if_absent=False,
+        )
         return {"checked": len(refs), "flagged": {}, "cleared": True}
     return {"checked": len(refs), "flagged": {}}
