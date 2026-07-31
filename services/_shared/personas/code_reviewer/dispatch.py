@@ -63,6 +63,7 @@ from personas.code_reviewer.claim_check import (
     filter_novel_claim_findings,
     scan_claim_checks,
 )
+from personas import board
 from personas.code_reviewer.complexity import scan_complexity
 from personas.code_reviewer.lint import scan_ruff
 from personas.code_reviewer.cross_file import (
@@ -844,7 +845,16 @@ _AGENT_META_PREAMBLE = (
 )
 
 # Upsert-by-marker issue comment for the Elder review stack (PR timeline).
-_STACK_MARKER = "<!-- grug-elder-stack -->"
+# The comment Elder finds/upserts is now the shared BOARD (#791), not an
+# Elder-private one. Locating by the BOARD marker is what lets Chief and the
+# others edit the SAME comment instead of each posting their own - which is
+# what turned one review into three emails.
+#
+# Legacy marker kept for LOCATION only: PRs reviewed before this change carry
+# an elder-stack comment, and a fresh board next to it would be the duplicate
+# this exists to prevent. Found -> rewritten in place as a board.
+_STACK_MARKER = board.BOARD_MARKER
+_LEGACY_STACK_MARKER = "<!-- grug-elder-stack -->"
 _STACK_COMMENT_TIMEOUT = 10.0
 
 
@@ -1052,6 +1062,7 @@ def _review_stack_body(
     living_range: str = "",
     suppressed_count: int = 0,
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
+    pr_title: str = "",
 ) -> str:
     """PR-timeline review stack comment (Markings v2 / FLINT-style shell).
 
@@ -1098,29 +1109,43 @@ def _review_stack_body(
         rows.append(f"| … | +{n - 25} more | | | |")
     table = "\n".join(rows) if findings else "_No inline markings this pass._"
 
+    # The BOARD (#791). What a human receives by email is exactly this body at
+    # CREATION time - GitHub never mails an edit - so the verdict leads and all
+    # evidence is folded. Previously the first thing posted was a file table
+    # and a diagram, which made the email a diff dump with the conclusion
+    # buried under it.
+    blocking = sum(1 for f in findings if f.severity in ("high", "critical"))
+    advisory = len(findings) - blocking
     parts = [
-        _STACK_MARKER,
+        # MARKER FIRST. Without it `_find_stack_comment_id` cannot match, so
+        # every pass would POST a NEW comment instead of editing - i.e. more
+        # emails, the exact opposite of the point. Caught by
+        # test_review_stack_body_has_marker_and_actionable_count.
+        board.BOARD_MARKER,
+        board.render_header(
+            pr_title, blocking, advisory,
+            degraded=bool(evaluation.degraded_reason),
+        ),
         "",
-        f'<img src="{_PERSONA_PORTRAIT}" width="46" align="left" alt="Grug Elder" />',
-        "",
-        f"**Grug Elder** review stack · check conclusion `{conclusion}`",
-        "",
-        "### Review stack",
-        f"- Phase: {phase_label}",
-        f"- Status: {status_line}{held}{hunt}",
-        f"- Check-run: `{_CHECK_NAME}`",
-        "",
-        "### Markings",
-        "",
-        table,
+        board.collapse(
+            f"Grug Elder · {status_line.replace('**','')} · check `{conclusion}`",
+            "\n".join([
+                f"- Phase: {phase_label}",
+                f"- Status: {status_line}{held}{hunt}",
+                f"- Check-run: `{_CHECK_NAME}`",
+                "",
+                table,
+            ]),
+            # Open when something needs doing, folded when it does not: a
+            # clean review should cost no clicks and no scrolling.
+            open_by_default=bool(blocking),
+        ),
     ]
     # Only when there is something to fix — empty "Address each finding"
     # shells are noise (and look broken).
     agent = _consolidated_agent_prompt(evaluation)
     if agent:
         parts.extend([
-            "",
-            "### Prompt for AI agents",
             "",
             agent,
             "",
@@ -1171,7 +1196,8 @@ def _find_stack_comment_id(
             app = c.get("performed_via_github_app")
             if not app or str(app.get("id")) != own_app_id:
                 continue
-            if _STACK_MARKER in (c.get("body") or ""):
+            body = c.get("body") or ""
+            if _STACK_MARKER in body or _LEGACY_STACK_MARKER in body:
                 return int(c["id"])
         if len(batch) < 100:
             return None
@@ -2019,6 +2045,7 @@ def dispatch_code_review(
                 living_range=living_range,
                 suppressed_count=len(suppressed),
                 review_phase=tier1_phase,
+                pr_title=str(pr_context.get("title") or ""),
             )
             with_install_token_retry(
                 installation_id,
@@ -2541,6 +2568,7 @@ def _publish_deep_review(
     living_range: str,
     deep_suppressed_count: int,
     combined_eval: CodeReviewEvaluation,
+    pr_title: str = "",
 ) -> None:
     """Publish the async deep review's novel findings as a GitHub review.
 
@@ -2614,6 +2642,7 @@ def _publish_deep_review(
             living_range=living_range,
             suppressed_count=deep_suppressed_count,
             review_phase="deep",
+            pr_title=pr_title,
         )
         with_install_token_retry(
             installation_id,
@@ -2831,6 +2860,7 @@ def _async_deep_append_if_needed(
         living_range=living_range,
         deep_suppressed_count=deep_suppressed_count,
         combined_eval=combined,
+        pr_title=str(pr_context.get("title") or ""),
     )
     _submit_deep_evals(
         deep_graded,

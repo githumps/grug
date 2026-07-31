@@ -2375,3 +2375,60 @@ def test_deep_review_refreshes_stack_comment_with_tier1_findings(monkeypatch):
     assert "deep" in deep_body.lower()
     assert "deep-bug" in deep_body
     assert "tier1-bug" in deep_body  # Tier-1 finding preserved via combined_eval
+
+
+# --- the stack comment IS the board (#791) ----------------------------------
+
+def test_stack_body_is_a_board_with_a_verdict_first():
+    """GitHub mails comment CREATION only, so this body IS the email. It must
+    lead with a conclusion, not a table."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    ev = CodeReviewEvaluation(findings=(
+        Finding(file="a.py", line=1, severity="high", rule_name="null-deref",
+                message="npe", suggestion=None),
+    ), conclusion="failure")
+    body = cr_dispatch._review_stack_body(ev, conclusion="failure", pr_title="#1 thing")
+    lines = [l for l in body.splitlines() if l.strip()]
+    assert lines[0] == cr_dispatch.board.BOARD_MARKER   # findable, else re-POST
+    assert "WAIT" in lines[1]                           # verdict before evidence
+    assert "**1 block**" in body
+    assert "_#1 thing_" in body
+
+
+def test_clean_review_email_is_short_and_folded():
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        conclusion="success", pr_title="#2 bump",
+    )
+    assert "Trail clear" in body
+    assert "block" not in body.split("<details")[0]     # no counts on a clean pass
+    assert "<details>" in body                          # evidence folded, not open
+
+
+def test_findings_open_the_section_clean_leaves_it_folded():
+    """Something to fix -> open. Nothing to fix -> no clicks, no scrolling."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    blocking = CodeReviewEvaluation(findings=(
+        Finding(file="a.py", line=1, severity="high", rule_name="r",
+                message="m", suggestion=None),
+    ), conclusion="failure")
+    assert "<details open>" in cr_dispatch._review_stack_body(blocking, conclusion="failure")
+    clean = CodeReviewEvaluation(findings=(), conclusion="success")
+    assert "<details open>" not in cr_dispatch._review_stack_body(clean, conclusion="success")
+
+
+def test_legacy_elder_stack_comment_is_still_located():
+    """PRs reviewed before this change carry an elder-stack comment. Failing
+    to find it would post a board NEXT to it - the duplicate this exists to
+    prevent."""
+    assert cr_dispatch._LEGACY_STACK_MARKER == "<!-- grug-elder-stack -->"
+    assert cr_dispatch._STACK_MARKER == cr_dispatch.board.BOARD_MARKER
+
+
+def test_degraded_review_does_not_claim_clear():
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    ev = CodeReviewEvaluation(findings=(), conclusion="neutral",
+                              degraded_reason="all_failed")
+    body = cr_dispatch._review_stack_body(ev, conclusion="neutral")
+    assert "Trail clear" not in body and "cloudy" in body
