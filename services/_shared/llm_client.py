@@ -255,6 +255,16 @@ def _review_cohort_chars() -> int:
     return min(100_000, max(8_000, value))
 
 
+def review_cohort_char_budget() -> int:
+    """Public read of the per-cohort diff-char cap.
+
+    Elder's dispatch needs the same number the planner packs against so it
+    can drop a hunk that could never fit in ANY cohort before planning
+    starts (see `split_oversized_hunks`). Exported rather than duplicated
+    so the two layers cannot drift apart on a config change."""
+    return _review_cohort_chars()
+
+
 def _review_cohort_paths() -> int:
     """Maximum changed files whose full context enters one cohort."""
     raw = os.getenv("GRUG_REVIEW_COHORT_FILES", str(DEFAULT_MAX_COHORT_PATHS))

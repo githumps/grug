@@ -43,6 +43,7 @@ from llm_client import (
     LlmReviewResponse,
     PrContext,
     decide_deep_escalation,
+    review_cohort_char_budget,
     review_diff,
     review_is_staged,
     review_reasoner_diff,
@@ -54,7 +55,8 @@ from personas.code_reviewer.dedup import (
     rule_marker,
 )
 from personas.code_reviewer.diff_parser import (
-    DiffHunk, DiffParseError, parse_diff, split_reviewable_hunks,
+    DiffHunk, DiffParseError, parse_diff, split_oversized_hunks,
+    split_reviewable_hunks,
 )
 from personas.code_reviewer.precedent import (
     class_precision, match_precedent, render_precedent_note,
@@ -544,6 +546,7 @@ def _review_transparency(
     evaluation: CodeReviewEvaluation,
     suppressed_count: int,
     excluded_paths: tuple[str, ...],
+    oversized_paths: tuple[str, ...] = (),
 ) -> str:
     lines = (
         f"\n\nGrug held back {suppressed_count} weak finding(s) his judge doubted."
@@ -581,17 +584,38 @@ def _review_transparency(
             f"\n\nGrug not read {len(excluded_paths)} data/generated "
             f"file(s) - no meat for review there: {shown}{more}."
         )
+    if oversized_paths:
+        # Distinct sentence from the data/generated line above: these ARE
+        # reviewable in principle, they just arrived as a single hunk too
+        # big for one bounded cohort. Saying "no meat for review there"
+        # would be a lie about a real code change.
+        shown = ", ".join(
+            f"`{path.replace(chr(96), '')}`" for path in oversized_paths[:10]
+        )
+        more = (
+            f" (+{len(oversized_paths) - 10} more)"
+            if len(oversized_paths) > 10 else ""
+        )
+        lines += (
+            f"\n\nGrug not read {len(oversized_paths)} file(s) whose change "
+            f"landed as one hunk too big to hold in a single look: "
+            f"{shown}{more}. Split the change to get eyes on it."
+        )
     return lines
 
 
-def _clean_review_scope(living_range: str, excluded_paths: tuple[str, ...]) -> str:
+def _clean_review_scope(
+    living_range: str,
+    excluded_paths: tuple[str, ...],
+    oversized_paths: tuple[str, ...] = (),
+) -> str:
     if living_range:
         return (
             "Elder walked the delta diff (full file + cross-file + Omen "
             "runtime signal when mapped). No markings survived the judge. "
             "Code walk steady."
         )
-    if excluded_paths:
+    if excluded_paths or oversized_paths:
         return (
             "Elder walked the reviewable diff (full file + cross-file + "
             "Omen when mapped), skipping data/generated paths listed "
@@ -642,6 +666,7 @@ def _summary_markdown(
     *,
     suppressed_count: int = 0,
     excluded_paths: tuple[str, ...] = (),
+    oversized_paths: tuple[str, ...] = (),
     living_range: str = "",
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
 ) -> tuple[str, str]:
@@ -657,7 +682,9 @@ def _summary_markdown(
     `review_phase` (#646): tier1 = coder-only legend; deep = append legend;
     dual = both arms before publish (deep depth / rollback).
     """
-    held = _review_transparency(evaluation, suppressed_count, excluded_paths)
+    held = _review_transparency(
+        evaluation, suppressed_count, excluded_paths, oversized_paths,
+    )
     hunt = (
         (
             "\n\nLiving Hunt: reviewing `"
@@ -691,7 +718,7 @@ def _summary_markdown(
             if not suppressed_count
             else "Elder clear - weak markings held back"
         )
-        scope = _clean_review_scope(living_range, excluded_paths)
+        scope = _clean_review_scope(living_range, excluded_paths, oversized_paths)
         return hunt_title(title), ("## Markings Board\n\n" + scope) + held + hunt
 
     blocking = sum(1 for f in evaluation.findings if f.severity in ("high", "critical"))
@@ -1757,6 +1784,25 @@ def dispatch_code_review(
                     "count": len(excluded_paths),
                 },
             )
+        # A hunk bigger than a whole cohort can never be reviewed - the
+        # planner will not truncate it (line anchors), so it becomes a solo
+        # cohort that is auto-failed, flips the check to `partial_review`,
+        # and inflates the plan into more cohorts than the wall-clock budget
+        # can run. Drop it HERE, named, so the rest of the diff reviews
+        # normally. Measured live: one 1,004,156-char generated
+        # `.json` hunk cost four unrelated healthy cohorts.
+        cohort_budget = review_cohort_char_budget()
+        hunks, oversized_paths = split_oversized_hunks(hunks, cohort_budget)
+        if oversized_paths:
+            log.warning(
+                "code_review_hunks_oversized",
+                extra={
+                    "pr": f"{owner}/{repo_name}#{pull_number}",
+                    "oversized": list(oversized_paths)[:20],
+                    "count": len(oversized_paths),
+                    "cohort_budget_chars": cohort_budget,
+                },
+            )
     except (httpx.HTTPStatusError, httpx.RequestError, DiffParseError) as e:
         log.warning(
             "code_review_fetch_or_parse_failed",
@@ -2064,6 +2110,7 @@ def dispatch_code_review(
     title, summary = _summary_markdown(
         evaluation, suppressed_count=len(suppressed),
         excluded_paths=excluded_paths,
+        oversized_paths=oversized_paths,
         living_range=living_range,
         review_phase=tier1_phase,
     )

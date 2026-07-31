@@ -387,3 +387,58 @@ class TestReviewExclusionSplit:
         kept, excluded = split_reviewable_hunks((self._hunk("x.lock"),))
         assert kept == ()
         assert excluded == ("x.lock",)
+
+
+# --- oversized-hunk split ---------------------------------------------------
+
+from personas.code_reviewer.diff_parser import (  # noqa: E402
+    split_oversized_hunks,
+)
+
+
+class TestOversizedHunkSplit:
+    def _hunk(self, path, chars=10):
+        return DiffHunk(
+            file_path=path, new_start=1, new_lines=frozenset({1}),
+            body="@@ -1 +1 @@\n+" + ("x" * chars),
+        )
+
+    def test_hunk_over_budget_is_excluded_by_name(self):
+        # Observed shape: a generated .json rewritten wholesale becomes
+        # one hunk 21x the cohort cap. It must be NAMED, not planned.
+        hunks = (
+            self._hunk("services/api.py", 10),
+            self._hunk("data/generated/lookup_table.json", 5_000),
+        )
+        kept, oversized = split_oversized_hunks(hunks, 1_000)
+        assert [h.file_path for h in kept] == ["services/api.py"]
+        assert oversized == ("data/generated/lookup_table.json",)
+
+    def test_hunk_at_the_budget_is_kept(self):
+        # Boundary: the cap is inclusive, so a hunk exactly at budget still
+        # gets reviewed. Only a hunk that cannot fit is dropped.
+        hunk = self._hunk("a.py", 100)
+        kept, oversized = split_oversized_hunks((hunk,), len(hunk.body))
+        assert kept == (hunk,)
+        assert oversized == ()
+
+    def test_other_hunks_in_the_same_file_survive(self):
+        # Exclusion is per HUNK, not per path: one giant generated block must
+        # not blind Elder to a small hand-edited hunk elsewhere in the file.
+        small = self._hunk("big.json", 10)
+        giant = self._hunk("big.json", 5_000)
+        kept, oversized = split_oversized_hunks((small, giant), 1_000)
+        assert kept == (small,)
+        assert oversized == ("big.json",)
+
+    def test_dedupes_repeated_paths(self):
+        hunks = (self._hunk("a.json", 5_000), self._hunk("a.json", 6_000))
+        kept, oversized = split_oversized_hunks(hunks, 1_000)
+        assert kept == ()
+        assert oversized == ("a.json",)
+
+    def test_zero_budget_is_a_no_op(self):
+        # A non-positive budget means "unbounded" - never silently drop the
+        # whole diff because a config value was missing or misparsed.
+        hunks = (self._hunk("a.py", 5_000),)
+        assert split_oversized_hunks(hunks, 0) == (hunks, ())

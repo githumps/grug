@@ -450,6 +450,28 @@ def test_summary_markdown_reports_exact_coverage_and_reviewability_debt():
     assert "src/tangled.py" in summary
 
 
+def test_summary_names_oversized_hunks_separately_from_data_files():
+    """A hunk too big for one cohort is dropped BEFORE planning, and the
+    summary must say so in its own words - calling a real code change
+    "data/generated ... no meat for review there" would be a lie."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+
+    ev = CodeReviewEvaluation(findings=(), conclusion="success")
+    _, summary = cr_dispatch._summary_markdown(
+        ev,
+        excluded_paths=("services/api/uv.lock",),
+        oversized_paths=("data/generated/lookup_table.json",),
+    )
+
+    assert "data/generated" in summary
+    assert "services/api/uv.lock" in summary
+    assert "one hunk too big" in summary
+    assert "lookup_table.json" in summary
+    # The two omissions are counted separately, not merged into one tally.
+    assert "Grug not read 1 data/generated" in summary
+    assert "Grug not read 1 file(s) whose change" in summary
+
+
 def test_fetch_pr_review_comments_caps_pages(monkeypatch, caplog):
     """Pagination can't spin forever — a backend always returning a full
     page hits the cap + logs rather than looping inside the timeout."""

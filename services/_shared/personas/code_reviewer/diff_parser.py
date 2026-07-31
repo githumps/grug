@@ -130,6 +130,46 @@ def split_reviewable_hunks(
     return tuple(kept), tuple(excluded)
 
 
+def split_oversized_hunks(
+    hunks: tuple[DiffHunk, ...], max_hunk_chars: int,
+) -> tuple[tuple[DiffHunk, ...], tuple[str, ...]]:
+    """Partition hunks into (reviewable, oversized_paths).
+
+    A hunk larger than one whole cohort cannot be reviewed: the planner
+    refuses to truncate it (truncation corrupts the line anchors the
+    hallucination filter depends on), so it becomes a solo cohort that
+    `_refuse_oversized_cohort` fails WITHOUT ever calling a model. That
+    turned an unreviewable blob into three separate harms - a guaranteed
+    cohort failure, a `partial_review` flag that suppressed the whole
+    check, and an inflated `total_diff_chars` that split the rest of the
+    diff into more cohorts than the wall-clock budget could run.
+
+    Measured live: one generated `.json` rewritten by 22,602
+    lines produced a 1,004,156-char hunk against a 48,000 cap. It cost
+    cohorts 5 and 9 (auto-failed) AND cohorts 15-18 (budget exhausted,
+    never attempted) - four healthy cohorts lost to one blob.
+
+    Naming it here instead reuses the honest-omission channel
+    `split_reviewable_hunks` already established: what Elder could not
+    read is listed in the check summary rather than silently degrading
+    the verdict for the paths it read fine.
+
+    Per HUNK, not per path - a hand-edited hunk in a file that also
+    carries a generated block still gets reviewed. Paths are deduped and
+    order-preserving. A non-positive budget means unbounded, so a missing
+    or misparsed config value can never drop the whole diff. Pure."""
+    if max_hunk_chars <= 0:
+        return hunks, ()
+    kept: list[DiffHunk] = []
+    oversized: dict[str, None] = {}
+    for h in hunks:
+        if len(h.body) > max_hunk_chars:
+            oversized[h.file_path] = None
+        else:
+            kept.append(h)
+    return tuple(kept), tuple(oversized)
+
+
 def parse_diff(unified_diff: str) -> tuple[DiffHunk, ...]:
     """Parse a unified diff into structured hunks.
 
