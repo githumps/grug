@@ -205,9 +205,21 @@ def _build_comment(
         )
     return (
         f"{MARKER}\n"
+        # Do NOT claim a severity here. `findings_count` on this path is the
+        # VERDICT's total finding count - any severity - while the abandoned
+        # path above counts high/critical records specifically. Asserting
+        # "severity high/critical" made one comment say both "0 blocking,
+        # 1 total" (quoted from Elder, below) and "still blocking, severity
+        # high/critical" about the same review (#775, infra#1998, where the
+        # finding was `low | dead-code`).
+        #
+        # The real signal - a PR merged while its check was still blocking -
+        # is worth keeping loud. Overstating the severity is what makes it
+        # easy to dismiss, so state only what this path actually knows.
         f"Grug Sentinel notice: this PR was {outcome} while Elder's last "
-        f"review on this commit was still blocking ({findings_count} "
-        f"finding(s), severity high/critical).\n\n"
+        f"review on this commit was still blocking "
+        f"({findings_count} finding(s); see Elder's summary for severity)."
+        f"\n\n"
         f"{note}\n\n"
         f"<details><summary>Elder's last verdict summary</summary>\n\n"
         f"{elder_summary}\n\n</details>"
