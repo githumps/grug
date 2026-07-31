@@ -129,6 +129,34 @@ def _find_marker_comment(token: str, owner: str, repo: str, pr_number: int) -> i
 def _upsert_comment(
     token: str, owner: str, repo: str, pr_number: int, body: str,
 ) -> None:
+    """Write Chief's advisory as a SECTION of the shared board (#791).
+
+    It used to be its own top-level comment, which meant its own GitHub
+    notification - a second email for the same review. The board is one
+    comment that every persona edits, and GitHub never mails an edit, so
+    folding Chief in costs zero additional notifications.
+
+    Chief passes NO header: only the persona that counts findings has the
+    standing to rewrite the verdict line. Chief has an opinion about the
+    TICKET, not about the diff.
+
+    Falls back to its own comment if the board write fails - an advisory that
+    silently vanishes is worse than one in the wrong place.
+    """
+    try:
+        from personas import board_client
+        board_client.upsert_board_section(
+            token, owner, repo, pr_number,
+            key="chief",
+            section=body.replace(_MARKER, "").strip(),
+        )
+        return
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        log.warning(
+            "chief_board_upsert_failed_falling_back",
+            extra={"pr": f"{owner}/{repo}#{pr_number}", "kind": type(e).__name__},
+        )
+
     existing = _find_marker_comment(token, owner, repo, pr_number)
     if existing is not None:
         httpx.patch(
