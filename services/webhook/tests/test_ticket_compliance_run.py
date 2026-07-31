@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import personas.tpm.ticket_compliance_run as run
+from personas import board as run_board
 
 _OWN_APP_ID = "1"  # matches performed_via_github_app.id in the fixtures below
 
@@ -65,8 +66,17 @@ _ISSUE = "## Acceptance criteria\n- [ ] add the nist ghsa merged feed\n- [ ] emi
 
 
 def _install(monkeypatch, routes):
+    """Fake BOTH httpx handles.
+
+    `board_client` imported httpx itself, so patching only `run.httpx` left
+    the board calls live: every board write raised, Chief silently took its
+    legacy fallback, and these tests passed while exercising a path
+    production no longer uses. Patch both, or the coverage is a fiction.
+    """
     fake = _FakeHttp(routes)
     monkeypatch.setattr(run, "httpx", fake)
+    from personas import board_client
+    monkeypatch.setattr(board_client, "httpx", fake)
     return fake
 
 
@@ -87,7 +97,14 @@ def test_unaddressed_posts_new_comment(monkeypatch):
     res = run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1, pr_body="closes #5")
     posts = [c for c in fake.calls if c[0] == "post"]
     assert len(posts) == 1
-    assert run._MARKER in posts[0][2]["body"]
+    body = posts[0][2]["body"]
+    # Chief writes to the shared BOARD now, not its own comment - one comment
+    # per PR is one email per PR.
+    assert body.startswith(run_board.BOARD_MARKER)
+    assert run_board.extract_section(body, "chief")
+    # Creating the board means Chief IS the email, so it must carry a verdict
+    # a human can act on rather than the neutral "Grug look." placeholder.
+    assert "HOLD" in body and "Grug look." not in body
     assert res["flagged"] == {5: 2}
 
 
@@ -192,9 +209,13 @@ def test_find_marker_comment_logs_when_scan_cap_exhausted(monkeypatch, caplog):
 
 
 def test_decoy_marker_causes_post_not_patch(monkeypatch):
-    """End-to-end: a human-authored decoy marker comment exists, but no
-    genuine app-authored one - the runner must POST a fresh comment, not
-    attempt (and fail) a PATCH against a comment it can't edit."""
+    """A human-authored comment quoting Chief's marker must never be edited.
+
+    Chief's `_MARKER` is a LEGACY board marker, so to `board_client` a human
+    who quotes it looks exactly like the board. The `app_id` gate is the only
+    thing between that and grug overwriting somebody's comment - Chief dropped
+    it moving onto the board in #797, and this test is what catches it.
+    """
     routes = {
         ("get", "/pulls/1/files"): _Resp(200, [{"filename": "services/webhook/consumer.py"}]),
         ("get", "/issues/5"): _Resp(200, {"body": _ISSUE}),
@@ -206,3 +227,62 @@ def test_decoy_marker_causes_post_not_patch(monkeypatch):
     run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1, pr_body="closes #5")
     assert any(c[0] == "post" for c in fake.calls)
     assert not any(c[0] == "patch" for c in fake.calls)
+    assert not any("/comments/999" in str(c[1]) for c in fake.calls)
+
+
+def test_board_hosted_advisory_is_still_cleared(monkeypatch):
+    """The regression #797 shipped: Chief's section is written with `_MARKER`
+    stripped, so `_find_marker_comment` could no longer see its own advisory
+    and the clear path went dead - flag a PR, fix the criteria, and the stale
+    advisory sat there forever."""
+    board_body = run_board.upsert_section(
+        run_board.set_header(run_board.new_board(), "### h"),
+        "chief", "old advisory",
+    )
+    routes = {
+        ("get", "/pulls/1/files"): _Resp(200, [{"filename": "nist_ghsa_merged_feed.py"},
+                                               {"filename": "dogstatsd_gauge.py"}]),
+        ("get", "/issues/5"): _Resp(200, {"body": _ISSUE}),
+        ("get", "/issues/1/comments"): _Resp(200, [{
+            "id": 88, "body": board_body,
+            "performed_via_github_app": {"id": 1, "slug": "grug"},
+        }]),
+    }
+    fake = _install(monkeypatch, routes)
+    res = run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1, pr_body="closes #5")
+    assert res.get("cleared") is True
+    patches = [c for c in fake.calls if c[0] == "patch"]
+    assert patches and "/comments/88" in patches[0][1]
+    assert "looks like it addresses" in patches[0][2]["body"]
+
+
+def test_fallback_path_also_declines_to_create(monkeypatch):
+    """A transient board failure must not turn 'nothing to say' into a new
+    comment. The email the caller declined to send is exactly the one that
+    would arrive, and only when something else had already gone wrong."""
+    calls = []
+
+    def _boom(*a, **kw):
+        raise run.httpx.RequestError("board down")
+
+    monkeypatch.setattr(run, "_find_marker_comment", lambda *a, **k: None)
+    monkeypatch.setattr(run.httpx, "post", lambda *a, **kw: calls.append(a))
+    from personas import board_client
+    monkeypatch.setattr(board_client, "upsert_board_section", _boom)
+    run._upsert_comment("t", "o", "r", 1, "body", create_if_absent=False)
+    assert calls == []
+
+
+def test_clearing_never_creates_a_board(monkeypatch):
+    """Nothing flagged and nothing previously posted -> no comment, no email.
+    A board created solely to announce 'nothing wrong' is a notification with
+    no news in it."""
+    routes = {
+        ("get", "/pulls/1/files"): _Resp(200, [{"filename": "nist_ghsa_merged_feed.py"},
+                                               {"filename": "dogstatsd_gauge.py"}]),
+        ("get", "/issues/5"): _Resp(200, {"body": _ISSUE}),
+        ("get", "/issues/1/comments"): _Resp(200, []),
+    }
+    fake = _install(monkeypatch, routes)
+    run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1, pr_body="closes #5")
+    assert not any(c[0] == "post" for c in fake.calls)

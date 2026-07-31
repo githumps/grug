@@ -1055,6 +1055,41 @@ def _inline_comment_body(f: Finding, precedent_note: str = "") -> str:
     return f"{body}\n\n{_agent_prompt_block(f)}\n\n{rule_marker(f.rule_name)}"
 
 
+# Rows of the findings table carried in the board body. Ten, because the body
+# IS the email and <details> does not fold in Gmail (see _review_stack_body).
+_STACK_TABLE_ROWS = 10
+
+
+def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
+    """Should a review that found THIS be allowed to create the board?
+
+    Creating a comment mails the author; editing one does not. So this is the
+    question "is there news?", and a clean review is not news - the green
+    check-run already says so, in the place people look for it.
+
+    Degraded counts as news in the other direction: "Grug could not review
+    this" is precisely the case where silence would be misread as approval.
+    """
+    return bool(evaluation.findings) or bool(evaluation.degraded_reason)
+
+
+def _stack_detail_lines(
+    review_phase: str, living_range: str, suppressed_count: int,
+) -> str:
+    """The two facts a skeptical reader asks for: what was looked at, and what
+    was withheld. Everything else that used to live here was cut as noise."""
+    lines = []
+    if review_phase == "tier1":
+        # Not jargon for its own sake: a clear tier-1 pass is PROVISIONAL, and
+        # a reader who does not know that will read it as final.
+        lines.append("- Fast look only - deep look may add more.")
+    if living_range:
+        lines.append(f"- Looked at: `{living_range}`")
+    if suppressed_count:
+        lines.append(f"- Grug swallow {suppressed_count} weak thought(s).")
+    return "\n".join(lines)
+
+
 def _review_stack_body(
     evaluation: CodeReviewEvaluation,
     *,
@@ -1077,37 +1112,31 @@ def _review_stack_body(
     sev_bits = ", ".join(
         f"{k}={by_sev[k]}" for k in ("critical", "high", "medium", "low") if k in by_sev
     ) or "none"
-    phase_label = {
-        "tier1": "Tier-1 coder arm (deep may append later)",
-        "deep": "Deep reasoner append",
-        "dual": "Dual-arm Cave review",
-    }.get(review_phase, review_phase)
-    hunt = f"\n- Living Hunt range: `{living_range}`" if living_range else ""
-    held = (
-        f"\n- Judge held back {suppressed_count} weak finding(s)"
-        if suppressed_count
-        else ""
-    )
     if evaluation.degraded_reason:
-        status_line = f"Degraded (`{evaluation.degraded_reason}`) — advisory only"
+        status_line = f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
     elif n == 0:
-        status_line = "Clear — no markings published"
+        status_line = "Clear - no markings published"
     else:
         status_line = f"**{n} actionable marking(s)** ({sev_bits})"
 
+    # Ten, not twenty-five. <details> does NOT fold in Gmail - the raw
+    # notification HTML for grug#799 carried a real <details>, and Gmail
+    # rendered every child of it flat. So the fold buys nothing in the surface
+    # a human actually reads, and the only thing that keeps the mail short is
+    # the content being short. Each row is also one line, not a diff: the
+    # evidence lives on the inline comment anchored to the actual code.
     rows = [
-        "| Severity | Category | File | Line | Rule |",
-        "|---|---|---|---|---|",
+        "| Severity | File | Line | Rule |",
+        "|---|---|---|---|",
     ]
-    for f in findings[:25]:
+    for f in findings[:_STACK_TABLE_ROWS]:
         rows.append(
-            f"| {f.severity} | {_md_code_span(_category_for_rule(f.rule_name))} | "
-            f"`{_md_code_span(f.file)}` | {f.line} | "
+            f"| {f.severity} | `{_md_code_span(f.file)}` | {f.line} | "
             f"`{_md_code_span(f.rule_name)}` |"
         )
-    if n > 25:
-        rows.append(f"| … | +{n - 25} more | | | |")
-    table = "\n".join(rows) if findings else "_No inline markings this pass._"
+    if n > _STACK_TABLE_ROWS:
+        rows.append(f"| +{n - _STACK_TABLE_ROWS} more | | | |")
+    table = "\n".join(rows) if findings else ""
 
     # The BOARD (#791). What a human receives by email is exactly this body at
     # CREATION time - GitHub never mails an edit - so the verdict leads and all
@@ -1116,32 +1145,34 @@ def _review_stack_body(
     # buried under it.
     blocking = sum(1 for f in findings if f.severity in ("high", "critical"))
     advisory = len(findings) - blocking
-    parts = [
-        # MARKER FIRST. Without it `_find_stack_comment_id` cannot match, so
-        # every pass would POST a NEW comment instead of editing - i.e. more
-        # emails, the exact opposite of the point. Caught by
-        # test_review_stack_body_has_marker_and_actionable_count.
-        board.BOARD_MARKER,
-        board.render_header(
-            pr_title, blocking, advisory,
-            degraded=bool(evaluation.degraded_reason),
-        ),
-        "",
-        board.collapse(
-            f"Grug Elder · {status_line.replace('**','')} · check `{conclusion}`",
-            "\n".join([
-                f"- Phase: {phase_label}",
-                f"- Status: {status_line}{held}{hunt}",
-                f"- Check-run: `{_CHECK_NAME}`",
-                "",
-                table,
-            ]),
-            # Open when something needs doing, folded when it does not: a
-            # clean review should cost no clicks and no scrolling.
-            open_by_default=bool(blocking),
-        ),
-    ]
-    # Only when there is something to fix — empty "Address each finding"
+    parts: list[str] = []
+    # Phase, Status and Check-run used to live in the fold. All three were cut:
+    # Status restated the summary line verbatim, Phase ("Tier-1 coder arm") is
+    # internal vocabulary that means nothing to the author, and the check-run
+    # name is already a row in the PR's own check list. Scope and judge
+    # suppression stay - they are the two questions a skeptical reader asks:
+    # what did you look at, and what did you decide not to tell me.
+    #
+    # BLANK LINE between table and bullets is required: a list starting on the
+    # line after a table row is swallowed into the table.
+    detail = "\n\n".join(p for p in [
+        table, _stack_detail_lines(review_phase, living_range, suppressed_count),
+    ] if p)
+    if detail:
+        parts.extend([
+            "",
+            board.collapse(
+                f"Grug Elder - {status_line.replace('**','')} - check `{conclusion}`",
+                detail,
+                # Open when something needs doing, folded when it does not: a
+                # clean review should cost no clicks and no scrolling.
+                open_by_default=bool(blocking),
+            ),
+        ])
+    # No detail at all (a clean pass with no scope or suppression note) gets no
+    # fold. An empty <details> renders as a disclosure triangle hiding nothing,
+    # which reads as a bug in the tool.
+    # Only when there is something to fix - empty "Address each finding"
     # shells are noise (and look broken).
     agent = _consolidated_agent_prompt(evaluation)
     if agent:
@@ -1152,21 +1183,46 @@ def _review_stack_body(
             "---",
             "",
             "Inline comments carry Fix + agent prompt on each marking. "
-            "Autofix push is not enabled — apply suggestions or hand the agent "
+            "Autofix push is not enabled - apply suggestions or hand the agent "
             "prompt to your coding agent.",
             "",
         ])
-    else:
-        # Degraded (all_failed / parse_failed / ...) with empty findings is
-        # not a clean review - say so instead of "nothing to remediate".
-        if evaluation.degraded_reason:
-            status = (
-                "No agent prompt — review degraded; no usable findings were produced."
-            )
-        else:
-            status = "No agent prompt — nothing to remediate."
-        parts.extend(["", "---", "", status, ""])
-    return "\n".join(parts)
+    elif evaluation.degraded_reason:
+        # Degraded with empty findings is not a clean review, and the one thing
+        # that must never happen is a reader taking it for one.
+        parts.extend([
+            "",
+            "---",
+            "",
+            "Review degraded - no usable findings were produced. "
+            "Grug not say trail safe. Grug say Grug could not see.",
+            "",
+        ])
+    # Clean and non-degraded gets NOTHING here. It used to get "No agent
+    # prompt - nothing to remediate.", which was the fifth separate way one
+    # body said "no findings" (header, summary, status bullet, table
+    # placeholder, this). The header alone says it.
+
+    # Assemble a REAL board: marker, a delimited header, and Elder's content
+    # inside its own `grug-sec:elder` region.
+    #
+    # This used to be a flat `marker + header + content` string. It looked
+    # right and was wrong: with no region delimiters,
+    # `board.extract_section(body, "elder")` returned None, so
+    # `_upsert_review_stack_comment` skipped the merge path entirely and
+    # PATCHed the COMPLETE body - deleting Chief's section on every pass.
+    # Verified against the live boards on #797, #798 and #799: all three carry
+    # `grug-board` and not one `grug-sec:` region. The board_client unit tests
+    # never caught it because they call the client directly; nothing asserted
+    # that what Elder actually produces is something the client can merge.
+    body = board.set_header(
+        board.new_board(),
+        board.render_header(
+            pr_title, blocking, advisory,
+            degraded=bool(evaluation.degraded_reason),
+        ),
+    )
+    return board.upsert_section(body, "elder", "\n".join(parts).strip())
 
 
 def _find_stack_comment_id(
@@ -1207,8 +1263,14 @@ def _find_stack_comment_id(
 
 def _upsert_review_stack_comment(
     token: str, owner: str, repo: str, pr_number: int, body: str,
+    *, create_if_absent: bool = True,
 ) -> None:
     """PATCH existing stack comment or POST a new one (Teller discipline).
+
+    `create_if_absent=False` suppresses only the POST: a board already on the
+    PR is still refreshed. That asymmetry is the whole email budget - POST
+    mails the author, PATCH is silent - so a review with no news corrects a
+    stale board without ringing anyone's phone.
 
     Concurrent dispatch (redelivery / race) can TOCTOU: both find nothing and
     both POST. Mitigations: re-find immediately before write; if POST fails
@@ -1244,7 +1306,7 @@ def _upsert_review_stack_comment(
             board_client.upsert_board_section(
                 token, owner, repo, pr_number,
                 key="elder", section=section, header=header,
-                app_id=get_app_id(),
+                app_id=get_app_id(), create_if_absent=create_if_absent,
             )
             return
         except (httpx.HTTPStatusError, httpx.RequestError):
@@ -1263,6 +1325,15 @@ def _upsert_review_stack_comment(
     existing = _find_stack_comment_id(token, owner, repo, pr_number)
     if existing is not None:
         _patch(existing)
+        return
+    if not create_if_absent:
+        # Nothing on the PR and nothing worth mailing: stay silent. The
+        # fallback path has to honour this too, or a transient board_client
+        # failure would leak exactly the email the caller declined to send.
+        log.info(
+            "elder_stack_create_declined_nothing_to_say",
+            extra={"pr": f"{owner}/{repo}#{pr_number}"},
+        )
         return
     try:
         httpx.post(
@@ -2073,6 +2144,7 @@ def dispatch_code_review(
                 installation_id,
                 lambda token: _upsert_review_stack_comment(
                     token, owner, repo_name, pull_number, stack_body,
+                    create_if_absent=worth_an_email(evaluation),
                 ),
             )
             log.info(
@@ -2670,6 +2742,7 @@ def _publish_deep_review(
             installation_id,
             lambda token: _upsert_review_stack_comment(
                 token, owner, repo_name, pull_number, stack_body,
+                create_if_absent=worth_an_email(combined_eval),
             ),
         )
     except Exception as error:  # noqa: BLE001 - stack is cosmetic UX

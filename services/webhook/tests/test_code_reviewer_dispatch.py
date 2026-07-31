@@ -1828,8 +1828,11 @@ def test_review_stack_body_has_marker_and_actionable_count():
     assert "null-deref" in body
     assert "Prompt for AI agents" in body
     assert "Address each finding below" in body
-    assert "Living Hunt range" in body
-    assert "Tier-1" in body
+    assert "Looked at: `abc..def`" in body
+    # A clear tier-1 pass is PROVISIONAL; saying so is the one piece of phase
+    # information a reader needs. The old "Tier-1 coder arm (deep may append
+    # later)" said it in vocabulary only this repo understands.
+    assert "deep look may add more" in body
 
 
 def test_review_stack_and_summary_omit_empty_agent_prompt():
@@ -1840,11 +1843,26 @@ def test_review_stack_and_summary_omit_empty_agent_prompt():
     stack = cr_dispatch._review_stack_body(ev, conclusion="success")
     assert "Prompt for AI agents" not in stack
     assert "Address each finding" not in stack
-    assert "nothing to remediate" in stack.lower() or "No agent prompt" in stack
     assert "review degraded" not in stack.lower()
     _, summary = cr_dispatch._summary_markdown(ev)
     assert "Prompt for AI agents" not in summary
     assert "Address each finding" not in summary
+
+
+def test_clean_body_says_nothing_found_exactly_once():
+    """The measured defect: one body stated 'no findings' FIVE times (header,
+    fold summary, Status bullet, table placeholder, 'nothing to remediate').
+    An email that repeats itself five times reads as broken."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        conclusion="success",
+    )
+    assert "nothing to remediate" not in body.lower()
+    assert "No inline markings" not in body
+    assert "- Status:" not in body            # restated the fold summary
+    assert "Check-run:" not in body           # already a row in the PR checks
+    assert body.lower().count("clear") <= 2   # header verdict + fold summary
 
 
 def test_review_stack_degraded_empty_findings_not_nothing_to_remediate():
@@ -2348,7 +2366,11 @@ def test_deep_review_refreshes_stack_comment_with_tier1_findings(monkeypatch):
     stack_bodies = []
     monkeypatch.setattr(
         cr_dispatch, "_upsert_review_stack_comment",
-        lambda token, owner, repo, pr, body: stack_bodies.append(body),
+        # **kw, not a fixed arg list: the real signature grew create_if_absent,
+        # and a double that rejects it raises TypeError straight into the
+        # caller's `except Exception` - where it looks like an upsert failure
+        # rather than a broken test.
+        lambda token, owner, repo, pr, body, **kw: stack_bodies.append(body),
     )
     monkeypatch.setattr(cr_dispatch, "review_is_staged", lambda hunks: False)
     monkeypatch.setattr(
@@ -2395,15 +2417,107 @@ def test_stack_body_is_a_board_with_a_verdict_first():
     assert "_#1 thing_" in body
 
 
-def test_clean_review_email_is_short_and_folded():
+def test_worth_an_email_is_findings_or_degraded_only():
+    """The gate on whether grug may CREATE a comment - i.e. whether it may
+    mail the author. A clean review is not news; the green check-run already
+    says so. A degraded review IS news in the other direction, because silence
+    there would be misread as approval."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    f = Finding(file="a.py", line=1, severity="low", rule_name="r",
+                message="m", suggestion=None)
+    assert not cr_dispatch.worth_an_email(
+        CodeReviewEvaluation(findings=(), conclusion="success"))
+    assert cr_dispatch.worth_an_email(
+        CodeReviewEvaluation(findings=(f,), conclusion="failure"))
+    assert cr_dispatch.worth_an_email(CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="all_failed"))
+
+
+def test_clean_review_posts_nothing_when_no_board_exists(monkeypatch):
+    """No news + no existing board -> no POST, therefore no email. This is
+    the whole fix: five consecutive PRs each mailed a 'Trail clear' that
+    carried no information."""
+    monkeypatch.setattr(cr_dispatch, "_find_stack_comment_id",
+                        lambda *a, **k: None)
+    posted = []
+    monkeypatch.setattr(cr_dispatch.httpx, "post",
+                        lambda *a, **k: posted.append(a) or None)
+    cr_dispatch._upsert_review_stack_comment(
+        "tok", "o", "r", 5, "no board marker here", create_if_absent=False,
+    )
+    assert posted == []
+
+
+def test_clean_review_still_updates_an_existing_board(monkeypatch):
+    """Editing is free (GitHub never mails an edit), so a board left saying
+    '3 findings' after they were fixed must still be corrected. Silence is
+    about not RINGING the phone, not about leaving stale claims up."""
+    monkeypatch.setattr(cr_dispatch, "_find_stack_comment_id",
+                        lambda *a, **k: 42)
+    patched = []
+    monkeypatch.setattr(
+        cr_dispatch.httpx, "patch",
+        lambda url, **k: patched.append(url) or _ok_response())
+    cr_dispatch._upsert_review_stack_comment(
+        "tok", "o", "r", 5, "no board marker here", create_if_absent=False,
+    )
+    assert patched and patched[0].endswith("/issues/comments/42")
+
+
+def _ok_response():
+    import httpx as _h
+    return _h.Response(200, json={}, request=_h.Request("PATCH", "https://x"))
+
+
+def test_clean_review_body_is_three_lines_and_has_no_empty_fold():
+    """A clean pass has no evidence, so it gets no fold. An empty <details> is
+    a disclosure triangle hiding nothing, which reads as a broken tool."""
     from personas.code_reviewer.persona import CodeReviewEvaluation
     body = cr_dispatch._review_stack_body(
         CodeReviewEvaluation(findings=(), conclusion="success"),
         conclusion="success", pr_title="#2 bump",
     )
     assert "Trail clear" in body
-    assert "block" not in body.split("<details")[0]     # no counts on a clean pass
-    assert "<details>" in body                          # evidence folded, not open
+    assert "block" not in body                          # no counts on a clean pass
+    assert "<details" not in body
+    # Count only what a reader SEES: the region delimiters are HTML comments
+    # and render as nothing.
+    visible = [l for l in body.splitlines()
+               if l.strip() and not l.strip().startswith("<!--")]
+    assert len(visible) == 2, visible                    # verdict + PR title
+
+
+def test_table_and_detail_bullets_are_blank_line_separated():
+    """A list starting on the line after a table row is swallowed INTO the
+    table by GitHub's markdown - the bullets silently vanish."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=(
+            Finding(file="a.py", line=1, severity="low", rule_name="r",
+                    message="m", suggestion=None),
+        ), conclusion="failure"),
+        conclusion="failure", suppressed_count=1,
+    )
+    lines = body.splitlines()
+    bullet = next(i for i, l in enumerate(lines) if l.startswith("- Grug swallow"))
+    assert lines[bullet - 1].strip() == ""
+
+
+def test_findings_table_is_capped_so_the_mail_stays_short():
+    """<details> does NOT fold in Gmail (verified against the raw notification
+    HTML for grug#799), so nothing but brevity keeps the mail readable."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    many = tuple(
+        Finding(file=f"f{i}.py", line=i, severity="low", rule_name="r",
+                message="m", suggestion=None)
+        for i in range(1, 31)          # line >= 1; Finding rejects 0
+    )
+    body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=many, conclusion="failure"),
+        conclusion="failure",
+    )
+    assert body.count("| low |") == cr_dispatch._STACK_TABLE_ROWS
+    assert f"+{30 - cr_dispatch._STACK_TABLE_ROWS} more" in body
 
 
 def test_findings_open_the_section_clean_leaves_it_folded():
@@ -2416,6 +2530,52 @@ def test_findings_open_the_section_clean_leaves_it_folded():
     assert "<details open>" in cr_dispatch._review_stack_body(blocking, conclusion="failure")
     clean = CodeReviewEvaluation(findings=(), conclusion="success")
     assert "<details open>" not in cr_dispatch._review_stack_body(clean, conclusion="success")
+
+
+def test_elder_body_is_mergeable_by_the_board_client():
+    """What Elder PRODUCES must be something board_client can MERGE.
+
+    It was not. The body was a flat `marker + header + content` string with no
+    region delimiters, so `extract_section(body, "elder")` returned None,
+    `_upsert_review_stack_comment` skipped the merge path, and Elder PATCHed
+    the COMPLETE body - deleting Chief's section on every pass. Confirmed
+    against the live boards on #797/#798/#799: `grug-board` present, not one
+    `grug-sec:` region among them.
+
+    The board_client unit tests all passed throughout, because they call the
+    client directly. Nothing asserted the two halves fit together.
+    """
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+    for ev in (
+        CodeReviewEvaluation(findings=(
+            Finding(file="a.py", line=1, severity="high", rule_name="r",
+                    message="m", suggestion=None),
+        ), conclusion="failure"),
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        CodeReviewEvaluation(findings=(), conclusion="neutral",
+                             degraded_reason="all_failed"),
+    ):
+        body = cr_dispatch._review_stack_body(ev, conclusion="neutral",
+                                              pr_title="t")
+        assert cr_dispatch.board.extract_section(body, "elder") is not None
+        assert cr_dispatch.board.extract_header(body) is not None
+
+
+def test_elder_pass_does_not_delete_chiefs_section():
+    """End-to-end on the two modules together: Chief writes, Elder writes,
+    Chief's words survive. This is the property #797 claimed and did not have."""
+    from personas import board, board_client
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    existing = board.upsert_section(
+        board.set_header(board.new_board(), "### old"), "chief", "CHIEF-SAYS-THIS")
+    elder_body = cr_dispatch._review_stack_body(
+        CodeReviewEvaluation(findings=(), conclusion="success"),
+        conclusion="success", pr_title="t",
+    )
+    merged = board.upsert_section(
+        existing, "elder", board.extract_section(elder_body, "elder") or "")
+    assert "CHIEF-SAYS-THIS" in merged
+    assert board_client.LEGACY_MARKERS      # legacy path still reachable
 
 
 def test_legacy_elder_stack_comment_is_still_located():

@@ -17,6 +17,13 @@ that forgets step 2 does not fail loudly, it just deletes another persona's
 section. That is the exact failure the board was built to prevent, so the
 read-modify-write lives in ONE place with the reasoning attached.
 
+CREATE vs UPDATE IS THE EMAIL DECISION. GitHub mails on comment creation and
+never on edit, so POST costs the author a notification and PATCH costs nothing.
+`create_if_absent=False` lets a persona say "I have nothing worth mailing":
+it will still correct an existing board, but will not start one. Measured on
+five consecutive PRs, every grug email was a clean review restating "no
+findings" five different ways - a push notification with no information in it.
+
 CONCURRENCY. Sections are delimited, so two personas racing can only clobber
 their own region - never each other's content. The remaining race is
 create-vs-create, handled the same way Elder's original upsert did: look
@@ -100,7 +107,8 @@ def find_board(
 def upsert_board_section(
     token: str, owner: str, repo: str, pr_number: int,
     *, key: str, section: str, header: str | None = None,
-    app_id: str | None = None,
+    header_on_create: str | None = None,
+    app_id: str | None = None, create_if_absent: bool = True,
 ) -> dict[str, Any]:
     """Merge one persona's section into the board, creating it if absent.
 
@@ -108,16 +116,38 @@ def upsert_board_section(
     which is what a persona with no global verdict (Chief, Sentinel) should do
     - only the reviewer that counts findings has the standing to rewrite it.
 
+    `header_on_create` is for exactly that persona when it happens to be FIRST.
+    The board it creates is the email, and a persona with no verdict would mail
+    the neutral placeholder ("Grug look.") as the entire subject. So: supply a
+    line good enough to be the email if you are the one starting the board, but
+    never overwrite a verdict someone with standing already wrote.
+
+    `create_if_absent=False` means "update the board if one exists, but do not
+    start one for this". THE point of the distinction: creating a comment mails
+    the author, editing one never does. A persona with nothing to report must
+    therefore not CREATE - a mail that says "nothing found" is a notification
+    with no information in it. It must still UPDATE, because a board left
+    saying "3 findings" after they were fixed is stale and wrong, and correcting
+    it is free.
+
     Returns an audit dict; never raises past the caller's own error handling.
     """
     base = f"https://api.github.com/repos/{_repo(owner, repo)}"
     found = find_board(token, owner, repo, pr_number, app_id=app_id)
 
+    if found is None and not create_if_absent:
+        log.info(
+            "board_create_declined_nothing_to_say",
+            extra={"repo": f"{owner}/{repo}", "pr": pr_number, "section": key},
+        )
+        return {"board": "skipped", "section": key, "reason": "nothing_to_say"}
+
     if found is None:
         # Creating: a board with no header would email a bare section, so a
-        # creator without one gets a neutral placeholder rather than nothing.
+        # creator without one gets its create-only line, then a placeholder.
         body = board.set_header(
-            board.new_board(), header if header is not None else "### Grug look.",
+            board.new_board(),
+            next((h for h in (header, header_on_create) if h), "### Grug look."),
         )
         body = board.upsert_section(body, key, section)
         try:
