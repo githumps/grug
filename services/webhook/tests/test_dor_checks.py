@@ -204,6 +204,48 @@ def test_linked_issue_unchecked_nonexempt_fails():
     assert "still open" in r.detail
 
 
+def test_closing_keyword_inside_code_span_is_a_mention_not_a_claim():
+    """DESCRIBING the gate must not TRIP the gate.
+
+    Measured: a PR body explaining this check by quoting `Closes #775` in
+    backticks was blocked by the check it was documenting, on a PR that closed
+    nothing. GitHub does not close from `#N` inside code either, so honouring
+    code spans matches the platform rather than carving an exception.
+    """
+    def fetcher(_num: int) -> str:
+        return "## Acceptance\n- [ ] still open\n"
+
+    # Inline span: mentioned, not claimed -> nothing linked, nothing to block.
+    r = check_linked_issue_completeness(
+        "I explain the gate by writing `Closes #42` in backticks.\n**Size:** M",
+        fetch_issue=fetcher,
+    )
+    assert r.passed and "no linked issues" in r.detail
+
+    # Fenced block: same.
+    r = check_linked_issue_completeness(
+        "Part of #7\n\n```\nCloses #42\n```\n**Size:** M", fetch_issue=fetcher,
+    )
+    assert r.passed and "no linked issues" in r.detail
+
+    # A REAL claim outside code still blocks - the fix must not disarm it.
+    r = check_linked_issue_completeness(
+        "Closes #42\n\nAlso mentions `Closes #99`.\n**Size:** M",
+        fetch_issue=fetcher,
+    )
+    assert not r.passed
+    assert "#42" in r.detail and "#99" not in r.detail
+
+
+def test_code_span_strip_cannot_fuse_words():
+    """Replaced with a space, not "" - otherwise stripping could create a
+    keyword out of two fragments that never appeared next to each other."""
+    from personas.tpm.ticket_compliance import closes_refs, strip_code_spans
+    assert strip_code_spans("clo`x`ses #5") == "clo ses #5"
+    assert closes_refs("clo`x`ses #5") == []      # no keyword was ever written
+    assert strip_code_spans("a `b` c") == "a   c"
+
+
 def test_linked_issue_unchecked_under_exempt_heading_passes():
     """An unchecked box under an exempt heading (Out of scope) -> pass."""
     body = "closes #42\n**Size:** M"

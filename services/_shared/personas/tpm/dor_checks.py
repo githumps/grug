@@ -20,6 +20,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from personas.tpm.ticket_compliance import strip_code_spans
+
 
 log = logging.getLogger("grug.persona.tpm.dor_checks")
 
@@ -232,7 +234,15 @@ def check_linked_issue_completeness(
     GH API blip must never freeze merges repo-wide.
     """
     # Step 1: parse closing keywords from the PR body.
-    issue_numbers = [int(n) for n in _CLOSING_KEYWORD_PAT.findall(body)]
+    #
+    # Code spans stripped first: a keyword inside backticks is a MENTION, not
+    # a claim, and GitHub does not close from `#N` inside code either. This is
+    # the BLOCKING check, so its false positives cost the most - a PR body
+    # explaining the gate by quoting `Closes #775` was blocked by the gate it
+    # was documenting, having closed nothing.
+    issue_numbers = [
+        int(n) for n in _CLOSING_KEYWORD_PAT.findall(strip_code_spans(body))
+    ]
     if not issue_numbers:
         return CheckResult(
             "linked-issue-completeness", True,
