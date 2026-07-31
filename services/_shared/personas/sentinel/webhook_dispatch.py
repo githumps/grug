@@ -256,6 +256,34 @@ def _gather_flag_evidence(
         int(verdict.get("findings_count") or 0) if verdict_blocking and verdict
         else len(abandoned)
     )
+
+    # EVIDENCE GATE. `verdict_blocking` is the stored `blocking` flag, which is
+    # independent of how many findings there were - it is also True when
+    # Elder's judge HELD BACK weak findings, and when a degraded review failed
+    # closed. In both cases nothing was published, so nothing can have shipped.
+    #
+    # Without this, Sentinel warned "this PR was merged ... (0 finding(s),
+    # severity high/critical). This means the finding(s) below may have
+    # SHIPPED" - an alert naming zero findings, whose own quoted evidence read
+    # "Elder clear - weak markings held back". Observed live on
+    # macchina#2115.
+    #
+    # A safety net that fires with no evidence is worse than none: it is
+    # indistinguishable from the real grug#721 case (a critical secret-in-log
+    # closed unresolved) that this persona exists to catch, so it trains the
+    # operator to ignore exactly the alert that matters.
+    if findings_count <= 0 and not abandoned:
+        log.info(
+            "sentinel_skip_no_evidence",
+            extra={
+                "installation_id": ctx.installation_id,
+                "pr": f"{ctx.owner}/{ctx.repo_name}#{ctx.pr_number}",
+                "verdict_blocking": verdict_blocking,
+                "reason": "blocking verdict but zero published findings "
+                          "(judge held back, or degraded fail-closed)",
+            },
+        )
+        return None
     summary = (verdict.get("summary") or "")[:500] if verdict else ""
     return abandoned_only, findings_count, summary
 

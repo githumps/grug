@@ -252,3 +252,75 @@ def test_sentinel_registered_on_closed_action_enabled_by_default():
     assert spec.missing_repo_policy == "enabled"
     assert spec.blocking_flag is None
     assert spec.check_run_name == "Grug - Sentinel"
+
+
+# --- evidence gate: never warn about zero findings ---------------------------
+
+def test_blocking_verdict_with_zero_findings_does_not_warn(monkeypatch):
+    """`blocking` is the stored flag, independent of the count - it is also
+    True when Elder's judge HELD BACK weak findings, and when a degraded
+    review fails closed. Nothing was published, so nothing can have shipped.
+
+    Observed live on macchina#2115: "merged ... (0 finding(s), severity
+    high/critical). This means the finding(s) below may have SHIPPED", whose
+    own quoted evidence read "Elder clear - weak markings held back"."""
+    _no_candidates(monkeypatch)
+    monkeypatch.setattr(
+        sentinel, "get_check_verdict",
+        lambda iid, sha, persona: _verdict(
+            blocking=True, findings_count=0,
+            summary="Elder clear - weak markings held back"),
+    )
+    posted = []
+    monkeypatch.setattr(sentinel, "_find_marker_comment", lambda t, o, r, pr: None)
+    monkeypatch.setattr(
+        sentinel, "with_install_token_retry",
+        lambda iid, fn: posted.append("wrote") or None,
+    )
+    out = sentinel.dispatch_pull_request(_ctx({"action": "closed",
+                                               "pull_request": {"merged": True}}))
+    assert out["result"] == "skipped"
+    assert posted == []          # no comment, therefore no email
+
+
+def test_blocking_verdict_with_real_findings_still_warns(monkeypatch):
+    """The grug#721 case this persona exists for - a critical finding that
+    genuinely shipped - must keep firing. The gate removes noise, not the
+    safety net."""
+    _no_candidates(monkeypatch)
+    monkeypatch.setattr(
+        sentinel, "get_check_verdict",
+        lambda iid, sha, persona: _verdict(blocking=True, findings_count=2),
+    )
+    monkeypatch.setattr(sentinel, "_find_marker_comment", lambda t, o, r, pr: None)
+    captured = {}
+    def _run(iid, fn):
+        captured["ran"] = True
+        return None
+    monkeypatch.setattr(sentinel, "with_install_token_retry", _run)
+    out = sentinel.dispatch_pull_request(_ctx({"action": "closed",
+                                               "pull_request": {"merged": True}}))
+    assert out["result"] != "skipped"
+    assert captured.get("ran") is True
+
+
+def test_abandoned_findings_warn_even_when_verdict_is_clean(monkeypatch):
+    """The grug#679 Living-Hunt blind spot: a high finding from an EARLIER
+    pass that nobody replied to, while the last verdict came back clean.
+    Evidence exists (the abandoned records), so it must still fire."""
+    rec = {"comment_id": 1, "severity": "high", "rule_name": "ssrf"}
+    monkeypatch.setattr(sentinel, "_high_severity_records", lambda iid, o, r, pr: [rec])
+    monkeypatch.setattr(
+        sentinel, "get_check_verdict",
+        lambda iid, sha, persona: _verdict(blocking=False),
+    )
+    monkeypatch.setattr(sentinel, "_abandoned_findings", lambda t, o, r, pr, c: [rec])
+    monkeypatch.setattr(sentinel, "_find_marker_comment", lambda t, o, r, pr: None)
+    calls = []
+    monkeypatch.setattr(
+        sentinel, "with_install_token_retry",
+        lambda iid, fn: calls.append(1) or (fn("tok") if len(calls) == 1 else None),
+    )
+    out = sentinel.dispatch_pull_request(_ctx({"action": "closed",
+                                               "pull_request": {"merged": True}}))
+    assert out["result"] != "skipped"
