@@ -61,10 +61,34 @@ makes speaks grug
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 
 
+# Fenced blocks first, THEN inline spans: stripping inline code first would
+# leave a fence's interior backticks pairing across its boundary.
+_FENCE_RE = re.compile(r"```.*?```|~~~.*?~~~", re.S)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def strip_code_spans(text: str) -> str:
+    """Blank out fenced blocks and inline code spans.
+
+    A closing keyword inside code is a MENTION, not a claim. GitHub agrees -
+    it does not autolink or close from `#N` inside code - so honouring that
+    here is matching the platform, not carving an exception.
+
+    Measured cost of not doing it: a PR body explaining the gate by quoting
+    `Closes #775` in backticks was BLOCKED by the gate it was describing, on a
+    PR that closed nothing. That is the worst kind of false positive - it fires
+    exactly when someone is trying to document the rule.
+
+    Replaced with a space, not "", so stripping cannot fuse the words either
+    side into a token that never appeared.
+    """
+    return _INLINE_CODE_RE.sub(" ", _FENCE_RE.sub(" ", text or ""))
+
+
 def closes_refs(pr_body: str) -> list[int]:
     """Issue numbers the PR body claims to CLOSE (dedup, order-preserving)."""
     seen: dict[int, None] = {}
-    for m in _CLOSES_RE.finditer(pr_body or ""):
+    for m in _CLOSES_RE.finditer(strip_code_spans(pr_body)):
         seen.setdefault(int(m.group(1)), None)
     return list(seen)
 
