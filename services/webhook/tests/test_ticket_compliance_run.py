@@ -256,6 +256,23 @@ def test_board_hosted_advisory_is_still_cleared(monkeypatch):
     assert "looks like it addresses" in patches[0][2]["body"]
 
 
+def test_fallback_path_also_declines_to_create(monkeypatch):
+    """A transient board failure must not turn 'nothing to say' into a new
+    comment. The email the caller declined to send is exactly the one that
+    would arrive, and only when something else had already gone wrong."""
+    calls = []
+
+    def _boom(*a, **kw):
+        raise run.httpx.RequestError("board down")
+
+    monkeypatch.setattr(run, "_find_marker_comment", lambda *a, **k: None)
+    monkeypatch.setattr(run.httpx, "post", lambda *a, **kw: calls.append(a))
+    from personas import board_client
+    monkeypatch.setattr(board_client, "upsert_board_section", _boom)
+    run._upsert_comment("t", "o", "r", 1, "body", create_if_absent=False)
+    assert calls == []
+
+
 def test_clearing_never_creates_a_board(monkeypatch):
     """Nothing flagged and nothing previously posted -> no comment, no email.
     A board created solely to announce 'nothing wrong' is a notification with

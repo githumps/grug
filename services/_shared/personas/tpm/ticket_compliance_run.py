@@ -207,11 +207,20 @@ def _upsert_comment(
             f"{_API}/repos/{_repo_path(owner, repo)}/issues/comments/{existing}",
             json={"body": body}, headers=_headers(token), timeout=_TIMEOUT,
         ).raise_for_status()
-    else:
+    elif create_if_absent:
         httpx.post(
             f"{_API}/repos/{_repo_path(owner, repo)}/issues/{pr_number}/comments",
             json={"body": body}, headers=_headers(token), timeout=_TIMEOUT,
         ).raise_for_status()
+    else:
+        # The fallback has to honour the gate too. Otherwise a transient board
+        # write failure turns "nothing worth mailing" into a brand new comment
+        # - the one email the caller specifically declined to send, delivered
+        # only when something else went wrong.
+        log.info(
+            "chief_create_declined_nothing_to_say",
+            extra={"pr": f"{owner}/{repo}#{pr_number}"},
+        )
 
 
 def _cleared_body(issue_numbers: list[int]) -> str:
