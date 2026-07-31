@@ -60,6 +60,21 @@ makes speaks grug
 """.split())
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 
+# Chief's face, matching the Elder portrait already on the inline review
+# (dispatch._PERSONA_PORTRAIT). Every persona that speaks in the email should
+# be recognisable at a glance; Chief was the one talking without a face.
+#
+# `align="left"` + width 46 keeps it a little face rather than a banner, and
+# the blank line after it is required or GitHub runs the <img> into the
+# following paragraph. Verified live: /assets/grug_chief.png is a real
+# image/png. Sibling personas (Drum, Haunt, Totem, Teller) have NO asset yet -
+# grug.lol returns the SPA index.html for those paths, so adding an <img> for
+# them would render a broken image, not a portrait.
+CHIEF_PORTRAIT = "https://grug.lol/assets/grug_chief.png"
+CHIEF_PORTRAIT_IMG = (
+    f'<img src="{CHIEF_PORTRAIT}" width="46" align="left" alt="Grug Chief" />'
+)
+
 
 # Fenced blocks first, THEN inline spans: stripping inline code first would
 # leave a fence's interior backticks pairing across its boundary.
@@ -172,6 +187,7 @@ def advisory_markdown(issue_number: int, unaddressed: list[str]) -> str | None:
     lines = "\n".join(f"- {c}" for c in unaddressed)
     return (
         f"{_MARKER}\n"
+        f"{CHIEF_PORTRAIT_IMG}\n\n"
         f"**Chief - ticket compliance.** This PR says it closes #{issue_number}, "
         f"but these acceptance criteria don't look addressed by the diff "
         f"(heuristic - Chief may be wrong; a criterion met by a sibling PR or "

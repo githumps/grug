@@ -182,7 +182,7 @@ def _build_comment(
         # conclusion once a later, unrelated push came back clean.
         return (
             f"{MARKER}\n"
-            f"Grug Sentinel notice: this PR was {'merged' if merged else 'closed'} "
+            f"Grug Haunt notice: this PR was {'merged' if merged else 'closed'} "
             f"with {findings_count} high/critical Elder finding(s) from EARLIER in its "
             f"review that never got a reply.\n\n"
             f"The most recent Elder check on this PR was clean, but Living Hunt's "
@@ -216,7 +216,7 @@ def _build_comment(
         # The real signal - a PR merged while its check was still blocking -
         # is worth keeping loud. Overstating the severity is what makes it
         # easy to dismiss, so state only what this path actually knows.
-        f"Grug Sentinel notice: this PR was {outcome} while Elder's last "
+        f"Grug Haunt notice: this PR was {outcome} while Elder's last "
         f"review on this commit was still blocking "
         f"({findings_count} finding(s); see Elder's summary for severity)."
         f"\n\n"
