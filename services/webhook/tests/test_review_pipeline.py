@@ -147,3 +147,72 @@ def test_review_map_exposes_layers_and_reviewability_without_diff_content() -> N
     assert "layers: implementation" in rendered
     assert "Reviewability warning" in rendered
     assert "SECRET" not in rendered
+
+
+# --- budget-aware planning ---------------------------------------------------
+#
+# The planner used to optimize only for SIZE while the executor was bound by
+# TIME, and neither knew about the other. One PR planned 18 serial
+# cohorts into a 700s budget whose 330s reserve leaves ~370s of real cohort
+# time; cohorts 15-18 were never attempted and surfaced as "failed", which
+# reads as an outage rather than "this PR is too big to review in full".
+
+
+def _many_areas(count: int) -> list[_Hunk]:
+    return [_Hunk(f"area{i}/impl.py", "x" * 60) for i in range(count)]
+
+
+def test_plan_without_a_cohort_cap_is_unchanged() -> None:
+    hunks = _many_areas(8)
+    assert len(plan_review(hunks, max_cohort_chars=100).cohorts) == 8
+
+
+def test_plan_is_truncated_to_the_runnable_cohort_count() -> None:
+    plan = plan_review(_many_areas(8), max_cohort_chars=100, max_cohorts=3)
+
+    assert len(plan.cohorts) == 3
+    concern = next(item for item in plan.concerns if item.kind == "plan-truncated")
+    # The unreviewed areas are NAMED, so the omission is honest rather than
+    # arriving later as five mystery cohort failures.
+    assert concern.paths == tuple(f"area{i}/impl.py" for i in range(3, 8))
+    assert "5" in concern.message
+
+
+def test_truncation_keeps_the_highest_value_prefix() -> None:
+    """_ordered_areas already sorts contract -> implementation ->
+    verification -> documentation, so the surviving prefix is the most
+    load-bearing content, not an arbitrary slice."""
+    hunks = [
+        _Hunk("docs/guide.md", "d" * 60),
+        _Hunk("src/impl.py", "i" * 60),
+        _Hunk("schema/types.py", "s" * 60),
+    ]
+
+    plan = plan_review(hunks, max_cohort_chars=100, max_cohorts=1)
+
+    assert plan.cohorts[0].layers == ("contract",)
+    concern = next(item for item in plan.concerns if item.kind == "plan-truncated")
+    assert "docs/guide.md" in concern.paths
+
+
+def test_cap_at_or_above_the_plan_size_adds_no_concern() -> None:
+    plan = plan_review(_many_areas(3), max_cohort_chars=100, max_cohorts=3)
+
+    assert len(plan.cohorts) == 3
+    assert not [item for item in plan.concerns if item.kind == "plan-truncated"]
+
+
+def test_small_single_cohort_diff_ignores_the_cap() -> None:
+    plan = plan_review(
+        [_Hunk("src/a.py", "a" * 20)], max_cohort_chars=100, max_cohorts=1,
+    )
+
+    assert not plan.staged
+    assert not [item for item in plan.concerns if item.kind == "plan-truncated"]
+
+
+def test_non_positive_cohort_cap_is_rejected() -> None:
+    # A misparsed config value must not silently reduce every review to
+    # nothing - fail loudly like the other planner budgets do.
+    with pytest.raises(ValueError):
+        plan_review(_many_areas(4), max_cohort_chars=100, max_cohorts=0)

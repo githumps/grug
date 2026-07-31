@@ -43,6 +43,7 @@ from llm_client import (
     LlmReviewResponse,
     PrContext,
     decide_deep_escalation,
+    review_cohort_char_budget,
     review_diff,
     review_is_staged,
     review_reasoner_diff,
@@ -54,7 +55,8 @@ from personas.code_reviewer.dedup import (
     rule_marker,
 )
 from personas.code_reviewer.diff_parser import (
-    DiffHunk, DiffParseError, parse_diff, split_reviewable_hunks,
+    DiffHunk, DiffParseError, parse_diff, split_oversized_hunks,
+    split_reviewable_hunks,
 )
 from personas.code_reviewer.precedent import (
     class_precision, match_precedent, render_precedent_note,
@@ -544,6 +546,7 @@ def _review_transparency(
     evaluation: CodeReviewEvaluation,
     suppressed_count: int,
     excluded_paths: tuple[str, ...],
+    oversized_paths: tuple[str, ...] = (),
 ) -> str:
     lines = (
         f"\n\nGrug held back {suppressed_count} weak finding(s) his judge doubted."
@@ -581,17 +584,38 @@ def _review_transparency(
             f"\n\nGrug not read {len(excluded_paths)} data/generated "
             f"file(s) - no meat for review there: {shown}{more}."
         )
+    if oversized_paths:
+        # Distinct sentence from the data/generated line above: these ARE
+        # reviewable in principle, they just arrived as a single hunk too
+        # big for one bounded cohort. Saying "no meat for review there"
+        # would be a lie about a real code change.
+        shown = ", ".join(
+            f"`{path.replace(chr(96), '')}`" for path in oversized_paths[:10]
+        )
+        more = (
+            f" (+{len(oversized_paths) - 10} more)"
+            if len(oversized_paths) > 10 else ""
+        )
+        lines += (
+            f"\n\nGrug not read {len(oversized_paths)} file(s) whose change "
+            f"landed as one hunk too big to hold in a single look: "
+            f"{shown}{more}. Split the change to get eyes on it."
+        )
     return lines
 
 
-def _clean_review_scope(living_range: str, excluded_paths: tuple[str, ...]) -> str:
+def _clean_review_scope(
+    living_range: str,
+    excluded_paths: tuple[str, ...],
+    oversized_paths: tuple[str, ...] = (),
+) -> str:
     if living_range:
         return (
             "Elder walked the delta diff (full file + cross-file + Omen "
             "runtime signal when mapped). No markings survived the judge. "
             "Code walk steady."
         )
-    if excluded_paths:
+    if excluded_paths or oversized_paths:
         return (
             "Elder walked the reviewable diff (full file + cross-file + "
             "Omen when mapped), skipping data/generated paths listed "
@@ -642,6 +666,7 @@ def _summary_markdown(
     *,
     suppressed_count: int = 0,
     excluded_paths: tuple[str, ...] = (),
+    oversized_paths: tuple[str, ...] = (),
     living_range: str = "",
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
 ) -> tuple[str, str]:
@@ -657,7 +682,9 @@ def _summary_markdown(
     `review_phase` (#646): tier1 = coder-only legend; deep = append legend;
     dual = both arms before publish (deep depth / rollback).
     """
-    held = _review_transparency(evaluation, suppressed_count, excluded_paths)
+    held = _review_transparency(
+        evaluation, suppressed_count, excluded_paths, oversized_paths,
+    )
     hunt = (
         (
             "\n\nLiving Hunt: reviewing `"
@@ -671,12 +698,16 @@ def _summary_markdown(
     def hunt_title(title: str) -> str:
         return f"Living Hunt {living_range} - {title}" if living_range else title
 
-    if evaluation.degraded_reason == "partial_review":
+    if is_partial_coverage(evaluation.degraded_reason):
+        # Reached the PR again only after grug#806: this branch existed but
+        # rerun.py's fail-open re-posted "Elder skipped - partial_review" over
+        # it, so nobody ever saw it. Same event, same words as the board now.
         title = "WARN Elder review coverage partial"
         return hunt_title(title), (
-            "Grug reviewed part of the diff, but one or more bounded cohorts "
-            "did not return usable output. Validated markings from completed "
-            "cohorts are still published below; this check stays advisory."
+            "Grug walked part of the diff - some ground did not fit one look, "
+            "or a bounded cohort returned nothing usable. Validated markings "
+            "from the ground Grug walked are published below; this check stays "
+            "advisory. Coverage detail is in the table above."
         ) + held + hunt
     if evaluation.degraded_reason:
         title = f"WARN Grug eyes clouded ({evaluation.degraded_reason})"
@@ -691,7 +722,7 @@ def _summary_markdown(
             if not suppressed_count
             else "Elder clear - weak markings held back"
         )
-        scope = _clean_review_scope(living_range, excluded_paths)
+        scope = _clean_review_scope(living_range, excluded_paths, oversized_paths)
         return hunt_title(title), ("## Markings Board\n\n" + scope) + held + hunt
 
     blocking = sum(1 for f in evaluation.findings if f.severity in ("high", "critical"))
@@ -1088,8 +1119,29 @@ _STACK_TABLE_ROWS = 10
 BENIGN_DEGRADATIONS = frozenset({"no_diff"})
 
 
+# Elder reviewed most of the diff but not all of it. Distinct from a real
+# degradation, where it saw nothing: the findings it DID publish are valid,
+# diff-anchored evidence, so the surfaces must not tell the author to
+# disregard the pass.
+PARTIAL_COVERAGE = "partial_review"
+
+
 def is_real_degradation(reason: str | None) -> bool:
     return bool(reason) and reason not in BENIGN_DEGRADATIONS
+
+
+def is_partial_coverage(reason: str | None) -> bool:
+    """Elder saw most of the diff, not none of it."""
+    return reason == PARTIAL_COVERAGE
+
+
+def is_blackout(reason: str | None) -> bool:
+    """Elder produced nothing usable this pass - the 'could not see' case.
+
+    Split out from `is_real_degradation` so partial coverage stops borrowing
+    the blackout vocabulary. Both are still 'news' for `worth_an_email`; they
+    are simply not the same news."""
+    return is_real_degradation(reason) and not is_partial_coverage(reason)
 
 
 def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
@@ -1125,6 +1177,75 @@ def _stack_detail_lines(
     return "\n".join(lines)
 
 
+def _stack_status_line(
+    evaluation: CodeReviewEvaluation, n: int, sev_bits: str,
+) -> str:
+    """The board section's one-line status.
+
+    Extracted from `_review_stack_body` when adding the partial-coverage
+    branch pushed that function to cyclomatic 17 against a cap of 15 (caught
+    by Elder on grug#807). The coverage-vs-findings decision is a self
+    contained question, so it reads better named than inlined."""
+    if is_partial_coverage(evaluation.degraded_reason):
+        return (
+            f"Partial coverage - {n} marking(s) from the ground Grug walked"
+            if n
+            else "Partial coverage - no markings on the ground Grug walked"
+        )
+    if is_real_degradation(evaluation.degraded_reason):
+        return f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
+    if n == 0:
+        return "Clear - no markings published"
+    return f"**{n} actionable marking(s)** ({sev_bits})"
+
+
+def _stack_closing_note(evaluation: CodeReviewEvaluation) -> list[str]:
+    """The board section's tail: what to do next, or why there is nothing.
+
+    Exactly one of these applies, and a clean non-degraded pass gets NOTHING -
+    it used to get "No agent prompt - nothing to remediate.", the fifth
+    separate way one body said "no findings"."""
+    agent = _consolidated_agent_prompt(evaluation)
+    if agent:
+        # Only when there is something to fix - empty "Address each finding"
+        # shells are noise (and look broken).
+        return [
+            "",
+            agent,
+            "",
+            "---",
+            "",
+            "Inline comments carry Fix + agent prompt on each marking. "
+            "Autofix push is not enabled - apply suggestions or hand the agent "
+            "prompt to your coding agent.",
+            "",
+        ]
+    if is_partial_coverage(evaluation.degraded_reason):
+        # Elder DID review - just not all of it. "Grug could not see" would
+        # discard real work and read as a tool failure.
+        return [
+            "",
+            "---",
+            "",
+            "Some ground not walked this pass - part of the diff did not fit "
+            "one look. What Grug did walk is above. Grug not say trail safe "
+            "for ground Grug not walk.",
+            "",
+        ]
+    if is_real_degradation(evaluation.degraded_reason):
+        # Degraded with empty findings is not a clean review, and the one thing
+        # that must never happen is a reader taking it for one.
+        return [
+            "",
+            "---",
+            "",
+            "Review degraded - no usable findings were produced. "
+            "Grug not say trail safe. Grug say Grug could not see.",
+            "",
+        ]
+    return []
+
+
 def _review_stack_body(
     evaluation: CodeReviewEvaluation,
     *,
@@ -1147,12 +1268,7 @@ def _review_stack_body(
     sev_bits = ", ".join(
         f"{k}={by_sev[k]}" for k in ("critical", "high", "medium", "low") if k in by_sev
     ) or "none"
-    if is_real_degradation(evaluation.degraded_reason):
-        status_line = f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
-    elif n == 0:
-        status_line = "Clear - no markings published"
-    else:
-        status_line = f"**{n} actionable marking(s)** ({sev_bits})"
+    status_line = _stack_status_line(evaluation, n, sev_bits)
 
     # Ten, not twenty-five. <details> does NOT fold in Gmail - the raw
     # notification HTML for grug#799 carried a real <details>, and Gmail
@@ -1207,36 +1323,7 @@ def _review_stack_body(
     # No detail at all (a clean pass with no scope or suppression note) gets no
     # fold. An empty <details> renders as a disclosure triangle hiding nothing,
     # which reads as a bug in the tool.
-    # Only when there is something to fix - empty "Address each finding"
-    # shells are noise (and look broken).
-    agent = _consolidated_agent_prompt(evaluation)
-    if agent:
-        parts.extend([
-            "",
-            agent,
-            "",
-            "---",
-            "",
-            "Inline comments carry Fix + agent prompt on each marking. "
-            "Autofix push is not enabled - apply suggestions or hand the agent "
-            "prompt to your coding agent.",
-            "",
-        ])
-    elif is_real_degradation(evaluation.degraded_reason):
-        # Degraded with empty findings is not a clean review, and the one thing
-        # that must never happen is a reader taking it for one.
-        parts.extend([
-            "",
-            "---",
-            "",
-            "Review degraded - no usable findings were produced. "
-            "Grug not say trail safe. Grug say Grug could not see.",
-            "",
-        ])
-    # Clean and non-degraded gets NOTHING here. It used to get "No agent
-    # prompt - nothing to remediate.", which was the fifth separate way one
-    # body said "no findings" (header, summary, status bullet, table
-    # placeholder, this). The header alone says it.
+    parts.extend(_stack_closing_note(evaluation))
 
     # Assemble a REAL board: marker, a delimited header, and Elder's content
     # inside its own `grug-sec:elder` region.
@@ -1254,7 +1341,8 @@ def _review_stack_body(
         board.new_board(),
         board.render_header(
             pr_title, blocking, advisory,
-            degraded=is_real_degradation(evaluation.degraded_reason),
+            degraded=is_blackout(evaluation.degraded_reason),
+            partial=is_partial_coverage(evaluation.degraded_reason),
         ),
     )
     return board.upsert_section(body, "elder", "\n".join(parts).strip())
@@ -1757,6 +1845,25 @@ def dispatch_code_review(
                     "count": len(excluded_paths),
                 },
             )
+        # A hunk bigger than a whole cohort can never be reviewed - the
+        # planner will not truncate it (line anchors), so it becomes a solo
+        # cohort that is auto-failed, flips the check to `partial_review`,
+        # and inflates the plan into more cohorts than the wall-clock budget
+        # can run. Drop it HERE, named, so the rest of the diff reviews
+        # normally. Measured live: one 1,004,156-char generated
+        # `.json` hunk cost four unrelated healthy cohorts.
+        cohort_budget = review_cohort_char_budget()
+        hunks, oversized_paths = split_oversized_hunks(hunks, cohort_budget)
+        if oversized_paths:
+            log.warning(
+                "code_review_hunks_oversized",
+                extra={
+                    "pr": f"{owner}/{repo_name}#{pull_number}",
+                    "oversized": list(oversized_paths)[:20],
+                    "count": len(oversized_paths),
+                    "cohort_budget_chars": cohort_budget,
+                },
+            )
     except (httpx.HTTPStatusError, httpx.RequestError, DiffParseError) as e:
         log.warning(
             "code_review_fetch_or_parse_failed",
@@ -2064,6 +2171,7 @@ def dispatch_code_review(
     title, summary = _summary_markdown(
         evaluation, suppressed_count=len(suppressed),
         excluded_paths=excluded_paths,
+        oversized_paths=oversized_paths,
         living_range=living_range,
         review_phase=tier1_phase,
     )

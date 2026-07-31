@@ -206,6 +206,8 @@ def test_staged_scheduler_runs_one_cohort_at_a_time() -> None:
         budget_seconds=700,
         reserve_seconds=100,
         cancel_event=None,
+        # Isolate scheduling from retry - retry has its own tests below.
+        max_attempts=1,
     )
 
     assert order == [0, 1, 2]
@@ -235,6 +237,155 @@ def test_staged_scheduler_marks_unstarted_cohorts_partial_when_budget_is_low() -
     assert responses[1].kind == "all_failed"
     assert responses[1].error == "cohort skipped: staged review budget exhausted"
     assert responses[2].error == "cohort skipped: staged review budget exhausted"
+
+
+# --- cohort retry -----------------------------------------------------------
+#
+# A cohort used to get exactly one attempt: `responses.append(run_cohort(i))`.
+# A transient backend blip or one unparseable completion was therefore
+# permanent, and permanently poisoned the whole check via `partial_review`.
+
+
+def _steady_clock(values):
+    """Clock that yields `values` then holds the last one.
+
+    A bare `iter(...)` raises StopIteration the moment the code under test
+    reads the clock one more time than the test author predicted, which turns
+    a behavior change into an unrelated-looking crash."""
+    state = list(values)
+
+    def now() -> float:
+        return state.pop(0) if len(state) > 1 else state[0]
+
+    return now
+
+
+def test_transient_cohort_failure_is_retried_and_can_succeed() -> None:
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        if len(attempts) == 1:
+            return LlmReviewResponse(kind="all_failed", error="backend blip")
+        return LlmReviewResponse(
+            kind="reviewed", backend_used=Backend.CAVE, model_name="coder",
+        )
+
+    responses = lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+    )
+
+    assert attempts == [0, 0]
+    assert responses[0].kind == "reviewed"
+
+
+def test_cohort_retry_is_bounded_to_one_extra_attempt() -> None:
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        return LlmReviewResponse(kind="all_failed", error="still down")
+
+    responses = lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+    )
+
+    assert attempts == [0, 0]
+    assert responses[0].kind == "all_failed"
+
+
+def test_parse_failure_is_retried() -> None:
+    """An unparseable completion is a re-roll candidate, not a verdict."""
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        return LlmReviewResponse(kind="parse_failed", error="bad json")
+
+    lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+    )
+
+    assert attempts == [0, 0]
+
+
+def test_empty_cohort_is_not_retried() -> None:
+    """`no_diff` is deterministic - re-asking cannot change the answer."""
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        return LlmReviewResponse(kind="no_diff")
+
+    lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+    )
+
+    assert attempts == [0]
+
+
+def test_oversized_refusal_is_not_retried() -> None:
+    """The refusal never called a model and depends only on the hunk size,
+    so a second attempt burns budget to reach the identical answer."""
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        return lc._oversized_cohort_failure(
+            lc.ReviewCohort(
+                label="generated", hunk_indexes=(0,), paths=("big.json",),
+                diff_chars=1_000_000, oversized=True, layers=("implementation",),
+            ),
+            phase="tier1", index=1, count=1, installation_id=1, pr_context=None,
+        )
+
+    lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+    )
+
+    assert attempts == [0]
+
+
+def test_retry_is_skipped_when_the_budget_cannot_afford_it() -> None:
+    """A retry must not eat the time the remaining cohorts need."""
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        return LlmReviewResponse(kind="all_failed", error="down")
+
+    responses = lc._run_staged_cohorts(
+        cohort_count=2, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=None,
+        clock=_steady_clock([0.0, 650.0]),
+    )
+
+    assert attempts == [0]
+    assert responses[1].error == "cohort skipped: staged review budget exhausted"
+
+
+def test_retry_is_skipped_when_the_review_was_cancelled() -> None:
+    import threading
+
+    cancel = threading.Event()
+    attempts: list[int] = []
+
+    def run(index: int) -> LlmReviewResponse:
+        attempts.append(index)
+        cancel.set()
+        return LlmReviewResponse(kind="all_failed", error="down")
+
+    lc._run_staged_cohorts(
+        cohort_count=1, run_cohort=run, budget_seconds=700,
+        reserve_seconds=100, cancel_event=cancel,
+    )
+
+    assert attempts == [0]
 
 
 def test_single_oversized_hunk_degrades_without_calling_model(monkeypatch) -> None:

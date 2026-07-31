@@ -101,6 +101,22 @@ _RETRYABLE_SKIP_REASONS = frozenset({
     "fetch_or_parse_failed",
 })
 
+# Skips that ALREADY published their own terminal check, so the fail-open net
+# must leave them alone. Re-posting a generic "Elder skipped - <reason>" over
+# one of these replaces real content with strictly less.
+#
+# `partial_review` belongs here and was missing: it publishes a full check
+# naming which cohorts completed, yet fell through to the "unknown skip"
+# branch, which overwrote it. That is why one PR showed "Elder skipped -
+# partial_review" on the check while the board said "Degraded (partial_review)
+# - advisory only" - two surfaces describing one pass in different words,
+# because two different code paths wrote them.
+_SELF_COMPLETING_SKIP_REASONS = frozenset({
+    "no_diff",
+    "fail_open_freshness",
+    "partial_review",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class _ReviewClaimHeartbeat:
@@ -1483,8 +1499,9 @@ def _run_hot_review(
             raise RuntimeError(
                 f"Elder review degraded: {degraded_reason}"
             )
-        if result_status == "skipped" and degraded_reason not in (
-            "no_diff", "fail_open_freshness",
+        if (
+            result_status == "skipped"
+            and degraded_reason not in _SELF_COMPLETING_SKIP_REASONS
         ):
             # Unknown skip: still fail-open rather than infinite redrive.
             posted = _complete_elder_check_open(

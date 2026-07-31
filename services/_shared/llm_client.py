@@ -243,6 +243,31 @@ _DEFAULT_STAGED_REVIEW_BUDGET_SECONDS = 700.0
 _MIN_STAGED_REVIEW_BUDGET_SECONDS = 120.0
 _MAX_STAGED_REVIEW_BUDGET_SECONDS = 740.0
 
+# How many cohorts one serial review pass can realistically finish.
+#
+# Derivation, not a guess: cohorts run SERIALLY and the executor stops once
+# `elapsed + reserve > budget`, where reserve is the full per-call LLM timeout.
+# At the live config (budget 700s, timeout 330s) that leaves ~370s of real
+# cohort time. Two runs measured on 2026-07-31 completed 14 cohorts (~26s
+# each) and 9 cohorts (~41s each) before the budget check tripped, so ~9 is
+# what fits at the slower observed rate.
+#
+# This is a BACKSTOP, not a routine truncation - with oversized hunks dropped
+# before planning (`split_oversized_hunks`) real diffs land well under it.
+_DEFAULT_MAX_REVIEW_COHORTS = 10
+_MIN_REVIEW_COHORTS = 1
+_MAX_REVIEW_COHORTS = 64
+
+# Marks a cohort failure that is a PROPERTY OF THE INPUT, not of the run.
+# Re-asking cannot change the answer, so the scheduler must not retry it.
+_OVERSIZED_COHORT_ERROR = "cohort budget exceeded"
+
+# One extra attempt per cohort. A second failure is treated as real: further
+# attempts spend budget the remaining cohorts need, and the failure modes that
+# survive one retry (a sustained backend outage, a model that cannot produce
+# parseable output for this input) are not fixed by a third.
+_DEFAULT_COHORT_ATTEMPTS = 2
+
 
 def _review_cohort_chars() -> int:
     """Maximum diff characters sent to one review cohort."""
@@ -253,6 +278,31 @@ def _review_cohort_chars() -> int:
         log.warning("review_cohort_chars_invalid", extra={"value": raw})
         return DEFAULT_MAX_COHORT_CHARS
     return min(100_000, max(8_000, value))
+
+
+def _review_max_cohorts() -> int:
+    """Cohort-count ceiling handed to the planner.
+
+    Bounds the PLAN by what the executor can actually run, so an over-large
+    diff is reported as "too big to review in full" up front instead of
+    arriving as a tail of skipped cohorts that reads like a model outage."""
+    raw = os.getenv("GRUG_REVIEW_MAX_COHORTS", str(_DEFAULT_MAX_REVIEW_COHORTS))
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("review_max_cohorts_invalid", extra={"value": raw})
+        return _DEFAULT_MAX_REVIEW_COHORTS
+    return min(_MAX_REVIEW_COHORTS, max(_MIN_REVIEW_COHORTS, value))
+
+
+def review_cohort_char_budget() -> int:
+    """Public read of the per-cohort diff-char cap.
+
+    Elder's dispatch needs the same number the planner packs against so it
+    can drop a hunk that could never fit in ANY cohort before planning
+    starts (see `split_oversized_hunks`). Exported rather than duplicated
+    so the two layers cannot drift apart on a config change."""
+    return _review_cohort_chars()
 
 
 def _review_cohort_paths() -> int:
@@ -2052,6 +2102,25 @@ def _merge_cohort_responses(
     )
 
 
+def _is_retryable_cohort_failure(response: LlmReviewResponse) -> bool:
+    """Whether a second attempt at this cohort could plausibly do better.
+
+    Retryable: `all_failed` (backend outage, timeout, transport error) and
+    `parse_failed` (one unparseable completion - a re-roll may well parse).
+
+    NOT retryable:
+      - `reviewed`, which is success.
+      - `no_diff`, which is deterministic: there was nothing in this cohort,
+        and asking again cannot conjure content.
+      - the oversized-hunk refusal, which is a property of the INPUT. It never
+        called a model and the hunk does not shrink between attempts, so a
+        retry spends budget to reach a guaranteed-identical answer.
+    """
+    if response.kind not in ("all_failed", "parse_failed"):
+        return False
+    return not (response.error or "").startswith(_OVERSIZED_COHORT_ERROR)
+
+
 def _run_staged_cohorts(
     *,
     cohort_count: int,
@@ -2060,12 +2129,22 @@ def _run_staged_cohorts(
     reserve_seconds: float,
     cancel_event: threading.Event | None,
     clock: Callable[[], float] | None = None,
+    max_attempts: int = _DEFAULT_COHORT_ATTEMPTS,
 ) -> list[LlmReviewResponse]:
     """Run cohorts serially and leave enough time for one complete next call.
 
     A Spark model has one generation slot, so concurrent cohorts only turn
     transport time into queue time. Unstarted cohorts become explicit failures;
     the reducer then publishes completed work as an honest partial review.
+
+    A cohort gets `max_attempts` tries. It used to get exactly one, so a
+    transient backend blip or a single unparseable completion was permanent -
+    and one permanently-failed cohort flips the entire check to
+    `partial_review`, suppressing findings from every cohort that DID succeed.
+    Retries are skipped when the failure is deterministic (see
+    `_is_retryable_cohort_failure`), when the review was cancelled, and when
+    the budget can no longer afford one, so a retry never eats the time the
+    remaining cohorts need.
     """
     now = clock or time.monotonic
     started_at = now()
@@ -2096,7 +2175,32 @@ def _run_staged_cohorts(
                 for _ in range(skipped)
             )
             break
-        responses.append(run_cohort(cohort_index))
+        response = run_cohort(cohort_index)
+        for attempt in range(2, max_attempts + 1):
+            if not _is_retryable_cohort_failure(response):
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            if now() - started_at + reserve_seconds > budget_seconds:
+                log.warning(
+                    "llm_staged_review_retry_skipped",
+                    extra={
+                        "cohort": cohort_index + 1,
+                        "reason": "staged review budget exhausted",
+                    },
+                )
+                break
+            log.warning(
+                "llm_staged_review_cohort_retry",
+                extra={
+                    "cohort": cohort_index + 1,
+                    "attempt": attempt,
+                    "kind": response.kind,
+                    "error": (response.error or "")[:200],
+                },
+            )
+            response = run_cohort(cohort_index)
+        responses.append(response)
     return responses
 
 
@@ -2106,6 +2210,7 @@ def review_is_staged(hunks: list[Hunk]) -> bool:
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     ).staged
 
 
@@ -2152,7 +2257,14 @@ def _oversized_cohort_failure(
     )
     return LlmReviewResponse(
         kind="all_failed",
-        error=f"cohort {index} contains a hunk over the review budget",
+        # Prefixed so the scheduler can tell this DETERMINISTIC refusal from a
+        # transient backend failure. Retrying it would burn budget to reach the
+        # identical answer - the hunk size does not change between attempts,
+        # and no model was ever called.
+        error=(
+            f"{_OVERSIZED_COHORT_ERROR}: cohort {index} contains a hunk over "
+            "the review budget"
+        ),
     )
 
 
@@ -2173,6 +2285,7 @@ def review_reasoner_diff(
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     )
     if not plan.staged:
         return _review_reasoner_diff_once(
@@ -2349,6 +2462,7 @@ def review_diff(
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     )
     if not plan.staged:
         return _review_diff_dispatch(
