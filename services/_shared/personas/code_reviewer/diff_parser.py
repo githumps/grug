@@ -138,7 +138,7 @@ def split_oversized_hunks(
     A hunk larger than one whole cohort cannot be reviewed: the planner
     refuses to truncate it (truncation corrupts the line anchors the
     hallucination filter depends on), so it becomes a solo cohort that
-    `_refuse_oversized_cohort` fails WITHOUT ever calling a model. That
+    `_oversized_cohort_failure` fails WITHOUT ever calling a model. That
     turned an unreviewable blob into three separate harms - a guaranteed
     cohort failure, a `partial_review` flag that suppressed the whole
     check, and an inflated `total_diff_chars` that split the rest of the
