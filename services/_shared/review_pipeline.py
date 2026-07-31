@@ -207,6 +207,33 @@ def _oversized_hunk_concern(
     )
 
 
+def _plan_truncated_concern(
+    dropped: Sequence[ReviewCohort],
+) -> ReviewabilityConcern | None:
+    """Name the areas a time-bounded plan cannot reach.
+
+    The planner packs against SIZE; the executor is bounded by TIME and runs
+    cohorts serially. When those disagree the tail used to be planned and then
+    skipped mid-run, arriving as `failed_cohorts` - indistinguishable from a
+    model outage. Deciding it up front and naming it says the true thing: the
+    change is too large to review in full, and here is exactly what went
+    unread."""
+    if not dropped:
+        return None
+    paths = tuple(
+        dict.fromkeys(path for cohort in dropped for path in cohort.paths)
+    )
+    return ReviewabilityConcern(
+        kind="plan-truncated",
+        message=(
+            f"This change needs more bounded review units than one review pass "
+            f"can run, so {len(dropped)} were not reviewed. Split the pull "
+            f"request to get eyes on the rest."
+        ),
+        paths=paths,
+    )
+
+
 def _cross_cohort_module_concern(
     cohorts: Sequence[ReviewCohort],
 ) -> ReviewabilityConcern | None:
@@ -258,12 +285,16 @@ def _cross_cohort_proof_concerns(
 
 
 def _reviewability_concerns(
-    cohorts: Sequence[ReviewCohort], hunks: Sequence[ReviewHunk], max_cohort_chars: int
+    cohorts: Sequence[ReviewCohort],
+    hunks: Sequence[ReviewHunk],
+    max_cohort_chars: int,
+    dropped: Sequence[ReviewCohort] = (),
 ) -> tuple[ReviewabilityConcern, ...]:
     concerns = [
         concern
         for concern in (
             _oversized_hunk_concern(cohorts, hunks, max_cohort_chars),
+            _plan_truncated_concern(dropped),
             _cross_cohort_module_concern(cohorts),
         )
         if concern is not None
@@ -376,6 +407,7 @@ def plan_review(
     *,
     max_cohort_chars: int = DEFAULT_MAX_COHORT_CHARS,
     max_cohort_paths: int = DEFAULT_MAX_COHORT_PATHS,
+    max_cohorts: int | None = None,
 ) -> ReviewPlan:
     """Group a large diff by top-level area, splitting oversized areas.
 
@@ -383,11 +415,23 @@ def plan_review(
     one-call behavior.  A single oversized hunk is never truncated: it becomes
     a cohort by itself so validation can still anchor findings to the original
     diff.
+
+    `max_cohorts` bounds the plan to what one review pass can actually RUN.
+    Without it the planner optimized purely for size while the executor was
+    bounded by wall-clock time, and neither knew about the other: one PR
+    planned 18 serial cohorts into a budget with room for far fewer, and the
+    tail surfaced as `failed_cohorts` - indistinguishable from a model outage.
+    Truncating here instead keeps the layer-ordered prefix (contracts and
+    implementation before docs) and names the remainder as a reviewability
+    concern, which is the honest statement: the change is too large to review
+    in full.
     """
     if max_cohort_chars < 1:
         raise ValueError("max_cohort_chars must be positive")
     if max_cohort_paths < 1:
         raise ValueError("max_cohort_paths must be positive")
+    if max_cohorts is not None and max_cohorts < 1:
+        raise ValueError("max_cohorts must be positive")
     if not hunks:
         return ReviewPlan(cohorts=(), total_diff_chars=0)
 
@@ -405,10 +449,15 @@ def plan_review(
     frozen_cohorts = _pack_areas(
         hunks, max_chars=max_cohort_chars, max_paths=max_cohort_paths
     )
+    kept, dropped = frozen_cohorts, ()
+    if max_cohorts is not None and len(frozen_cohorts) > max_cohorts:
+        kept, dropped = frozen_cohorts[:max_cohorts], frozen_cohorts[max_cohorts:]
     return ReviewPlan(
-        cohorts=frozen_cohorts,
+        cohorts=kept,
+        # The TRUE size of the change, not the reviewed slice - callers log
+        # this to spot diffs that keep outgrowing the budget.
         total_diff_chars=total_chars,
-        concerns=_reviewability_concerns(frozen_cohorts, hunks, max_cohort_chars),
+        concerns=_reviewability_concerns(kept, hunks, max_cohort_chars, dropped),
     )
 
 

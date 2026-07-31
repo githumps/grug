@@ -243,6 +243,21 @@ _DEFAULT_STAGED_REVIEW_BUDGET_SECONDS = 700.0
 _MIN_STAGED_REVIEW_BUDGET_SECONDS = 120.0
 _MAX_STAGED_REVIEW_BUDGET_SECONDS = 740.0
 
+# How many cohorts one serial review pass can realistically finish.
+#
+# Derivation, not a guess: cohorts run SERIALLY and the executor stops once
+# `elapsed + reserve > budget`, where reserve is the full per-call LLM timeout.
+# At the live config (budget 700s, timeout 330s) that leaves ~370s of real
+# cohort time. Two runs measured on 2026-07-31 completed 14 cohorts (~26s
+# each) and 9 cohorts (~41s each) before the budget check tripped, so ~9 is
+# what fits at the slower observed rate.
+#
+# This is a BACKSTOP, not a routine truncation - with oversized hunks dropped
+# before planning (`split_oversized_hunks`) real diffs land well under it.
+_DEFAULT_MAX_REVIEW_COHORTS = 10
+_MIN_REVIEW_COHORTS = 1
+_MAX_REVIEW_COHORTS = 64
+
 
 def _review_cohort_chars() -> int:
     """Maximum diff characters sent to one review cohort."""
@@ -253,6 +268,21 @@ def _review_cohort_chars() -> int:
         log.warning("review_cohort_chars_invalid", extra={"value": raw})
         return DEFAULT_MAX_COHORT_CHARS
     return min(100_000, max(8_000, value))
+
+
+def _review_max_cohorts() -> int:
+    """Cohort-count ceiling handed to the planner.
+
+    Bounds the PLAN by what the executor can actually run, so an over-large
+    diff is reported as "too big to review in full" up front instead of
+    arriving as a tail of skipped cohorts that reads like a model outage."""
+    raw = os.getenv("GRUG_REVIEW_MAX_COHORTS", str(_DEFAULT_MAX_REVIEW_COHORTS))
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("review_max_cohorts_invalid", extra={"value": raw})
+        return _DEFAULT_MAX_REVIEW_COHORTS
+    return min(_MAX_REVIEW_COHORTS, max(_MIN_REVIEW_COHORTS, value))
 
 
 def review_cohort_char_budget() -> int:
@@ -2116,6 +2146,7 @@ def review_is_staged(hunks: list[Hunk]) -> bool:
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     ).staged
 
 
@@ -2183,6 +2214,7 @@ def review_reasoner_diff(
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     )
     if not plan.staged:
         return _review_reasoner_diff_once(
@@ -2359,6 +2391,7 @@ def review_diff(
         hunks,
         max_cohort_chars=_review_cohort_chars(),
         max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=_review_max_cohorts(),
     )
     if not plan.staged:
         return _review_diff_dispatch(
