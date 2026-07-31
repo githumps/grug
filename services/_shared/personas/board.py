@@ -217,3 +217,27 @@ def set_header(body: str, header: str) -> str:
         idx = body.index(BOARD_MARKER) + len(BOARD_MARKER)
         return block + body[idx:]
     return block + "\n" + body
+
+def extract_section(body: str, key: str) -> str | None:
+    """The markdown INSIDE one persona's region, delimiters stripped.
+
+    Needed because a persona may assemble a whole board locally and then hand
+    it to the client to MERGE - the client needs that persona's region alone,
+    or it would overwrite everyone else's.
+    """
+    m = _region(key).search(body or "")
+    if not m:
+        return None
+    inner = m.group(0)
+    inner = inner.split(_OPEN.format(key=key), 1)[-1]
+    inner = inner.rsplit(_CLOSE.format(key=key), 1)[0]
+    return inner.strip()
+
+
+def extract_header(body: str) -> str | None:
+    """The header region's markdown, or None when the body has no header."""
+    if BOARD_MARKER not in (body or "") or _HEADER_END not in body:
+        return None
+    start = body.index(BOARD_MARKER) + len(BOARD_MARKER)
+    return body[start:body.index(_HEADER_END)].strip() or None
+

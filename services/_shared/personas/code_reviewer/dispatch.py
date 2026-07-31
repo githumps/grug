@@ -1233,6 +1233,28 @@ def _upsert_review_stack_comment(
             timeout=_STACK_COMMENT_TIMEOUT,
         ).raise_for_status()
 
+    # MERGE, never replace. Elder used to PATCH a COMPLETE body, which deleted
+    # any section another persona had written (#791 slice 4). Hand the client
+    # only Elder's own region + the header; it does read-modify-write.
+    section = board.extract_section(body, "elder")
+    header = board.extract_header(body)
+    if section is not None:
+        try:
+            from personas import board_client
+            board_client.upsert_board_section(
+                token, owner, repo, pr_number,
+                key="elder", section=section, header=header,
+                app_id=get_app_id(),
+            )
+            return
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            # Fall through to the whole-body path rather than lose the review
+            # entirely: a clobbered section beats no comment at all.
+            log.warning(
+                "board_upsert_failed_falling_back",
+                extra={"pr": f"{owner}/{repo}#{pr_number}"},
+            )
+
     existing = _find_stack_comment_id(token, owner, repo, pr_number)
     if existing is not None:
         _patch(existing)
