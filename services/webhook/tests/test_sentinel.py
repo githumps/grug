@@ -324,3 +324,44 @@ def test_abandoned_findings_warn_even_when_verdict_is_clean(monkeypatch):
     out = sentinel.dispatch_pull_request(_ctx({"action": "closed",
                                                "pull_request": {"merged": True}}))
     assert out["result"] != "skipped"
+
+
+# --- #775: never claim a severity this path does not know --------------------
+
+def test_verdict_path_does_not_assert_high_critical():
+    """`findings_count` here is the VERDICT's total - any severity. Claiming
+    high/critical made one comment say both "0 blocking, 1 total" (quoted
+    from Elder in the same comment) and "still blocking, severity
+    high/critical" about the same review. infra#1998, where the finding was
+    `low | dead-code`."""
+    body = sentinel._build_comment(
+        merged=True, findings_count=1,
+        elder_summary="Elder markings - 0 blocking, 1 total",
+        abandoned_only=False,
+    )
+    assert "severity high/critical" not in body
+    assert "1 finding(s)" in body
+    assert "see Elder's summary for severity" in body
+    # the real signal must stay loud
+    assert "may have SHIPPED" in body
+
+
+def test_abandoned_path_may_still_say_high_critical():
+    """That path counts `_high_severity_records` specifically, so the claim
+    is true there - the fix is about the path that does not know."""
+    body = sentinel._build_comment(
+        merged=True, findings_count=2, elder_summary="clean",
+        abandoned_only=True,
+    )
+    assert "high/critical" in body
+
+
+def test_comment_never_contradicts_the_summary_it_quotes():
+    """The property behind #775: whatever the notice asserts must be
+    consistent with the Elder summary embedded in the same comment."""
+    summary = "Elder markings - 0 blocking, 1 total"
+    body = sentinel._build_comment(
+        merged=True, findings_count=1, elder_summary=summary, abandoned_only=False,
+    )
+    assert summary in body
+    assert not ("0 blocking" in body and "severity high/critical" in body)
