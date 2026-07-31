@@ -1060,6 +1060,21 @@ def _inline_comment_body(f: Finding, precedent_note: str = "") -> str:
 _STACK_TABLE_ROWS = 10
 
 
+# Degradations that are NOT a failure to review. `no_diff` means there was
+# nothing to look at (an empty commit, a docs-only push already covered) - the
+# rest of dispatch already treats it as equivalent to clean at the two publish
+# gates, and treating it as an alarm here contradicted that.
+#
+# Observed live on #801: an empty re-trigger commit produced "Grug eyes cloudy
+# this pass - read for self", which reads as "the reviewer broke" for a PR
+# where simply nothing had changed.
+BENIGN_DEGRADATIONS = frozenset({"no_diff"})
+
+
+def is_real_degradation(reason: str | None) -> bool:
+    return bool(reason) and reason not in BENIGN_DEGRADATIONS
+
+
 def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
     """Should a review that found THIS be allowed to create the board?
 
@@ -1067,10 +1082,13 @@ def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
     question "is there news?", and a clean review is not news - the green
     check-run already says so, in the place people look for it.
 
-    Degraded counts as news in the other direction: "Grug could not review
+    A REAL degradation is news in the other direction: "Grug could not review
     this" is precisely the case where silence would be misread as approval.
+    `no_diff` is not that - nothing to review is not a failure to review.
     """
-    return bool(evaluation.findings) or bool(evaluation.degraded_reason)
+    return bool(evaluation.findings) or is_real_degradation(
+        evaluation.degraded_reason,
+    )
 
 
 def _stack_detail_lines(
@@ -1112,7 +1130,7 @@ def _review_stack_body(
     sev_bits = ", ".join(
         f"{k}={by_sev[k]}" for k in ("critical", "high", "medium", "low") if k in by_sev
     ) or "none"
-    if evaluation.degraded_reason:
+    if is_real_degradation(evaluation.degraded_reason):
         status_line = f"Degraded (`{evaluation.degraded_reason}`) - advisory only"
     elif n == 0:
         status_line = "Clear - no markings published"
@@ -1187,7 +1205,7 @@ def _review_stack_body(
             "prompt to your coding agent.",
             "",
         ])
-    elif evaluation.degraded_reason:
+    elif is_real_degradation(evaluation.degraded_reason):
         # Degraded with empty findings is not a clean review, and the one thing
         # that must never happen is a reader taking it for one.
         parts.extend([
@@ -1219,7 +1237,7 @@ def _review_stack_body(
         board.new_board(),
         board.render_header(
             pr_title, blocking, advisory,
-            degraded=bool(evaluation.degraded_reason),
+            degraded=is_real_degradation(evaluation.degraded_reason),
         ),
     )
     return board.upsert_section(body, "elder", "\n".join(parts).strip())

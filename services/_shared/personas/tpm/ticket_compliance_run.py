@@ -224,6 +224,18 @@ def _upsert_comment(
 
 
 def _cleared_body(issue_numbers: list[int]) -> str:
+    """The 'never mind' note that replaces a stale advisory.
+
+    With no issue numbers the PR no longer claims to close anything, so the
+    advisory has no subject left - say that plainly rather than emitting a
+    dangling "addresses the acceptance criteria of ." with nothing after it.
+    """
+    if not issue_numbers:
+        return (
+            f"{_MARKER}\n"
+            f"**Chief - ticket compliance.** This PR no longer claims to close "
+            f"an issue, so Grug's earlier note does not apply. So speaks Grug."
+        )
     refs = ", ".join(f"#{n}" for n in issue_numbers)
     return (
         f"{_MARKER}\n"
@@ -257,6 +269,20 @@ def run_ticket_compliance(
         return {"checked": 0, "reason": "disabled"}
     refs = closes_refs(pr_body)[:_MAX_ISSUES]
     if not refs:
+        # No closing keyword is one of the ways "nothing to flag" happens, and
+        # returning here skipped the clear path entirely - so an advisory
+        # posted when the body DID claim a closure was orphaned the moment the
+        # author removed or corrected it, and sat there being wrong forever.
+        #
+        # Observed live on #801: Chief flagged a `Closes #5` it had misparsed
+        # out of a code span; the example was rewritten, Chief's check went
+        # green, and its section on the board still said the PR closes #5.
+        if _has_existing_advisory(token, owner, repo, pr_number):
+            _upsert_comment(
+                token, owner, repo, pr_number, _cleared_body([]),
+                create_if_absent=False,
+            )
+            return {"checked": 0, "reason": "no closing refs", "cleared": True}
         return {"checked": 0, "reason": "no closing refs"}
 
     try:

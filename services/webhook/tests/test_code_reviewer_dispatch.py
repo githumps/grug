@@ -2433,6 +2433,32 @@ def test_worth_an_email_is_findings_or_degraded_only():
         findings=(), conclusion="neutral", degraded_reason="all_failed"))
 
 
+def test_no_diff_is_not_an_alarm():
+    """Nothing to review is not a failure to review.
+
+    Observed live on grug#801: an empty re-trigger commit produced "Grug eyes
+    cloudy this pass - read for self", which reads as "the reviewer broke" for
+    a PR where simply nothing had changed - and would have created a board,
+    and mailed. dispatch already treats `no_diff` as equivalent to clean at
+    both publish gates; this makes the email path agree.
+    """
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+    nod = CodeReviewEvaluation(findings=(), conclusion="neutral",
+                               degraded_reason="no_diff")
+    assert not cr_dispatch.worth_an_email(nod)
+    body = cr_dispatch._review_stack_body(nod, conclusion="neutral", pr_title="t")
+    assert "cloudy" not in body and "Trail clear" in body
+    assert "Review degraded" not in body
+
+    # A REAL degradation must still alarm and still mail - the fix must not
+    # silence the case where silence gets read as approval.
+    bad = CodeReviewEvaluation(findings=(), conclusion="neutral",
+                               degraded_reason="all_failed")
+    assert cr_dispatch.worth_an_email(bad)
+    body = cr_dispatch._review_stack_body(bad, conclusion="neutral", pr_title="t")
+    assert "cloudy" in body and "Review degraded" in body
+
+
 def test_clean_review_posts_nothing_when_no_board_exists(monkeypatch):
     """No news + no existing board -> no POST, therefore no email. This is
     the whole fix: five consecutive PRs each mailed a 'Trail clear' that
