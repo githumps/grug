@@ -80,11 +80,25 @@ def _install(monkeypatch, routes):
     return fake
 
 
-def test_no_closing_refs_makes_no_calls(monkeypatch):
+def test_no_closing_refs_makes_no_writes(monkeypatch):
+    """No closing keyword -> nothing checked and nothing written.
+
+    Was `fake.calls == []`. It now costs TWO reads of the comment list: a PR
+    that dropped its closing keyword may still carry a stale advisory, and it
+    can live in either home (a board section, or a pre-#797 marker comment),
+    so `_has_existing_advisory` checks both. Collapsing them into one fetch is
+    possible but would misread a PR carrying an Elder legacy comment ahead of
+    a Chief one - not worth trading correctness for a GET.
+
+    Pinned at 2 so an accidental per-issue N+1 shows up as a failure.
+    """
     fake = _install(monkeypatch, {})
     res = run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1, pr_body="refs #9 only")
     assert res["checked"] == 0
-    assert fake.calls == []
+    assert not any(c[0] in ("post", "patch") for c in fake.calls)
+    assert [c[0] for c in fake.calls] == ["get", "get"]
+    assert all("/issues/1/comments" in c[1] for c in fake.calls)
+    assert not any("/issues/9" in str(c[1]) for c in fake.calls)  # no issue fetch
 
 
 def test_unaddressed_posts_new_comment(monkeypatch):
@@ -254,6 +268,42 @@ def test_board_hosted_advisory_is_still_cleared(monkeypatch):
     patches = [c for c in fake.calls if c[0] == "patch"]
     assert patches and "/comments/88" in patches[0][1]
     assert "looks like it addresses" in patches[0][2]["body"]
+
+
+def test_removing_the_closing_keyword_clears_a_stale_advisory(monkeypatch):
+    """Observed live on grug#801: Chief flagged a `Closes #5` it had misparsed
+    out of a code span. The example was rewritten, Chief's check went green,
+    and its board section still said the PR closes #5 - because `if not refs:
+    return` skipped the clear path entirely. No closing keyword is one of the
+    ways 'nothing to flag' happens, and the advisory has to be withdrawn."""
+    board_body = run_board.upsert_section(
+        run_board.set_header(run_board.new_board(), "### h"),
+        "chief", "stale advisory about #5",
+    )
+    routes = {
+        ("get", "/issues/1/comments"): _Resp(200, [{
+            "id": 55, "body": board_body,
+            "performed_via_github_app": {"id": 1, "slug": "grug"},
+        }]),
+    }
+    fake = _install(monkeypatch, routes)
+    res = run.run_ticket_compliance(
+        "t", owner="o", repo="r", pr_number=1, pr_body="refs #9 only, no claim")
+    assert res.get("cleared") is True
+    patches = [c for c in fake.calls if c[0] == "patch"]
+    assert patches and "/comments/55" in patches[0][1]
+    assert "no longer claims to close" in patches[0][2]["body"]
+    assert "stale advisory about #5" not in patches[0][2]["body"]
+
+
+def test_no_closing_keyword_and_no_advisory_stays_silent(monkeypatch):
+    """The common case must not gain a write just because the clear path
+    moved above the early return."""
+    routes = {("get", "/issues/1/comments"): _Resp(200, [])}
+    fake = _install(monkeypatch, routes)
+    run.run_ticket_compliance("t", owner="o", repo="r", pr_number=1,
+                              pr_body="refs #9 only")
+    assert not any(c[0] in ("post", "patch") for c in fake.calls)
 
 
 def test_fallback_path_also_declines_to_create(monkeypatch):

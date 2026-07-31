@@ -223,7 +223,67 @@ def _upsert_comment(
         )
 
 
+def _collect_unaddressed(
+    token: str, owner: str, repo: str, refs: list[int], signals: set[str],
+) -> dict[int, list[str]]:
+    """`{issue number: criteria that look unaddressed}` for each linked issue.
+
+    Per-issue failures are skipped, not raised: one unreachable issue must not
+    suppress the advisory for the others. A 404 body (deleted/moved issue)
+    is likewise nothing to say rather than an error.
+    """
+    out: dict[int, list[str]] = {}
+    for n in refs:
+        try:
+            body = _issue_body(token, owner, repo, n)
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            log.warning("ticket_compliance_issue_failed",
+                        extra={"issue": n, "err": type(e).__name__})
+            continue
+        if body is None:
+            continue
+        gaps = unaddressed_criteria(acceptance_criteria(body), signals)
+        if gaps:
+            out[n] = gaps
+    return out
+
+
+def _withdraw_advisory(
+    token: str, owner: str, repo: str, pr_number: int, refs: list[int],
+) -> bool:
+    """Take down a prior advisory if one is up. True if anything was written.
+
+    Both routes to "nothing to flag" end here - the criteria got addressed, OR
+    the closing keyword went away - which is exactly why it is one function.
+    Each time this logic has been open-coded at one of those two sites, the
+    other one has been the bug: the board-vs-marker miss (#800) and the
+    `if not refs: return` skip (#802).
+    """
+    if not _has_existing_advisory(token, owner, repo, pr_number):
+        return False
+    _upsert_comment(
+        token, owner, repo, pr_number, _cleared_body(refs),
+        # Clearing is only meaningful against something already posted, and a
+        # board created just to announce "nothing wrong" is an email with no
+        # news in it.
+        create_if_absent=False,
+    )
+    return True
+
+
 def _cleared_body(issue_numbers: list[int]) -> str:
+    """The 'never mind' note that replaces a stale advisory.
+
+    With no issue numbers the PR no longer claims to close anything, so the
+    advisory has no subject left - say that plainly rather than emitting a
+    dangling "addresses the acceptance criteria of ." with nothing after it.
+    """
+    if not issue_numbers:
+        return (
+            f"{_MARKER}\n"
+            f"**Chief - ticket compliance.** This PR no longer claims to close "
+            f"an issue, so Grug's earlier note does not apply. So speaks Grug."
+        )
     refs = ", ".join(f"#{n}" for n in issue_numbers)
     return (
         f"{_MARKER}\n"
@@ -257,7 +317,18 @@ def run_ticket_compliance(
         return {"checked": 0, "reason": "disabled"}
     refs = closes_refs(pr_body)[:_MAX_ISSUES]
     if not refs:
-        return {"checked": 0, "reason": "no closing refs"}
+        # No closing keyword is one of the ways "nothing to flag" happens, and
+        # returning here skipped the clear path entirely - so an advisory
+        # posted when the body DID claim a closure was orphaned the moment the
+        # author removed or corrected it, and sat there being wrong forever.
+        #
+        # Observed live on #801: Chief flagged a `Closes #5` it had misparsed
+        # out of a code span; the example was rewritten, Chief's check went
+        # green, and its section on the board still said the PR closes #5.
+        out = {"checked": 0, "reason": "no closing refs"}
+        if _withdraw_advisory(token, owner, repo, pr_number, []):
+            out["cleared"] = True
+        return out
 
     try:
         changed = _changed_files(token, owner, repo, pr_number)
@@ -266,18 +337,7 @@ def run_ticket_compliance(
         return {"checked": 0, "reason": "files fetch failed"}
     signals = diff_signals(changed, pr_body)
 
-    all_unaddressed: dict[int, list[str]] = {}
-    for n in refs:
-        try:
-            body = _issue_body(token, owner, repo, n)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            log.warning("ticket_compliance_issue_failed", extra={"issue": n, "err": type(e).__name__})
-            continue
-        if body is None:
-            continue
-        gaps = unaddressed_criteria(acceptance_criteria(body), signals)
-        if gaps:
-            all_unaddressed[n] = gaps
+    all_unaddressed = _collect_unaddressed(token, owner, repo, refs, signals)
 
     # One comment for the whole PR: concatenate per-issue advisories, or a
     # cleared note when a prior advisory is now satisfied.
@@ -300,13 +360,7 @@ def run_ticket_compliance(
     # so once Chief moved onto the board in #797 `_find_marker_comment` could
     # never see its own advisory again and this clear path went dead: flag a
     # PR, fix the criteria, and the stale advisory sat there forever.
-    if _has_existing_advisory(token, owner, repo, pr_number):
-        _upsert_comment(
-            token, owner, repo, pr_number, _cleared_body(refs),
-            # Clearing is only meaningful against something already posted, and
-            # a board created just to announce "nothing wrong" is an email
-            # with no news in it.
-            create_if_absent=False,
-        )
-        return {"checked": len(refs), "flagged": {}, "cleared": True}
-    return {"checked": len(refs), "flagged": {}}
+    out: dict = {"checked": len(refs), "flagged": {}}
+    if _withdraw_advisory(token, owner, repo, pr_number, refs):
+        out["cleared"] = True
+    return out
