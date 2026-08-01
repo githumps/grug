@@ -164,13 +164,45 @@ def ensure_enforcement(
     """
     from adapters.install_store import get_enforcement_id  # type: ignore
     stored_ruleset_id = get_enforcement_id(install_id, repo_id)
-    state = detect_enforcement(
+    detection = detect_enforcement(
         install_token, owner, repo, default_branch, GRUG_DOR_CHECK_NAME,
         stored_ruleset_id=stored_ruleset_id,
     )
+    state = detection.state
     if state != "none":
         if state == "grug_managed":
-            ruleset_id = stored_ruleset_id
+            # #686: heal the ruleset detection ACTUALLY matched, not the one
+            # on file. `detect_enforcement` can classify grug_managed via the
+            # name-prefix heuristic on a ruleset whose id differs from the
+            # stored one (a rename or other drift - grug#565). Healing the
+            # stale stored id calls get_ruleset(stale), 404s, gets swallowed
+            # by the broad except below, and the repo silently never heals.
+            ruleset_id = detection.ruleset_id or stored_ruleset_id
+            if ruleset_id is not None and ruleset_id != stored_ruleset_id:
+                # Persist the correction so the NEXT pass starts from truth -
+                # same posture as heal_enforcement's post-recreate persist.
+                # Best-effort: a store hiccup must not block the heal itself.
+                try:
+                    from adapters.install_store import set_enforcement_id  # type: ignore
+                    set_enforcement_id(install_id, repo_id, ruleset_id)
+                    log.info(
+                        "enforcement_stored_ruleset_id_corrected",
+                        extra={
+                            "owner": owner, "repo": repo,
+                            "install_id": install_id, "repo_id": repo_id,
+                            "stored_ruleset_id": stored_ruleset_id,
+                            "live_ruleset_id": ruleset_id,
+                        },
+                    )
+                except Exception as e:  # noqa: BLE001 - persist is best-effort
+                    log.warning(
+                        "enforcement_stored_ruleset_id_persist_failed",
+                        extra={
+                            "owner": owner, "repo": repo,
+                            "install_id": install_id, "repo_id": repo_id,
+                            "kind": type(e).__name__,
+                        },
+                    )
             if ruleset_id is not None:
                 try:
                     if migrate_check_context(install_token, owner, repo, ruleset_id):

@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from github_rulesets_client import EnforcementDetection
 
 from enforcement import (
     ensure_enforcement,
@@ -24,7 +25,7 @@ from enforcement import (
 
 def test_ensure_creates_ruleset_when_none():
     """No enforcement → create ruleset + store ID in DDB."""
-    with patch("enforcement.detect_enforcement", return_value="none") as mock_detect, \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("none", None)) as mock_detect, \
          patch("enforcement.create_ruleset", return_value={"id": 42}) as mock_create, \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("adapters.install_store.set_enforcement_id") as mock_set:
@@ -42,7 +43,7 @@ def test_ensure_creates_ruleset_when_none():
 
 def test_ensure_skips_when_grug_managed():
     """Already grug_managed → no-op."""
-    with patch("enforcement.detect_enforcement", return_value="grug_managed"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("grug_managed", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("enforcement.create_ruleset") as mock_create:
         result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
@@ -53,7 +54,7 @@ def test_ensure_skips_when_grug_managed():
 
 def test_ensure_skips_when_external():
     """External enforcement → no-op (don't duplicate)."""
-    with patch("enforcement.detect_enforcement", return_value="external"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("external", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("enforcement.create_ruleset") as mock_create:
         result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
@@ -64,7 +65,7 @@ def test_ensure_skips_when_external():
 
 def test_ensure_stores_ruleset_id_from_create_response():
     """Ruleset ID from GitHub's create response is persisted in DDB."""
-    with patch("enforcement.detect_enforcement", return_value="none"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("none", None)), \
          patch("enforcement.create_ruleset", return_value={"id": 777}), \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("adapters.install_store.set_enforcement_id") as mock_set:
@@ -80,7 +81,7 @@ def test_ensure_passes_stored_id_to_detect():
     detect_enforcement matches by ID first, falling back to the
     Grug-prefix name heuristic only when nothing is on file yet.
     """
-    with patch("enforcement.detect_enforcement", return_value="grug_managed") as mock_detect, \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("grug_managed", None)) as mock_detect, \
          patch("adapters.install_store.get_enforcement_id", return_value=555), \
          patch("enforcement.migrate_check_context", return_value=False), \
          patch("enforcement.create_ruleset") as mock_create:
@@ -96,7 +97,7 @@ def test_ensure_passes_stored_id_to_detect():
 def test_ensure_heals_stale_check_context_when_grug_managed():
     """grug_managed + a stored ruleset ID -> self-heal a stale check
     context (e.g. a pre-rename em-dash title) via migrate_check_context."""
-    with patch("enforcement.detect_enforcement", return_value="grug_managed"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("grug_managed", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=555), \
          patch("enforcement.migrate_check_context", return_value=True) as mock_migrate, \
          patch("enforcement.create_ruleset") as mock_create:
@@ -107,10 +108,73 @@ def test_ensure_heals_stale_check_context_when_grug_managed():
     mock_create.assert_not_called()
 
 
+def test_ensure_heals_the_live_matched_ruleset_not_the_stale_stored_id():
+    """#686: when the stored id has drifted, heal the ruleset detection
+    actually matched.
+
+    `detect_enforcement` reaches `grug_managed` via the name-prefix heuristic
+    on a ruleset whose id is NOT the one on file (a rename or other drift -
+    grug#565). Healing the STORED id calls get_ruleset(stale), 404s, and the
+    broad except swallows it, so that repo silently never heals.
+    """
+    with patch(
+        "enforcement.detect_enforcement",
+        return_value=EnforcementDetection("grug_managed", 999),
+    ), \
+         patch("adapters.install_store.get_enforcement_id", return_value=555), \
+         patch("adapters.install_store.set_enforcement_id") as mock_persist, \
+         patch("enforcement.migrate_check_context", return_value=True) as mock_migrate, \
+         patch("enforcement.create_ruleset") as mock_create:
+        result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
+
+    assert result == "grug_managed"
+    # The LIVE id, not the stale 555 on file.
+    mock_migrate.assert_called_once_with("tok", "o", "r", 999)
+    # And the correction is persisted so the next pass starts from truth.
+    mock_persist.assert_called_once_with(1, 2, 999)
+    mock_create.assert_not_called()
+
+
+def test_ensure_does_not_rewrite_the_stored_id_when_it_already_matches():
+    """No drift, no write. Persisting on every pass would be a needless
+    store round-trip on the common path."""
+    with patch(
+        "enforcement.detect_enforcement",
+        return_value=EnforcementDetection("grug_managed", 555),
+    ), \
+         patch("adapters.install_store.get_enforcement_id", return_value=555), \
+         patch("adapters.install_store.set_enforcement_id") as mock_persist, \
+         patch("enforcement.migrate_check_context", return_value=True) as mock_migrate:
+        result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
+
+    assert result == "grug_managed"
+    mock_migrate.assert_called_once_with("tok", "o", "r", 555)
+    mock_persist.assert_not_called()
+
+
+def test_ensure_persist_failure_does_not_block_the_heal():
+    """The id correction is best-effort. A store hiccup must not stop the
+    heal it was recording."""
+    with patch(
+        "enforcement.detect_enforcement",
+        return_value=EnforcementDetection("grug_managed", 999),
+    ), \
+         patch("adapters.install_store.get_enforcement_id", return_value=555), \
+         patch(
+             "adapters.install_store.set_enforcement_id",
+             side_effect=RuntimeError("store down"),
+         ), \
+         patch("enforcement.migrate_check_context", return_value=True) as mock_migrate:
+        result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
+
+    assert result == "grug_managed"
+    mock_migrate.assert_called_once_with("tok", "o", "r", 999)
+
+
 def test_ensure_skips_heal_when_no_stored_ruleset_id():
     """grug_managed but no stored ID (name-heuristic match only) ->
     nothing to heal, migrate_check_context is not even attempted."""
-    with patch("enforcement.detect_enforcement", return_value="grug_managed"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("grug_managed", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("enforcement.migrate_check_context") as mock_migrate:
         result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
@@ -122,7 +186,7 @@ def test_ensure_skips_heal_when_no_stored_ruleset_id():
 def test_ensure_heal_failure_is_best_effort_and_does_not_raise():
     """A heal failure (network blip, 403, whatever) must never break the
     existing-enforcement return - it's cutover insurance, not a gate."""
-    with patch("enforcement.detect_enforcement", return_value="grug_managed"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("grug_managed", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=555), \
          patch("enforcement.migrate_check_context", side_effect=RuntimeError("boom")):
         result = ensure_enforcement("tok", "o", "r", "main", 1, 2)
@@ -132,7 +196,7 @@ def test_ensure_heal_failure_is_best_effort_and_does_not_raise():
 
 def test_ensure_external_state_never_attempts_heal():
     """External enforcement isn't Grug's ruleset to touch - no heal call."""
-    with patch("enforcement.detect_enforcement", return_value="external"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("external", None)), \
          patch("adapters.install_store.get_enforcement_id", return_value=555), \
          patch("enforcement.migrate_check_context") as mock_migrate, \
          patch("enforcement.create_ruleset"):
@@ -649,7 +713,7 @@ def test_remove_noop_when_list_empty():
 
 def test_enable_then_disable_lifecycle():
     """Full lifecycle: enable creates, disable deletes."""
-    with patch("enforcement.detect_enforcement", return_value="none"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("none", None)), \
          patch("enforcement.create_ruleset", return_value={"id": 55}), \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
          patch("adapters.install_store.set_enforcement_id") as mock_set:
@@ -681,7 +745,7 @@ def test_check_name():
 
 def test_heal_clears_stale_id_and_recreates():
     """Deleted Grug ruleset → clear old ID → ensure creates a new one."""
-    with patch("enforcement.detect_enforcement", return_value="none"), \
+    with patch("enforcement.detect_enforcement", return_value=EnforcementDetection("none", None)), \
          patch("enforcement.create_ruleset", return_value={"id": 99}), \
          patch("adapters.install_store.get_enforcement_id", return_value=99), \
          patch("adapters.install_store.set_enforcement_id") as mock_set:
@@ -696,7 +760,7 @@ def test_heal_clears_stale_id_and_recreates():
 def test_heal_returns_new_state():
     """heal_enforcement returns the EnforcementState from ensure."""
     with patch("adapters.install_store.set_enforcement_id"), \
-         patch("enforcement.detect_enforcement", return_value="none"), \
+         patch("enforcement.detect_enforcement", return_value=EnforcementDetection("none", None)), \
          patch("enforcement.create_ruleset", return_value={"id": 50}), \
          patch("adapters.install_store.get_enforcement_id", return_value=50):
         result = heal_enforcement("tok", "o", "r", "main", 1, 2, old_ruleset_id=10)
@@ -708,7 +772,7 @@ def test_heal_noop_when_external_enforcement_exists():
     """If someone added an external ruleset before we heal, skip creation."""
     with patch("adapters.install_store.set_enforcement_id") as mock_set, \
          patch("adapters.install_store.get_enforcement_id", return_value=None), \
-         patch("enforcement.detect_enforcement", return_value="external"), \
+         patch("enforcement.detect_enforcement", return_value=EnforcementDetection("external", None)), \
          patch("enforcement.create_ruleset") as mock_create:
         result = heal_enforcement("tok", "o", "r", "main", 1, 2, old_ruleset_id=42)
 

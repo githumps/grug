@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import quote
 
 import httpx
@@ -21,6 +21,26 @@ GRUG_RULESET_PREFIX = "Grug - "
 GRUG_RULESET_PREFIXES = (GRUG_RULESET_PREFIX, "Grug " + "\u2014" + " ")
 
 EnforcementState = Literal["grug_managed", "external", "none"]
+
+
+class EnforcementDetection(NamedTuple):
+    """What `detect_enforcement` found, and WHICH ruleset it found it in.
+
+    The id is the load-bearing half (#686). Classification can reach
+    `grug_managed` through the name-prefix heuristic on a ruleset whose id
+    is NOT the one on file - a rename or other drift leaves the stored id
+    stale (grug#565). A caller that then self-heals against the STORED id
+    calls `get_ruleset(stale_id)`, 404s, gets swallowed by a broad except,
+    and silently never heals that repo. Returning the live-matched id is
+    what makes the heal target something that exists.
+
+    `ruleset_id` is None whenever no specific ruleset was matched:
+    `external` via legacy branch protection, and every `none`.
+    """
+
+    state: EnforcementState
+    ruleset_id: int | None = None
+
 
 log = logging.getLogger("grug.rulesets")
 
@@ -459,7 +479,7 @@ def detect_enforcement(
     branch: str,
     check_name: str,
     stored_ruleset_id: int | None = None,
-) -> EnforcementState:
+) -> EnforcementDetection:
     """Determine whether check_name is enforced and by whom.
 
     Checks the Rulesets API first, then falls back to legacy branch
@@ -500,6 +520,10 @@ def detect_enforcement(
 
     grug_match = False
     external_match = False
+    # The id of the ruleset that actually produced the classification, which
+    # is NOT necessarily `stored_ruleset_id` - see EnforcementDetection.
+    matched_id: int | None = None
+    external_id: int | None = None
     for rs in rulesets:
         if rs.get("enforcement") != "active" or rs.get("target") != "branch":
             continue
@@ -508,16 +532,20 @@ def detect_enforcement(
             continue
         if stored_ruleset_id is not None and rs.get("id") == stored_ruleset_id:
             grug_match = True
+            matched_id = rs.get("id")
             break
         if any(rs.get("name", "").startswith(p) for p in GRUG_RULESET_PREFIXES):
             grug_match = True
+            matched_id = rs.get("id")
             break
         external_match = True
+        if external_id is None:
+            external_id = rs.get("id")
 
     if grug_match:
-        return "grug_managed"
+        return EnforcementDetection("grug_managed", matched_id)
     if external_match:
-        return "external"
+        return EnforcementDetection("external", external_id)
 
     try:
         legacy_resp = _get_with_retry(
@@ -527,7 +555,9 @@ def detect_enforcement(
         )
         legacy_resp.raise_for_status()
         if _check_name_in_legacy(legacy_resp.json(), check_name):
-            return "external"
+            # Legacy branch protection is not a ruleset, so there is no id to
+            # heal against.
+            return EnforcementDetection("external", None)
     except httpx.HTTPStatusError as e:
         if e.response.status_code not in (404, 403):
             raise
@@ -547,4 +577,4 @@ def detect_enforcement(
             },
         )
 
-    return "none"
+    return EnforcementDetection("none", None)

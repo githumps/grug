@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import poller_handler
 import pytest
+from github_rulesets_client import EnforcementDetection
 
 
 @pytest.fixture(autouse=True)
@@ -299,7 +300,7 @@ def test_enforcement_pass_emits_live_state_per_github_repo(monkeypatch):
 
     def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
         detected.append((owner, repo, branch, check_name))
-        return "grug_managed" if repo == "a" else "none"
+        return EnforcementDetection("grug_managed" if repo == "a" else "none", None)
 
     _wire_enforcement(
         monkeypatch,
@@ -335,7 +336,7 @@ def test_enforcement_pass_threads_stored_ruleset_id_per_repo(monkeypatch):
 
     def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
         detected_ids.append((repo, stored_ruleset_id))
-        return "grug_managed"
+        return EnforcementDetection("grug_managed", None)
 
     _wire_enforcement(
         monkeypatch,
@@ -360,7 +361,7 @@ def test_enforcement_pass_honors_store_opt_out(monkeypatch):
 
     def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
         detected.append(repo)
-        return "grug_managed"
+        return EnforcementDetection("grug_managed", None)
 
     _wire_enforcement(
         monkeypatch,
@@ -395,7 +396,7 @@ def test_enforcement_pass_one_repo_failure_does_not_starve_the_rest(monkeypatch,
     def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
         if repo == "bad":
             raise RuntimeError("GH 500")
-        return "external"
+        return EnforcementDetection("external", None)
 
     _wire_enforcement(
         monkeypatch,
@@ -429,7 +430,7 @@ def test_enforcement_pass_error_emit_failure_is_swallowed(monkeypatch, caplog):
     def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
         if repo == "bad":
             raise RuntimeError("GH 500")
-        return "external"
+        return EnforcementDetection("external", None)
 
     def _emit(full, state, **kw):
         if state == "error":
@@ -472,7 +473,7 @@ def test_enforcement_pass_one_install_failure_does_not_abort_cycle(monkeypatch, 
         monkeypatch,
         installs=[1, 2],
         gh_repos=[],
-        detect=lambda *a, **k: "grug_managed",
+        detect=lambda *a, **k: EnforcementDetection("grug_managed", None),
     )
     monkeypatch.setattr("github_rulesets_client.list_installation_repos", _list)
     monkeypatch.setattr(
@@ -498,7 +499,7 @@ def test_enforcement_pass_skips_malformed_full_name(monkeypatch):
             {"id": 1, "full_name": "no-slash", "default_branch": "main"},
             {"id": 2, "full_name": "o/r", "default_branch": "main"},
         ],
-        detect=lambda *a, **k: "none",
+        detect=lambda *a, **k: EnforcementDetection("none", None),
     )
     monkeypatch.setattr(
         "observability.emit_enforcement_metric",

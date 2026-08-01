@@ -280,7 +280,7 @@ def test_detect_grug_managed_via_rulesets():
     with patch("httpx.get", side_effect=[_ok_response(summaries), _ok_response(detail)]) as mock_get:
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "grug_managed"
+    assert result.state == "grug_managed"
     assert mock_get.call_count == 2
     assert mock_get.call_args_list[1][0][0] == "https://api.github.com/repos/o/r/rulesets/10"
 
@@ -292,7 +292,7 @@ def test_detect_external_via_rulesets():
     with patch("httpx.get", side_effect=[_ok_response(summaries), _ok_response(detail)]):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "external"
+    assert result.state == "external"
 
 
 def test_detect_grug_managed_via_stored_id_despite_mismatched_name():
@@ -311,7 +311,7 @@ def test_detect_grug_managed_via_stored_id_despite_mismatched_name():
             stored_ruleset_id=999,
         )
 
-    assert result == "grug_managed"
+    assert result.state == "grug_managed"
 
 
 def test_detect_external_when_stored_id_does_not_match_any_ruleset():
@@ -325,7 +325,7 @@ def test_detect_external_when_stored_id_does_not_match_any_ruleset():
             stored_ruleset_id=12345,
         )
 
-    assert result == "external"
+    assert result.state == "external"
 
 
 def test_detect_skips_get_ruleset_for_disabled_or_non_branch_rulesets():
@@ -341,7 +341,7 @@ def test_detect_skips_get_ruleset_for_disabled_or_non_branch_rulesets():
     with patch("httpx.get", side_effect=[_ok_response(summaries), legacy_resp]) as mock_get:
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "none"
+    assert result.state == "none"
     assert mock_get.call_count == 2  # list + legacy fallback only, no get_ruleset calls
 
 
@@ -354,7 +354,7 @@ def test_detect_external_via_legacy_branch_protection():
     with patch("httpx.get", side_effect=responses):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "external"
+    assert result.state == "external"
 
 
 def test_detect_none_when_nothing_enforces():
@@ -366,7 +366,7 @@ def test_detect_none_when_nothing_enforces():
     with patch("httpx.get", side_effect=responses):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "none"
+    assert result.state == "none"
 
 
 def test_detect_none_when_legacy_404s():
@@ -382,7 +382,7 @@ def test_detect_none_when_legacy_404s():
     with patch("httpx.get", side_effect=responses):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "none"
+    assert result.state == "none"
 
 
 def test_detect_grug_managed_takes_priority_over_external():
@@ -393,7 +393,7 @@ def test_detect_grug_managed_takes_priority_over_external():
     detail_10 = _detail(10, "Grug - DoR", required_checks=["Grug - Chief"])
     with patch("httpx.get", side_effect=[_ok_response(summaries), _ok_response(detail_10)]) as mock_get:
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
-    assert result == "grug_managed"
+    assert result.state == "grug_managed"
     assert mock_get.call_count == 2  # list + ruleset 10's detail only - short-circuited before 20
 
 
@@ -407,7 +407,7 @@ def test_detect_skips_rulesets_without_status_check_rules():
 
     with patch("httpx.get", side_effect=[_ok_response(summaries), _ok_response(detail), legacy_resp]):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
-    assert result == "none"
+    assert result.state == "none"
 
 
 def test_detect_non_401_error_propagates(mock_transport_client):
@@ -444,7 +444,7 @@ def test_detect_external_via_legacy_checks_array():
     with patch("httpx.get", side_effect=[rulesets_resp, legacy_resp]):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "external"
+    assert result.state == "external"
 
 
 def test_detect_legacy_transport_error_returns_none():
@@ -462,7 +462,7 @@ def test_detect_legacy_transport_error_returns_none():
     with patch("httpx.get", side_effect=side_effect):
         result = detect_enforcement("tok", "o", "r", "main", "check")
 
-    assert result == "none"
+    assert result.state == "none"
 
 
 def test_detect_none_when_legacy_403s():
@@ -480,7 +480,7 @@ def test_detect_none_when_legacy_403s():
     with patch("httpx.get", side_effect=responses):
         result = detect_enforcement("tok", "o", "r", "main", "Grug - Chief")
 
-    assert result == "none"
+    assert result.state == "none"
 
 
 def test_detect_legacy_url_encodes_branch_with_slash():

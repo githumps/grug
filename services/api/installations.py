@@ -516,7 +516,12 @@ def get_enforcement(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repo not found")
         full_name, default_branch = repos
         owner, repo_name = full_name.split("/", 1)
-        state = detect_enforcement(token, owner, repo_name, default_branch, GRUG_DOR_CHECK_NAME)
+        # #686: detect_enforcement now also returns the live-matched ruleset
+        # id. This endpoint's HTTP response shape is unchanged - callers get
+        # the state string only.
+        state = detect_enforcement(
+            token, owner, repo_name, default_branch, GRUG_DOR_CHECK_NAME,
+        ).state
         return {"repo_id": repo_id, "enforcement_state": state}
 
     try:
