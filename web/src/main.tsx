@@ -39,3 +39,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </QueryClientProvider>
   </React.StrictMode>,
 );
+
+// #777 gate proof - deliberately invalid, reverted in the next commit.
+const __gate_probe: number = "not a number";
