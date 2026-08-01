@@ -44,6 +44,22 @@ XL items must be split into ≥2 sub-issues before queueing.
 Blocking issues / sibling repos / external prereqs. Use `Blocked by #N`,
 `Refs #N`, or `closes #N` so Grug's issue-link check passes and the
 graph is navigable.
+
+EPIC LINK REQUIRED. Every work item belongs to an epic. Add `Refs #N`
+pointing at one of the live epics below, or apply the `orphan-ok` label
+to declare this deliberately standalone. An issue with neither is an
+orphan, and orphans are how a backlog stops being a map of live work -
+40% of the open backlog was orphaned when this rule was written.
+
+Live epics (verify with `gh issue list --search "epic in:title"`):
+  #707 review quality - Elder precision/recall, false positives
+  #659 one deep LLM-call attempt seam
+  #654 scheduled hygiene-sweep + nudge personas
+  #645 tiered Elder review
+  #548 one deep publish-and-record seam
+  #522 LORE-class review intelligence
+Label groups: epic-arch-hygiene, epic-deploy-reliability,
+epic-enforcement, epic-resiliency.
 -->
 
 - 
