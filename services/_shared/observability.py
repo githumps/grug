@@ -165,7 +165,19 @@ def emit_enforcement_metric(
     Never raises into the enforcement path; failures log a WARNING (not
     debug - a silent emit path is how this metric died the first time).
     """
-    value_map = {"grug_managed": 1.0, "external": 0.5, "none": 0.0, "error": -1.0}
+    # `opted_out` is 1.0 - deliberately NOT gated is a healthy, decided state,
+    # not a gap. It exists so a repo leaving the enforcement denominator keeps
+    # REPORTING instead of going silent (#716): Datadog holds a silent
+    # multi-alert group in its last state for 24h, so a repo that stopped
+    # emitting while red stayed red long after the decision was made. A repo
+    # that reports 1.0 resolves its group on the next evaluation.
+    value_map = {
+        "grug_managed": 1.0,
+        "opted_out": 1.0,
+        "external": 0.5,
+        "none": 0.0,
+        "error": -1.0,
+    }
     value = value_map.get(enforcement_type, 0.0)
     env = os.getenv("DD_ENV") or os.getenv("GRUG_ENV", "prod")
     host = os.getenv("DD_AGENT_HOST", "")

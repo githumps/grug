@@ -159,33 +159,14 @@ def poller_cronjob_unhealthy_query() -> str:
 def enforcement_gap_query(env: str) -> str:
     """Any repo grug cannot prove is gated by the DoR check.
 
-    Thresholds on the VALUE, never on the `enforcement_type` tag. The value
-    already encodes the state (`emit_enforcement_metric`): grug_managed 1.0,
-    external 0.5, none 0.0, error -1.0. So `< 0.5` catches "no enforcement"
-    and "detection failed" while leaving the two healthy states alone.
+    Thresholds on the VALUE, never on the `enforcement_type` tag, so a repo
+    reporting ANY state keeps its multi-alert group alive. See ADR-0022 for
+    the latch this avoids and the evidence behind it.
 
-    Filtering by `enforcement_type:none` - which this query used to do -
-    latched the alert (#716). A repo that GAINED enforcement stopped matching
-    the tag, so instead of reporting a healthy value into its group, the group
-    went SILENT. Datadog keeps a silent metric group in its last state for 24h
-    by default, and `group_retention_duration` cannot shorten that for a
-    `metric alert` (it is APM/Audit/CI/Error-Tracking/Event/Logs/RUM only), so
-    the monitor stayed red long after the gap was gone. Measured live on
-    2026-08-01: yuzu-yard-sale emitted its last point at 04:00Z, and at 07:18Z
-    - past 3x the monitor's own `last_1h` window - it still read Alert with
-    ZERO repos in the gap.
-
-    Keeping every repo in scope also closes a blind spot that was arguably
-    worse than the latch: under the tag filter, an auth or rate-limit outage
-    emitted `enforcement_type:error` for every repo and `none` for none of
-    them, so the gap monitor went QUIET during exactly the incident that made
-    enforcement unknowable. `error` is -1.0, so it now trips the threshold.
-
-    Residual, and inherent to Datadog rather than to this query: a repo that
-    leaves the fleet entirely (opt-out via `tpm_enabled=false`, archive,
-    uninstall) stops emitting altogether, and its group still ages out on
-    Datadog's 24h default. That is the documented behaviour, not a bug we can
-    configure away here - see the monitor message.
+    `< 0.5` is the whole contract: it catches `none` and `error` and leaves
+    `grug_managed`, `opted_out` and `external` alone. The authoritative value
+    map is `emit_enforcement_metric` in `observability.py` - do not restate it
+    here, it will rot.
     """
     return (
         "min(last_1h):min:grug.enforcement.state"
@@ -784,18 +765,10 @@ def create_all(
         name="[grug] Enforcement gap - repo not provably gated > 1h",
         message=(
             f"{_DIGEST}\n"
-            "A TPM-enabled repo has had no provable enforcement for >1 hour. "
-            "PRs can merge without passing the DoR check.\n"
-            "Value 0.0 = no enforcement found. Value -1.0 = detection FAILED "
+            "A repo has had no provable enforcement for >1 hour. PRs can "
+            "merge without passing the DoR check.\n"
+            "0.0 = no enforcement found. -1.0 = detection FAILED "
             "(auth/rate-limit), so enforcement is unknown, not absent.\n"
-            "If the repo should NOT be gated, set tpm_enabled=false on it "
-            "rather than adding a ruleset - the poller then skips it and it "
-            "leaves this denominator.\n"
-            "Note: a repo that leaves the fleet (opt-out, archive, uninstall) "
-            "stops emitting, and Datadog holds its group in the last state "
-            "for 24h. A red group with no matching series is that retention "
-            "window, not a live gap - confirm against the metric before "
-            "chasing it (#716).\n"
             "Runbook: docs/RUNBOOK.md#enforcement-gap"
         ),
         query=enforcement_gap_query(env),

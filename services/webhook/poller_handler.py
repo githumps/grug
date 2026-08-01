@@ -275,7 +275,27 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, int | str]:
                         continue
                     try:
                         cfg = get_repo_config(iid, r["id"])
-                        if cfg.get("tpm_enabled", True) is False:
+                        # #716: EMIT for an opted-out repo, never `continue`.
+                        # Dropping it from the gauge is what latched the
+                        # monitor: Datadog holds a silent multi-alert group in
+                        # its last state for 24h, so a repo that was red when
+                        # it left stayed red long after the decision. Reporting
+                        # an explicit healthy state resolves the group on the
+                        # next evaluation, and the gauge shows the whole fleet
+                        # including the repos we chose not to gate.
+                        #
+                        # Both opt-outs count. `tpm_enabled=false` skips the
+                        # persona entirely; `force_disable_enforcement` stops
+                        # the self-healing loop re-creating a deleted ruleset
+                        # (CONTEXT.md). The second one used to keep polling and
+                        # emit `none` forever, so a repo using the documented
+                        # escape hatch pinned this monitor red permanently.
+                        if (
+                            cfg.get("tpm_enabled", True) is False
+                            or cfg.get("force_disable_enforcement", False)
+                        ):
+                            emit_enforcement_metric(full, "opted_out")
+                            n += 1
                             continue
                         state = detect_enforcement(
                             token, owner, name,
