@@ -472,6 +472,45 @@ def list_installation_repos(install_token: str) -> list[dict]:
     return out
 
 
+def _match_enforcing_ruleset(
+    install_token: str,
+    owner: str,
+    repo: str,
+    check_name: str,
+    stored_ruleset_id: int | None,
+) -> EnforcementDetection | None:
+    """Scan the repo's rulesets for one that enforces `check_name`.
+
+    Returns the classification plus the id of the ruleset that produced it,
+    or None when no ruleset enforces the check (the caller then falls back to
+    legacy branch protection). Extracted from `detect_enforcement` so that
+    function stays under the complexity cap once #686 made it track WHICH
+    ruleset matched, not just whether one did.
+    """
+    external_id: int | None = None
+    for rs in list_rulesets(install_token, owner, repo):
+        if rs.get("enforcement") != "active" or rs.get("target") != "branch":
+            continue
+        full = get_ruleset(install_token, owner, repo, rs["id"])
+        if not _check_name_in_ruleset(full, check_name):
+            continue
+        matched_stored = (
+            stored_ruleset_id is not None and rs.get("id") == stored_ruleset_id
+        )
+        named_grug = any(
+            rs.get("name", "").startswith(p) for p in GRUG_RULESET_PREFIXES
+        )
+        if matched_stored or named_grug:
+            # The id that ACTUALLY produced the classification, which is not
+            # necessarily `stored_ruleset_id` - see EnforcementDetection.
+            return EnforcementDetection("grug_managed", rs.get("id"))
+        if external_id is None:
+            external_id = rs.get("id")
+    if external_id is not None:
+        return EnforcementDetection("external", external_id)
+    return None
+
+
 def detect_enforcement(
     install_token: str,
     owner: str,
@@ -516,36 +555,11 @@ def detect_enforcement(
     most repos have 1-3 rulesets total. Short-circuits on the first
     grug_match, since that already wins the final classification below.
     """
-    rulesets = list_rulesets(install_token, owner, repo)
-
-    grug_match = False
-    external_match = False
-    # The id of the ruleset that actually produced the classification, which
-    # is NOT necessarily `stored_ruleset_id` - see EnforcementDetection.
-    matched_id: int | None = None
-    external_id: int | None = None
-    for rs in rulesets:
-        if rs.get("enforcement") != "active" or rs.get("target") != "branch":
-            continue
-        full = get_ruleset(install_token, owner, repo, rs["id"])
-        if not _check_name_in_ruleset(full, check_name):
-            continue
-        if stored_ruleset_id is not None and rs.get("id") == stored_ruleset_id:
-            grug_match = True
-            matched_id = rs.get("id")
-            break
-        if any(rs.get("name", "").startswith(p) for p in GRUG_RULESET_PREFIXES):
-            grug_match = True
-            matched_id = rs.get("id")
-            break
-        external_match = True
-        if external_id is None:
-            external_id = rs.get("id")
-
-    if grug_match:
-        return EnforcementDetection("grug_managed", matched_id)
-    if external_match:
-        return EnforcementDetection("external", external_id)
+    ruleset_hit = _match_enforcing_ruleset(
+        install_token, owner, repo, check_name, stored_ruleset_id,
+    )
+    if ruleset_hit is not None:
+        return ruleset_hit
 
     try:
         legacy_resp = _get_with_retry(
