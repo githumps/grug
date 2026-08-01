@@ -3045,13 +3045,19 @@ def _review_diff_dispatch(
     if not successes and first_parse_fail is None:
         if cancel_event is not None and cancel_event.is_set():
             # Superseded mid-flight (#635 follow-up): both Cave arms were
-            # deliberately aborted because a newer commit landed, not
+            # deliberately aborted because the review input moved, not
             # because the owned hardware is unavailable. Trying OpenRouter/
             # Poolside here would burn a real SaaS call chasing a snapshot
             # the pre-publish freshness check is about to discard anyway -
             # skip the overload fallback and fail fast instead.
+            #
+            # Says "review input" and not "a newer commit" (#773): the
+            # watcher also fires on a title/body edit, so the old wording
+            # sent an operator hunting for a push that never happened. The
+            # cancel is real; naming the wrong cause is what cost the time.
             return LlmReviewResponse(
-                kind="all_failed", error="cancelled: superseded by a newer commit",
+                kind="all_failed",
+                error="cancelled: review input changed while the review was running",
             )
         # Both Cave arms produced NO usable response at all (misconfigured,
         # transport error, or timeout) - the strongest signal the owned

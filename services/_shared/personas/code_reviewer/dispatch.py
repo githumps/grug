@@ -281,6 +281,37 @@ def _review_snapshot_freshness_failure(
         }
     if current_snapshot_id == expected_snapshot_id:
         return None
+    # #773: HEAD SHA DECIDES, not the freshness id. The freshness id also
+    # hashes title and body, so editing the PR body moved it while the code
+    # under review was byte-identical - and this guard then threw the finished
+    # review away.
+    #
+    # That discard is not a lone wasted pass. It re-enqueues against the SAME
+    # sha, `elder_in_progress_check_skipped: already_in_progress` declines to
+    # post the check-run because one is still open, and the check sits
+    # `pending` forever. Live on quadseven/infra#2133 (2026-08-01): Elder
+    # passed at 03:00:27, the author edited the body to satisfy Chief's own
+    # DoR gate at 03:08, and a docs-only PR went back to pending for 25
+    # minutes. Satisfying one grug check should not stall another.
+    #
+    # Publishing here is safe: `expected_head_sha == current_head_sha` means
+    # the diff is identical, so every finding still anchors to real lines in
+    # the current code. Only the intent blurb the model ALSO saw has changed.
+    # A rewritten intent can legitimately change findings, so the re-enqueued
+    # pass still runs - it just no longer has to destroy a good verdict to do
+    # it, and the check stays green in the meantime.
+    if expected_head_sha and expected_head_sha == current_head_sha:
+        log.info(
+            "code_review_intent_drift_publishing_anyway",
+            extra={
+                "installation_id": installation_id,
+                "pr": f"{owner}/{repo_name}#{pull_number}",
+                "head_sha": current_head_sha[:8],
+                "reviewed_snapshot_id": expected_snapshot_id[:11],
+                "current_snapshot_id": current_snapshot_id[:11],
+            },
+        )
+        return None
     log.info(
         "code_review_stale_before_publish",
         extra={

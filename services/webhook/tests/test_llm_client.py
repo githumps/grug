@@ -1170,7 +1170,9 @@ def test_review_diff_skips_saas_fallback_when_cancelled(monkeypatch) -> None:
 
     mock_post.assert_not_called()
     assert out.kind == "all_failed"
-    assert out.error == "cancelled: superseded by a newer commit"
+    # #773: the watcher also fires on a title/body edit, so the message must
+    # not name a commit that may never have happened.
+    assert out.error == "cancelled: review input changed while the review was running"
 
 
 def test_saas_overload_fallback_rescues_review_when_cave_fully_down(monkeypatch) -> None:

@@ -1116,11 +1116,24 @@ def test_fetch_pr_diff_falls_back_when_immutable_compare_is_unavailable(
     )
 
 
-def test_durable_dispatch_cancels_if_intent_moves_during_inference(monkeypatch):
+def test_durable_dispatch_publishes_when_only_intent_moved_during_inference(monkeypatch):
+    """#773: an intent edit mid-flight must not throw the review away.
+
+    This used to assert the opposite - same `head_sha`, body changed, verdict
+    discarded as `stale_snapshot`. That IS the bug: the discard re-enqueues
+    against the same sha, `already_in_progress` then declines to post a
+    check-run, and the check sits `pending` forever.
+
+    The findings were computed against a byte-identical diff, so they still
+    anchor to real lines. Publishing a review whose intent blurb is one edit
+    behind is bounded staleness; never publishing is unbounded - the same
+    trade-off `review_freshness_id` already makes explicitly for `base_sha`.
+    """
     payload = _payload(action="review")
     initial_id = cr_dispatch.review_freshness_id_from_pr(payload["pull_request"])
     changed_pr = {**payload["pull_request"], "body": "Changed intent"}
     changed_id = cr_dispatch.review_freshness_id_from_pr(changed_pr)
+    assert changed_id != initial_id, "fixture must actually move the freshness id"
     monkeypatch.setattr(
         cr_dispatch,
         "review_diff",
@@ -1130,6 +1143,7 @@ def test_durable_dispatch_cancels_if_intent_moves_during_inference(monkeypatch):
         cr_dispatch,
         "_fetch_current_review_snapshot",
         MagicMock(side_effect=[
+            # SAME head sha both times - only the body moved.
             (initial_id, "abcd1234efgh", "open", False),
             (changed_id, "abcd1234efgh", "open", False),
         ]),
@@ -1142,20 +1156,21 @@ def test_durable_dispatch_cancels_if_intent_moves_during_inference(monkeypatch):
     with patch("httpx.get", return_value=_diff_response()):
         out = cr_dispatch.dispatch_code_review(payload, blocking=False)
 
-    assert out == {
-        "persona": "code_reviewer",
-        "result": "skipped",
-        "degraded_reason": "stale_snapshot",
-    }
-    post_check.assert_not_called()
-    post_review.assert_not_called()
+    assert out["result"] != "skipped"
+    assert out.get("degraded_reason") != "stale_snapshot"
+    post_check.assert_called()
 
 
 def test_durable_dispatch_rejects_stale_input_before_inference(monkeypatch):
     # Was asserted against a base-sha-only change, which ENCODED the bug fixed
     # in the base-churn PR: an unrelated merge to the base branch cancelled a
-    # review of unchanged code. Staleness now means the author pushed new code
-    # or rewrote their intent, so this drives it with a real head change.
+    # review of unchanged code. Staleness now means the author pushed new code,
+    # so this drives it with a real head change.
+    #
+    # The fixture used to compute `current_id` from head `newhead0000` while
+    # returning `abcd1234efgh` as the CURRENT head - i.e. it asserted the #773
+    # bug (same sha, different id => discarded). Now internally consistent:
+    # a genuine push moves both.
     payload = _payload(action="review")
     current_pr = {
         **payload["pull_request"],
@@ -1165,7 +1180,7 @@ def test_durable_dispatch_rejects_stale_input_before_inference(monkeypatch):
     monkeypatch.setattr(
         cr_dispatch,
         "_fetch_current_review_snapshot",
-        lambda *a: (current_id, "abcd1234efgh", "open", False),
+        lambda *a: (current_id, "newhead0000", "open", False),
     )
     review = MagicMock()
     monkeypatch.setattr(cr_dispatch, "review_diff", review)
@@ -1180,6 +1195,47 @@ def test_durable_dispatch_rejects_stale_input_before_inference(monkeypatch):
     review.assert_not_called()
     post_check.assert_not_called()
     post_review.assert_not_called()
+
+
+def test_intent_only_edit_does_not_discard_a_review_of_the_same_commit(monkeypatch):
+    """#773: editing the PR body must not throw away a finished review.
+
+    The diff is what Elder reviews. When `head_sha` is unchanged the findings
+    were computed against byte-identical code, so discarding them is pure loss
+    - and the discard re-enqueues against the same sha, where
+    `already_in_progress` then declines to post a check-run, leaving the check
+    `pending` forever.
+
+    Live on quadseven/infra#2133 (2026-08-01): Elder passed at 03:00:27, the
+    author edited the body to satisfy Chief's DoR gate at 03:08, and the check
+    went back to pending for 25 minutes on a docs-only diff.
+    """
+    payload = _payload(action="review")
+    edited_pr = {**payload["pull_request"], "body": "Rewritten intent, same code."}
+    edited_id = cr_dispatch.review_freshness_id_from_pr(edited_pr)
+    assert edited_id != cr_dispatch.review_freshness_id_from_pr(
+        payload["pull_request"]
+    ), "fixture must actually change the freshness id"
+
+    monkeypatch.setattr(
+        cr_dispatch,
+        "_fetch_current_review_snapshot",
+        # SAME head sha as the payload - only the intent moved.
+        lambda *a: (edited_id, "abcd1234efgh", "open", False),
+    )
+
+    out = cr_dispatch._review_snapshot_freshness_failure(
+        installation_id=11,
+        owner="myorg",
+        repo_name="myrepo",
+        pull_number=7,
+        expected_snapshot_id=cr_dispatch.review_freshness_id_from_pr(
+            payload["pull_request"]
+        ),
+        expected_head_sha="abcd1234efgh",
+    )
+
+    assert out is None, "a review of the current commit must still publish"
 
 
 @pytest.mark.parametrize(
