@@ -156,6 +156,43 @@ def poller_cronjob_unhealthy_query() -> str:
     )
 
 
+def enforcement_gap_query(env: str) -> str:
+    """Any repo grug cannot prove is gated by the DoR check.
+
+    Thresholds on the VALUE, never on the `enforcement_type` tag. The value
+    already encodes the state (`emit_enforcement_metric`): grug_managed 1.0,
+    external 0.5, none 0.0, error -1.0. So `< 0.5` catches "no enforcement"
+    and "detection failed" while leaving the two healthy states alone.
+
+    Filtering by `enforcement_type:none` - which this query used to do -
+    latched the alert (#716). A repo that GAINED enforcement stopped matching
+    the tag, so instead of reporting a healthy value into its group, the group
+    went SILENT. Datadog keeps a silent metric group in its last state for 24h
+    by default, and `group_retention_duration` cannot shorten that for a
+    `metric alert` (it is APM/Audit/CI/Error-Tracking/Event/Logs/RUM only), so
+    the monitor stayed red long after the gap was gone. Measured live on
+    2026-08-01: yuzu-yard-sale emitted its last point at 04:00Z, and at 07:18Z
+    - past 3x the monitor's own `last_1h` window - it still read Alert with
+    ZERO repos in the gap.
+
+    Keeping every repo in scope also closes a blind spot that was arguably
+    worse than the latch: under the tag filter, an auth or rate-limit outage
+    emitted `enforcement_type:error` for every repo and `none` for none of
+    them, so the gap monitor went QUIET during exactly the incident that made
+    enforcement unknowable. `error` is -1.0, so it now trips the threshold.
+
+    Residual, and inherent to Datadog rather than to this query: a repo that
+    leaves the fleet entirely (opt-out via `tpm_enabled=false`, archive,
+    uninstall) stops emitting altogether, and its group still ages out on
+    Datadog's 24h default. That is the documented behaviour, not a bug we can
+    configure away here - see the monitor message.
+    """
+    return (
+        "min(last_1h):min:grug.enforcement.state"
+        "{env:" + env + "} by {repo} < 0.5"
+    )
+
+
 def all_ksm_monitor_queries() -> list[str]:
     """Every NEW k8s-runtime monitor query (all KSM-based). The
     lambda-retirement guard test iterates this set."""
@@ -737,23 +774,31 @@ def create_all(
     # on k8s. Pod-start latency is covered by the workload-not-ready /
     # CrashLoopBackOff monitors above; request latency by the /livez synthetic.)
 
-    # 5) Enforcement gap detector — any repo with enforcement_type:none
-    #    for >1h means a TPM-enabled repo has no merge gate. DogStatsD
-    #    metric emitted by enforcement.py on every state change.
+    # 5) Enforcement gap detector - any repo grug cannot PROVE is gated by
+    #    the DoR check, for >1h. DogStatsD metric emitted by enforcement.py.
+    #    Thresholds on the value, never on the enforcement_type tag: see
+    #    enforcement_gap_query for why the tag filter latched this (#716).
     enforcement_gap = datadog.Monitor(
         "grug-enforcement-gap",
         type="metric alert",
-        name="[grug] Enforcement gap — repo with enforcement_type:none > 1h",
+        name="[grug] Enforcement gap - repo not provably gated > 1h",
         message=(
             f"{_DIGEST}\n"
-            "A TPM-enabled repo has had no enforcement for >1 hour. "
+            "A TPM-enabled repo has had no provable enforcement for >1 hour. "
             "PRs can merge without passing the DoR check.\n"
+            "Value 0.0 = no enforcement found. Value -1.0 = detection FAILED "
+            "(auth/rate-limit), so enforcement is unknown, not absent.\n"
+            "If the repo should NOT be gated, set tpm_enabled=false on it "
+            "rather than adding a ruleset - the poller then skips it and it "
+            "leaves this denominator.\n"
+            "Note: a repo that leaves the fleet (opt-out, archive, uninstall) "
+            "stops emitting, and Datadog holds its group in the last state "
+            "for 24h. A red group with no matching series is that retention "
+            "window, not a live gap - confirm against the metric before "
+            "chasing it (#716).\n"
             "Runbook: docs/RUNBOOK.md#enforcement-gap"
         ),
-        query=(
-            "min(last_1h):min:grug.enforcement.state"
-            "{enforcement_type:none,env:" + env + "} by {repo} < 0.5"
-        ),
+        query=enforcement_gap_query(env),
         tags=_common_tags(env, "grug-webhook") + ["enforcement:gap"],
         notify_no_data=False,
         priority=2,

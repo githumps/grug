@@ -148,7 +148,7 @@ grug's backfill for a dropped/`errored` review (the 2026-06 Elder outage left re
 | **Self-healing** | Reconciliation loop: when a Grug-managed ruleset is externally deleted, the webhook re-creates it if the repo still wants enforcement. Triggered by `repository_ruleset` webhook event with `action=deleted`. The `force_disable_enforcement` flag on `RepoConfig` is the opt-out. |
 | **`migrate_check_context()`** | Function in `enforcement.py`. Heals a Grug-managed ruleset whose required-check context is a stale legacy alias (e.g. a pre-rename title) instead of the current canonical name. Called from `ensure_enforcement()`'s already-`grug_managed` branch when a stored ruleset ID is available, allowing touched repos to self-heal their context over time (grug#685). |
 | **`grug.enforcement.state`** | DogStatsD gauge metric emitted by `emit_enforcement_metric()` in `observability.py` on every enforcement state change. Value: 1.0 (grug_managed), 0.5 (external), 0.0 (none). Tags: `repo`, `persona`, `enforcement_type`. Used by the enforcement gap monitor. |
-| **Enforcement gap monitor** | DD monitor `grug-enforcement-gap` that alerts when any repo has `enforcement_type:none` for >1 hour. Routes to the DD monitoring Discord webhook. |
+| **Enforcement gap monitor** | DD monitor `grug-enforcement-gap` that alerts when any repo is not provably gated for >1 hour, i.e. `grug.enforcement.state < 0.5` (0.0 = no enforcement, -1.0 = detection failed). Thresholds on the VALUE, never on the `enforcement_type` tag - filtering by tag made a repo that gained enforcement go silent instead of reporting healthy, latching the alert for Datadog's 24h group retention (#716). Routes to the DD monitoring Discord webhook. |
 
 ## Identity & authorization concepts
 

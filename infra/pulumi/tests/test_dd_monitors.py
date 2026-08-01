@@ -21,6 +21,7 @@ from components.dd_monitors import (
     credential_acquisition_failure_query,
     all_ksm_monitor_queries,
     crashloop_query,
+    enforcement_gap_query,
     poller_cronjob_unhealthy_query,
     restart_spike_query,
     workload_not_ready_query,
@@ -476,3 +477,55 @@ def test_composition_root_cannot_smuggle_an_ungated_recipient() -> None:
     )
     assert uses[0].startswith("_dd_notify ="), uses[0]
     assert uses[1] == "notify_handle=_dd_notify,", uses[1]
+
+
+# --- #716: the enforcement-gap monitor must not latch -----------------------
+
+
+def test_enforcement_gap_query_does_not_filter_on_the_state_tag() -> None:
+    """#716: filtering on `enforcement_type:none` is what latches the alert.
+
+    A repo that GAINS enforcement stops matching that tag, so its multi-alert
+    group goes silent rather than reporting a healthy value. Datadog keeps a
+    silent metric group for 24h by default, so the monitor stays red long
+    after the gap it named is gone. Measured live 2026-08-01: yuzu-yard-sale
+    emitted its last point at 04:00Z and the monitor still read Alert at
+    07:18Z with ZERO repos in the gap.
+
+    The value already encodes the state (grug_managed 1.0, external 0.5,
+    none 0.0, error -1.0), so the threshold alone is sufficient and every
+    repo keeps reporting into its own group.
+    """
+    q = enforcement_gap_query("prod")
+    assert "enforcement_type:none" not in q, (
+        "filtering on the state tag is the latch: a repo leaving `none` "
+        "goes silent instead of reporting healthy. Threshold on the VALUE."
+    )
+    assert "grug.enforcement.state" in q
+    assert "by {repo}" in q
+    assert "< 0.5" in q
+    assert "env:prod" in q
+
+
+def test_enforcement_gap_query_still_catches_a_detection_failure() -> None:
+    """A detection error emits -1.0 (#518), which must stay inside the alert
+    threshold.
+
+    Under the old tag-filtered query an auth or rate-limit outage emitted
+    `enforcement_type:error` for every repo and NOTHING emitted
+    `enforcement_type:none` - so the gap monitor went quiet during exactly
+    the outage that made enforcement unknowable. Thresholding on the value
+    closes that blind spot: -1.0 < 0.5.
+    """
+    q = enforcement_gap_query("prod")
+    assert "enforcement_type" not in q, (
+        "no state-tag filter at all, so `error` series stay in scope"
+    )
+    # -1.0 (error) and 0.0 (none) both trip; 0.5 (external) and 1.0
+    # (grug_managed) do not.
+    assert "< 0.5" in q
+
+
+def test_enforcement_gap_query_is_env_scoped() -> None:
+    assert "env:dev" in enforcement_gap_query("dev")
+    assert "env:prod" not in enforcement_gap_query("dev")
