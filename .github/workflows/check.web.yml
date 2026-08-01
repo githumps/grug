@@ -1,0 +1,68 @@
+# Web build gate (#777). `web.deploy.yml` triggers only on push to main /
+# feat/27-* / v* tags, so NOTHING compiled the bundle before merge: PR #754
+# (a Dependabot postcss bump) showed nine green checks and not one of them
+# ran `tsc -b && vite build`. The first exercise of a bad web/** change was
+# the post-merge Cloudflare Pages PRODUCTION deploy.
+#
+# Why a separate file rather than a `pull_request` trigger on web.deploy.yml:
+# that workflow deliberately carries NO `paths` filter, because `paths` under
+# `push` also applies to TAGS and would silently suppress a `v*` tag deploy
+# whose commit does not touch web/** (Greptile P2 on PR #42). Keeping the
+# filter here - on a workflow with no tag trigger at all - gets the scoping
+# without going anywhere near that hazard. Deploy behaviour is untouched.
+name: check.web
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/check.web.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/check.web.yml'
+
+permissions:
+  contents: read
+
+# Force JS actions to Node 24, matching every other workflow here.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: check-web-${{ github.ref }}
+  # Safe to cancel: this only compiles, it publishes nothing.
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Public repo -> GitHub-hosted is free + unmetered, same call
+    # web.deploy.yml documents for its own build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 01. Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Node 20 and `npm ci` mirror web.deploy.yml exactly. A gate that
+      # builds under a different toolchain than the deploy can go green on
+      # something the deploy then fails on, which is worse than no gate.
+      - name: 02. Setup Node 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 03. Install (npm ci)
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: 04. Build (tsc -b && vite build)
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm run build
