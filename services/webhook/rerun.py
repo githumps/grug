@@ -37,7 +37,10 @@ import httpx
 from adapters.install_store import get_repo_config  # type: ignore
 from github_app_auth import with_install_token_retry
 from github_checks_client import CheckRunResult, post_check_run
-from personas.code_reviewer.dispatch import dispatch_code_review
+from personas.code_reviewer.dispatch import (
+    RETRIED_DEGRADATIONS,
+    dispatch_code_review,
+)
 from personas.code_reviewer.snapshot import (
     review_freshness_id_from_pr,
     review_snapshot_id,
@@ -95,11 +98,11 @@ _ELDER_CHECK_NAMES = frozenset(acceptable_check_names(CHECK_ELDER))
 # freshness brownouts, and unknown skips complete neutral; same-head
 # staleness and ineligible (draft/closed) exits intentionally stay
 # non-terminal - the requeued/reopen review completes the pending check.
-_RETRYABLE_SKIP_REASONS = frozenset({
-    "all_failed",
-    "parse_failed",
-    "fetch_or_parse_failed",
-})
+# Sourced from the persona rather than restated, so the retry lane and the
+# board/email gate cannot drift apart. `worth_an_email` suppresses the board
+# for exactly these reasons on the grounds that a retry is coming; if this set
+# grew a member here only, that promise would silently become a lie.
+_RETRYABLE_SKIP_REASONS = RETRIED_DEGRADATIONS
 
 # Skips that ALREADY published their own terminal check, so the fail-open net
 # must leave them alone. Re-posting a generic "Elder skipped - <reason>" over
@@ -1022,6 +1025,7 @@ def _review_claim_heartbeat_loop(
 def _review_staleness_watch_loop(
     install_id: int, owner: str, repo_name: str, pr_number: int,
     expected_freshness_id: str,
+    expected_head_sha: str,
     stop: threading.Event,
     cancel: threading.Event,
 ) -> None:
@@ -1050,16 +1054,59 @@ def _review_staleness_watch_loop(
                 },
             )
             continue
-        # Base-insensitive comparison: `review_snapshot_id_from_pr` hashes
-        # base_sha, so ANY unrelated merge to the base branch changed it and
-        # cancelled this in-flight review. Measured on quadseven/infra
-        # 2026-07-25: eight merges in one session left Elder unable to
-        # publish, cancelling and re-enqueuing against an identical head.
-        if review_freshness_id_from_pr(latest) != expected_freshness_id:
+        # HEAD SHA DECIDES. Killing a running review is only justified when
+        # the DIFF changed, because that is the only case where the answer
+        # being generated is worthless.
+        #
+        # This used to compare `review_freshness_id`, which also hashes title
+        # and body - so editing the PR body aborted both Cave arms mid-
+        # generation and threw the whole review away. Live on
+        # quadseven/infra#2157 (2026-08-02), a PR breaking a packet-mode
+        # bootstrap deadlock: the review started at 13:51:12 over 2 cohorts,
+        # the author edited the body at ~13:52:43, and at 13:52:51 it landed
+        # as `all_failed` ("cancelled: review input changed while the review
+        # was running"). The human got mailed "eyes cloudy - read for self"
+        # carrying one cyclomatic-complexity nitpick, on a concurrency fix.
+        #
+        # An intent edit is exactly the case where the work is still good: the
+        # diff is byte-identical, so every finding still anchors to real lines.
+        # The pre-publish guard already knows this and publishes such a review
+        # (`code_review_intent_drift_publishing_anyway`) - but it had nothing
+        # left to publish, because this loop had already killed the generation
+        # that would have produced it. Same rule, both halves.
+        #
+        # Base-insensitive too: `review_snapshot_id_from_pr` hashes base_sha,
+        # so ANY unrelated merge to the base branch used to cancel this review.
+        # Measured on quadseven/infra 2026-07-25: eight merges in one session
+        # left Elder unable to publish, cancelling and re-enqueuing against an
+        # identical head. Comparing head sha covers that case as well.
+        latest_head = str((latest.get("head") or {}).get("sha") or "")
+        if not latest_head:
+            # A malformed payload is not evidence of a new commit. Treat it
+            # like a fetch failure and keep watching rather than killing a
+            # review that is probably fine.
+            log.warning(
+                "elder_review_staleness_watch_no_head_sha",
+                extra={"repo": f"{owner}/{repo_name}", "pr": pr_number},
+            )
+            continue
+        if latest_head != expected_head_sha:
             cancel.set()
             log.info(
                 "elder_review_cancelled_mid_flight",
-                extra={"repo": f"{owner}/{repo_name}", "pr": pr_number},
+                extra={
+                    "repo": f"{owner}/{repo_name}", "pr": pr_number,
+                    "reviewed_head_sha": expected_head_sha[:8],
+                    "current_head_sha": latest_head[:8],
+                    # Carried for diagnosis only. If this DIFFERS while the
+                    # shas match, an intent edit happened and was correctly
+                    # ignored - that pairing is the signature of the
+                    # infra#2157 class, and it should never cancel again.
+                    "reviewed_freshness_id": expected_freshness_id[:11],
+                    "current_freshness_id": review_freshness_id_from_pr(
+                        latest,
+                    )[:11],
+                },
             )
             return
 
@@ -1167,12 +1214,16 @@ def _stop_review_claim_heartbeat(
 def _start_staleness_watch(
     install_id: int, owner: str, repo_name: str, pr_number: int,
     expected_freshness_id: str,
+    expected_head_sha: str,
 ) -> _StalenessWatch:
     stop = threading.Event()
     cancel = threading.Event()
     thread = threading.Thread(
         target=_review_staleness_watch_loop,
-        args=(install_id, owner, repo_name, pr_number, expected_freshness_id, stop, cancel),
+        args=(
+            install_id, owner, repo_name, pr_number,
+            expected_freshness_id, expected_head_sha, stop, cancel,
+        ),
         name="review-staleness-watch",
         daemon=True,
     )
@@ -1359,12 +1410,15 @@ def _run_hot_review(
         # results discarded (see _call_backend's docstring for why this is
         # "stop waiting on it", not "truly kill it"), but THIS job no
         # longer holds its queue slot / SQS message hostage to them.
-        # Watch on the BASE-INSENSITIVE identity. Passing current_snapshot_id
-        # here meant any unrelated merge to the base branch cancelled this
-        # review mid-generation, then re-enqueued it against an identical head.
+        # The watch cancels on HEAD SHA only - the diff is the only input
+        # whose change makes the in-flight answer worthless. The freshness id
+        # rides along for logging/diagnosis, not as the cancel trigger; it
+        # hashes title and body, so using it aborted a running review whenever
+        # the author edited their own PR description (infra#2157).
         watch = _start_staleness_watch(
             install_id, owner, repo_name, pr_number,
             review_freshness_id_from_pr(after),
+            str((after.get("head") or {}).get("sha") or ""),
         )
         try:
             result = dispatch_code_review(

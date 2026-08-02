@@ -2556,7 +2556,14 @@ def test_worth_an_email_is_findings_or_degraded_only():
     """The gate on whether grug may CREATE a comment - i.e. whether it may
     mail the author. A clean review is not news; the green check-run already
     says so. A degraded review IS news in the other direction, because silence
-    there would be misread as approval."""
+    there would be misread as approval.
+
+    The degraded exemplar is a TERMINAL one. It used to be `all_failed`, which
+    the durable lane retries - so that assertion was pinning the behaviour
+    that mailed a doomed verdict six minutes before the retry produced the
+    real one (infra#2157). The guarantee this test exists for is unchanged:
+    a last-word failure still mails.
+    """
     from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
     f = Finding(file="a.py", line=1, severity="low", rule_name="r",
                 message="m", suggestion=None)
@@ -2565,7 +2572,8 @@ def test_worth_an_email_is_findings_or_degraded_only():
     assert cr_dispatch.worth_an_email(
         CodeReviewEvaluation(findings=(f,), conclusion="failure"))
     assert cr_dispatch.worth_an_email(CodeReviewEvaluation(
-        findings=(), conclusion="neutral", degraded_reason="all_failed"))
+        findings=(), conclusion="neutral",
+        degraded_reason="degraded_no_backend"))
 
 
 def test_no_diff_is_not_an_alarm():
@@ -2586,12 +2594,21 @@ def test_no_diff_is_not_an_alarm():
     assert "Review degraded" not in body
 
     # A REAL degradation must still alarm and still mail - the fix must not
-    # silence the case where silence gets read as approval.
+    # silence the case where silence gets read as approval. Uses a TERMINAL
+    # reason: a retried one is not the last word, so it no longer mails
+    # (see worth_an_email / infra#2157). The BODY still says "cloudy" for any
+    # blackout, retried or not - that surface is an edit, not an email.
     bad = CodeReviewEvaluation(findings=(), conclusion="neutral",
-                               degraded_reason="all_failed")
+                               degraded_reason="degraded_no_backend")
     assert cr_dispatch.worth_an_email(bad)
     body = cr_dispatch._review_stack_body(bad, conclusion="neutral", pr_title="t")
     assert "cloudy" in body and "Review degraded" in body
+
+    retried = CodeReviewEvaluation(findings=(), conclusion="neutral",
+                                   degraded_reason="all_failed")
+    assert not cr_dispatch.worth_an_email(retried), (
+        "a retry is queued; let it speak instead of mailing a doomed verdict"
+    )
 
 
 def test_clean_review_posts_nothing_when_no_board_exists(monkeypatch):
@@ -2753,3 +2770,58 @@ def test_degraded_review_does_not_claim_clear():
                               degraded_reason="all_failed")
     body = cr_dispatch._review_stack_body(ev, conclusion="neutral")
     assert "Trail clear" not in body and "cloudy" in body
+
+
+# --- infra#2157: do not mail a verdict a retry is about to overwrite --------
+
+
+def test_no_board_for_a_degradation_that_will_be_retried():
+    """A retried degradation is not news YET.
+
+    On quadseven/infra#2157 the LLM half was cancelled mid-flight
+    (`all_failed`), the deterministic complexity scanner still produced one
+    finding, and Elder created the board on the strength of it - mailing
+    "Grug eyes cloudy this pass - read for self" plus a cyclomatic nitpick on
+    a PR that fixes a packet-mode bootstrap deadlock. The retry six minutes
+    later came back "no bad omens from the Cave", but GitHub does not mail an
+    EDIT, so that inbox keeps the degraded verdict forever.
+
+    `all_failed` is in the durable lane's retry set, so a better answer is
+    always coming. Wait for it.
+    """
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+
+    complexity_only = CodeReviewEvaluation(
+        findings=(Finding(file="a.py", line=677, severity="medium",
+                          rule_name="high-complexity", message="tangled",
+                          suggestion=None),),
+        conclusion="neutral",
+        degraded_reason="all_failed",
+    )
+    assert cr_dispatch.worth_an_email(complexity_only) is False, (
+        "deterministic findings must not carry a board when the LLM half "
+        "failed and a retry is queued - the retry republishes them anyway"
+    )
+
+
+def test_terminal_blackout_still_earns_a_board():
+    """A degradation NOT in the retry set is the last word, so silence would
+    be misread as approval."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+
+    terminal = CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="degraded_no_backend",
+    )
+    assert cr_dispatch.worth_an_email(terminal) is True
+
+
+def test_real_findings_on_a_healthy_pass_still_earn_a_board():
+    from personas.code_reviewer.persona import CodeReviewEvaluation, Finding
+
+    ev = CodeReviewEvaluation(
+        findings=(Finding(file="a.py", line=1, severity="high",
+                          rule_name="sync-io-in-async", message="m",
+                          suggestion=None),),
+        conclusion="failure",
+    )
+    assert cr_dispatch.worth_an_email(ev) is True
