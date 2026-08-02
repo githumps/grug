@@ -353,9 +353,20 @@ def test_enforcement_pass_threads_stored_ruleset_id_per_repo(monkeypatch):
     assert detected_ids == [("a", 555), ("b", None)]
 
 
-def test_enforcement_pass_honors_store_opt_out(monkeypatch):
-    """A stored tpm_enabled=false is the per-repo opt-OUT overlay: the repo
-    is skipped (not emitted, not detected); missing rows default enabled."""
+def test_enforcement_pass_emits_opted_out_instead_of_dropping_the_repo(monkeypatch):
+    """#716 / ADR-0022: an opted-out repo REPORTS `opted_out`, it does not
+    vanish from the gauge.
+
+    This used to assert the repo was "skipped (not emitted, not detected)".
+    Not emitting is precisely what latched the enforcement-gap monitor:
+    Datadog holds a silent multi-alert group in its last state for 24h, so a
+    repo that was red when it opted out stayed red long after the decision.
+    Live on 2026-08-01, yuzu-yard-sale sat red for 3h18m with zero repos
+    actually in the gap.
+
+    Still not DETECTED - opting out should not spend a GitHub API call. Only
+    the emit is restored, with a value (1.0) that resolves the group.
+    """
     emitted = []
     detected = []
 
@@ -378,8 +389,40 @@ def test_enforcement_pass_honors_store_opt_out(monkeypatch):
         lambda full, state, **kw: emitted.append((full, state)),
     )
     out = poller_handler.handler({}, None)
-    assert emitted == [("o/on", "grug_managed")]
-    assert detected == ["on"]
+    assert emitted == [("o/on", "grug_managed"), ("o/off", "opted_out")]
+    assert detected == ["on"], "an opted-out repo must not cost an API call"
+    assert out["enforcement_emitted"] == 2
+
+
+def test_enforcement_pass_treats_force_disable_as_an_opt_out(monkeypatch):
+    """`force_disable_enforcement` is documented in CONTEXT.md as an
+    enforcement opt-out, but the poller only ever checked `tpm_enabled`.
+
+    A repo using the documented escape hatch therefore kept being polled, kept
+    detecting `none`, and pinned the gap monitor red permanently - the same
+    latch class, reached from the other direction.
+    """
+    emitted = []
+    detected = []
+
+    def _detect(token, owner, repo, branch, check_name, stored_ruleset_id=None):
+        detected.append(repo)
+        return EnforcementDetection("none", None)
+
+    _wire_enforcement(
+        monkeypatch,
+        installs=[1],
+        gh_repos=[{"id": 12, "full_name": "o/forced", "default_branch": "main"}],
+        detect=_detect,
+        config={(1, 12): {"force_disable_enforcement": True}},
+    )
+    monkeypatch.setattr(
+        "observability.emit_enforcement_metric",
+        lambda full, state, **kw: emitted.append((full, state)),
+    )
+    out = poller_handler.handler({}, None)
+    assert emitted == [("o/forced", "opted_out")]
+    assert detected == [], "force-disabled repo must not be detected either"
     assert out["enforcement_emitted"] == 1
 
 

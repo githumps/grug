@@ -156,6 +156,24 @@ def poller_cronjob_unhealthy_query() -> str:
     )
 
 
+def enforcement_gap_query(env: str) -> str:
+    """Any repo grug cannot prove is gated by the DoR check.
+
+    Thresholds on the VALUE, never on the `enforcement_type` tag, so a repo
+    reporting ANY state keeps its multi-alert group alive. See ADR-0022 for
+    the latch this avoids and the evidence behind it.
+
+    `< 0.5` is the whole contract: it catches `none` and `error` and leaves
+    `grug_managed`, `opted_out` and `external` alone. The authoritative value
+    map is `emit_enforcement_metric` in `observability.py` - do not restate it
+    here, it will rot.
+    """
+    return (
+        "min(last_1h):min:grug.enforcement.state"
+        "{env:" + env + "} by {repo} < 0.5"
+    )
+
+
 def all_ksm_monitor_queries() -> list[str]:
     """Every NEW k8s-runtime monitor query (all KSM-based). The
     lambda-retirement guard test iterates this set."""
@@ -737,23 +755,23 @@ def create_all(
     # on k8s. Pod-start latency is covered by the workload-not-ready /
     # CrashLoopBackOff monitors above; request latency by the /livez synthetic.)
 
-    # 5) Enforcement gap detector — any repo with enforcement_type:none
-    #    for >1h means a TPM-enabled repo has no merge gate. DogStatsD
-    #    metric emitted by enforcement.py on every state change.
+    # 5) Enforcement gap detector - any repo grug cannot PROVE is gated by
+    #    the DoR check, for >1h. DogStatsD metric emitted by enforcement.py.
+    #    Thresholds on the value, never on the enforcement_type tag: see
+    #    enforcement_gap_query for why the tag filter latched this (#716).
     enforcement_gap = datadog.Monitor(
         "grug-enforcement-gap",
         type="metric alert",
-        name="[grug] Enforcement gap — repo with enforcement_type:none > 1h",
+        name="[grug] Enforcement gap - repo not provably gated > 1h",
         message=(
             f"{_DIGEST}\n"
-            "A TPM-enabled repo has had no enforcement for >1 hour. "
-            "PRs can merge without passing the DoR check.\n"
+            "A repo has had no provable enforcement for >1 hour. PRs can "
+            "merge without passing the DoR check.\n"
+            "0.0 = no enforcement found. -1.0 = detection FAILED "
+            "(auth/rate-limit), so enforcement is unknown, not absent.\n"
             "Runbook: docs/RUNBOOK.md#enforcement-gap"
         ),
-        query=(
-            "min(last_1h):min:grug.enforcement.state"
-            "{enforcement_type:none,env:" + env + "} by {repo} < 0.5"
-        ),
+        query=enforcement_gap_query(env),
         tags=_common_tags(env, "grug-webhook") + ["enforcement:gap"],
         notify_no_data=False,
         priority=2,

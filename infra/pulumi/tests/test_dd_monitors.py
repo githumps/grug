@@ -21,6 +21,7 @@ from components.dd_monitors import (
     credential_acquisition_failure_query,
     all_ksm_monitor_queries,
     crashloop_query,
+    enforcement_gap_query,
     poller_cronjob_unhealthy_query,
     restart_spike_query,
     workload_not_ready_query,
@@ -476,3 +477,32 @@ def test_composition_root_cannot_smuggle_an_ungated_recipient() -> None:
     )
     assert uses[0].startswith("_dd_notify ="), uses[0]
     assert uses[1] == "notify_handle=_dd_notify,", uses[1]
+
+
+# --- #716: the enforcement-gap monitor must not latch -----------------------
+
+
+def test_enforcement_gap_query_thresholds_on_value_not_the_state_tag() -> None:
+    """#716 / ADR-0022: filtering on `enforcement_type` is what lets a series
+    vanish. A repo whose state CHANGES must report a healthy value into its
+    existing group, not drop out of the query - Datadog holds a silent
+    multi-alert group in its last state for 24h.
+
+    `< 0.5` catches `none` (0.0) and `error` (-1.0); `grug_managed` and
+    `opted_out` (1.0) and `external` (0.5) stay quiet. The authoritative value
+    map lives in `observability.emit_enforcement_metric`.
+    """
+    q = enforcement_gap_query("prod")
+    assert "enforcement_type" not in q, (
+        "no state-tag filter at all: filtering by state is what makes a "
+        "series vanish when the state changes, which latches the alert"
+    )
+    assert "grug.enforcement.state" in q
+    assert "by {repo}" in q
+    assert "< 0.5" in q
+
+
+def test_enforcement_gap_query_is_env_scoped() -> None:
+    """Each stack alerts only on its own repos."""
+    assert "env:dev" in enforcement_gap_query("dev")
+    assert "env:prod" not in enforcement_gap_query("dev")
