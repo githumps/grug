@@ -599,3 +599,74 @@ Observed 2026-07-18 (the numbers to beat next time):
   real stall signals are the drain exceeding its --timeout, or an
   eviction blocked >5 min on a PDB (`kubectl get pdb -A` shows 0 allowed
   disruptions that never recover), per the #702 abort criteria.
+
+## Enforcement gap
+
+The `[grug] Enforcement gap` monitor fires when a repo has not been provably
+gated by the DoR check for over an hour. Its message links here; the section
+did not exist until #716, so the anchor was dangling.
+
+### What the alert means
+
+`grug.enforcement.state < 0.5`. The value encodes the state
+(`observability.emit_enforcement_metric`):
+
+| Value | `enforcement_type` | Meaning |
+|---|---|---|
+| 1.0 | `grug_managed` | A Grug-created ruleset requires the check |
+| 1.0 | `opted_out` | Deliberately not gated. Healthy, decided |
+| 0.5 | `external` | A non-Grug ruleset or legacy branch protection requires it |
+| 0.0 | `none` | **Nothing requires the check. PRs can merge ungated** |
+| -1.0 | `error` | Detection FAILED. Enforcement is UNKNOWN, not absent |
+
+So the alert covers two different situations, and they need different
+responses.
+
+### Triage
+
+**1. Find which repo, and which of the two cases it is.**
+
+```bash
+pup metrics query \
+  --query "min:grug.enforcement.state{env:prod} by {repo,enforcement_type}" \
+  --from "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" --to "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+**2a. If `none` (0.0)** - the repo really is ungated. Decide which it should be:
+
+- **Should be gated:** add it to `infrastructure/pulumi/github/repos.py` and
+  `pulumi up`. Repo config is Pulumi-owned; do NOT use the dashboard Fix
+  button or the `ensure_enforcement` API on a Pulumi-managed repo, because a
+  Grug-created ruleset then lives outside Pulumi and drifts.
+- **Should NOT be gated:** set an opt-out on the repo config -
+  `tpm_enabled=false` (skips the persona entirely) or
+  `force_disable_enforcement` (stops self-healing re-creating a deleted
+  ruleset). Either makes it report `opted_out` (1.0) on the next poll cycle.
+
+**2b. If `error` (-1.0)** - detection itself is broken, usually auth or a
+GitHub rate limit. Check `enforcement_emit_repo_failed` in the poller logs.
+This is not an enforcement gap; it means you cannot currently tell.
+
+### Reading the monitor state
+
+**`pup monitors get <id>` does NOT return live state for this monitor.** It
+reports `state: null` and an `overall_state_modified` frozen at the monitor's
+creation timestamp. Use the search endpoint:
+
+```bash
+pup monitors search --query "tag:enforcement:gap" --output json
+# -> .data.monitors[].status  and .last_triggered_ts
+```
+
+### If the monitor is red but no repo is breaching
+
+Confirm against the metric first - the query above is the authority, not the
+monitor's rolled-up state.
+
+Datadog holds a silent multi-alert group in its last state for **24 hours**,
+and `group_retention_duration` cannot shorten it for a `metric alert` (that
+option is APM/Audit/CI/Error-Tracking/Event/Logs/RUM only). ADR-0022 removed
+the two ways a reporting repo could go silent, so this should now only happen
+when a repo leaves the estate entirely - deleted, or its installation removed.
+That case is inherent and bounded: it needs a repo to disappear while red, and
+it clears itself within 24h.
