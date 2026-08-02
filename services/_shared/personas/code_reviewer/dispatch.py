@@ -1175,6 +1175,14 @@ def is_blackout(reason: str | None) -> bool:
     return is_real_degradation(reason) and not is_partial_coverage(reason)
 
 
+# Degradations the durable lane re-drives (rerun's `_RETRYABLE_SKIP_REASONS`
+# imports this). Defined HERE because the email decision needs it and
+# `_shared` is the lower layer - rerun already imports from this module.
+RETRIED_DEGRADATIONS = frozenset({
+    "all_failed", "parse_failed", "fetch_or_parse_failed",
+})
+
+
 def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
     """Should a review that found THIS be allowed to create the board?
 
@@ -1185,7 +1193,28 @@ def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
     A REAL degradation is news in the other direction: "Grug could not review
     this" is precisely the case where silence would be misread as approval.
     `no_diff` is not that - nothing to review is not a failure to review.
+
+    But a degradation the durable lane will RETRY is not news yet, whatever
+    else this pass happened to collect. Measured on quadseven/infra#2157: the
+    LLM half was cancelled mid-flight (`all_failed`), the deterministic
+    complexity scanner still produced one finding, and that finding was enough
+    to create the board - mailing "Grug eyes cloudy this pass - read for self"
+    plus a cyclomatic nitpick on a PR fixing a packet-mode bootstrap deadlock.
+    The retry six minutes later came back clean from the Cave, but GitHub does
+    not mail an EDIT, so that inbox keeps the degraded verdict permanently.
+
+    Deterministic findings are not lost by waiting: the retry re-runs the same
+    scanners and republishes them alongside whatever the LLM finds.
+
+    The trade is explicit. If every retry also fails, the author gets no board
+    at all - but the check-run still carries the degraded verdict (rerun
+    fail-opens it to neutral rather than leaving it in_progress), so the
+    signal survives in the place a required check is read. A false "Grug could
+    not see" is worse than a quiet one, because it trains the author to
+    discount the surface entirely.
     """
+    if evaluation.degraded_reason in RETRIED_DEGRADATIONS:
+        return False
     return bool(evaluation.findings) or is_real_degradation(
         evaluation.degraded_reason,
     )

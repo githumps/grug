@@ -1632,3 +1632,91 @@ def test_run_ask_no_answer_falls_back_without_crashing_on_none(monkeypatch):
 
     assert result == "ask_no_answer"
     assert "thinking-rock is tired" in posted[0]["body"]
+
+
+# --- #716 follow-up: the staleness watch must not kill live work ------------
+#
+# Live on quadseven/infra#2157 (2026-08-02), a PR titled "break the packet-mode
+# bootstrap deadlock with per-leg keepalives":
+#
+#   13:51:12  llm_staged_review_planned      cohort_count=2, 43111 chars
+#   13:52:43  (PR body edited)
+#   13:52:51  code_review_llm_degraded       kind=all_failed
+#             error="cancelled: review input changed while the review was
+#                    running; cohort skipped: review cancelled"
+#   13:52:53  elder_review_stack_upserted    -> board CREATED -> email
+#
+# Elder threw away a running review of a hard concurrency change because the
+# author edited the body, then emailed the human "eyes cloudy - read for self"
+# carrying a single cyclomatic-complexity nitpick. A retry at 13:56:51
+# succeeded ("no bad omens from the Cave"), but GitHub does not mail an EDIT,
+# so the inbox keeps the degraded verdict forever.
+
+
+def _pr(head_sha: str, body: str = "why", title: str = "t") -> dict:
+    return {"head": {"sha": head_sha}, "base": {"sha": "base"},
+            "title": title, "body": body}
+
+
+def _run_watch_once(monkeypatch, current_pr, expected_pr):
+    """Drive exactly one poll of the staleness loop and report cancellation."""
+    import threading
+
+    monkeypatch.setattr(rerun, "_STALENESS_WATCH_INTERVAL_S", 0.001)
+    stop, cancel = threading.Event(), threading.Event()
+
+    def _fetch(*_a, **_kw):
+        stop.set()  # one iteration only
+        return current_pr
+
+    monkeypatch.setattr(rerun, "_fetch_current_pr", _fetch)
+    rerun._review_staleness_watch_loop(
+        1, "o", "r", 7,
+        rerun.review_freshness_id_from_pr(expected_pr),
+        str((expected_pr.get("head") or {}).get("sha") or ""),
+        stop, cancel,
+    )
+    return cancel.is_set()
+
+
+def test_staleness_watch_does_not_cancel_on_an_intent_only_edit(monkeypatch):
+    """The diff is what Elder reviews. Editing the body does not change one
+    byte of it, so a running review is still producing a valid answer."""
+    before = _pr("aaaa1111", body="original why")
+    after = _pr("aaaa1111", body="rewritten why, same code")
+    assert rerun.review_freshness_id_from_pr(after) != \
+        rerun.review_freshness_id_from_pr(before), "fixture must move the id"
+
+    assert _run_watch_once(monkeypatch, after, before) is False, (
+        "an intent-only edit must not cancel a running review - that is what "
+        "turned infra#2157 into all_failed"
+    )
+
+
+def test_staleness_watch_still_cancels_on_a_new_commit(monkeypatch):
+    """A real push changes the diff, so the in-flight answer IS worthless and
+    should die rather than burn its full budget."""
+    before = _pr("aaaa1111")
+    after = _pr("bbbb2222")
+
+    assert _run_watch_once(monkeypatch, after, before) is True
+
+
+def test_staleness_watch_ignores_a_transient_fetch_failure(monkeypatch):
+    """A GitHub hiccup must never cancel a genuinely current review."""
+    import threading
+
+    monkeypatch.setattr(rerun, "_STALENESS_WATCH_INTERVAL_S", 0.001)
+    stop, cancel = threading.Event(), threading.Event()
+
+    def _boom(*_a, **_kw):
+        stop.set()
+        raise RuntimeError("GitHub 502")
+
+    monkeypatch.setattr(rerun, "_fetch_current_pr", _boom)
+    rerun._review_staleness_watch_loop(
+        1, "o", "r", 7,
+        rerun.review_freshness_id_from_pr(_pr("aaaa1111")),
+        "aaaa1111", stop, cancel,
+    )
+    assert cancel.is_set() is False
