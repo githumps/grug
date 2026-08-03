@@ -2825,3 +2825,28 @@ def test_real_findings_on_a_healthy_pass_still_earn_a_board():
         conclusion="failure",
     )
     assert cr_dispatch.worth_an_email(ev) is True
+
+
+def test_stack_discloses_scope_on_a_full_diff_run_too():
+    """#673 item 2: 'what did you look at' must have an answer on EVERY run.
+
+    `- Looked at: <range>` was emitted only when a Living Hunt delta existed.
+    A full base..head review - the common path, and every first review of a
+    PR - disclosed nothing at all about its scope.
+    """
+    delta = cr_dispatch._stack_detail_lines("deep", "aaa..bbb", 0, "c0ffee1234")
+    assert "aaa..bbb" in delta
+
+    full = cr_dispatch._stack_detail_lines(
+        "deep", "", 0, "c0ffee1234", "base987654",
+    )
+    assert "Looked at" in full, "a full-diff run must still say what it read"
+    assert "base987..c0ffee1" in full, "disclose the RANGE, not one commit"
+
+
+def test_stack_detail_without_a_head_sha_still_renders():
+    """Callers that have no sha to hand must not crash or emit a dangling
+    'Looked at:' with nothing after it."""
+    out = cr_dispatch._stack_detail_lines("deep", "", 0)
+    assert "Looked at" not in out
+    assert "None" not in out
