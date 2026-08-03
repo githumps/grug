@@ -1222,16 +1222,28 @@ def worth_an_email(evaluation: CodeReviewEvaluation) -> bool:
 
 def _stack_detail_lines(
     review_phase: str, living_range: str, suppressed_count: int,
+    head_sha: str = "", base_sha: str = "",
 ) -> str:
     """The two facts a skeptical reader asks for: what was looked at, and what
-    was withheld. Everything else that used to live here was cut as noise."""
+    was withheld. Everything else that used to live here was cut as noise.
+
+    #673: "looked at" used to appear ONLY when a Living Hunt delta existed, so
+    a full base..head review - the common path, and every first review of a
+    PR - answered "what did you read" with nothing. Both cases now disclose.
+    """
     lines = []
     if review_phase == "tier1":
         # Not jargon for its own sake: a clear tier-1 pass is PROVISIONAL, and
         # a reader who does not know that will read it as final.
         lines.append("- Fast look only - deep look may add more.")
-    if living_range:
-        lines.append(f"- Looked at: `{living_range}`")
+    # ONE implementation of "what did you read", in board.review_scope_line.
+    # This branch used to re-derive it with its own wording and its own
+    # `head_sha[:7]`, so the same fact appeared in two vocabularies.
+    scope = board.review_scope_line(
+        living_range=living_range, base_sha=base_sha, head_sha=head_sha,
+    )
+    if scope:
+        lines.append(f"- Looked at: {scope}")
     if suppressed_count:
         lines.append(f"- Grug swallow {suppressed_count} weak thought(s).")
     return "\n".join(lines)
@@ -1314,6 +1326,8 @@ def _review_stack_body(
     suppressed_count: int = 0,
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
     pr_title: str = "",
+    head_sha: str = "",
+    base_sha: str = "",
 ) -> str:
     """PR-timeline review stack comment (Markings v2 / FLINT-style shell).
 
@@ -1367,7 +1381,10 @@ def _review_stack_body(
     # BLANK LINE between table and bullets is required: a list starting on the
     # line after a table row is swallowed into the table.
     detail = "\n\n".join(p for p in [
-        table, _stack_detail_lines(review_phase, living_range, suppressed_count),
+        table,
+        _stack_detail_lines(
+            review_phase, living_range, suppressed_count, head_sha, base_sha,
+        ),
     ] if p)
     if detail:
         parts.extend([
@@ -2342,6 +2359,8 @@ def dispatch_code_review(
                 suppressed_count=len(suppressed),
                 review_phase=tier1_phase,
                 pr_title=str(pr_context.get("title") or ""),
+                head_sha=head_sha,
+                base_sha=str(pr_context.get("base_sha") or ""),
             )
             with_install_token_retry(
                 installation_id,
@@ -2866,6 +2885,7 @@ def _publish_deep_review(
     deep_suppressed_count: int,
     combined_eval: CodeReviewEvaluation,
     pr_title: str = "",
+    base_sha: str = "",
 ) -> None:
     """Publish the async deep review's novel findings as a GitHub review.
 
@@ -2940,6 +2960,8 @@ def _publish_deep_review(
             suppressed_count=deep_suppressed_count,
             review_phase="deep",
             pr_title=pr_title,
+            head_sha=head_sha,
+            base_sha=base_sha,
         )
         with_install_token_retry(
             installation_id,
@@ -3159,6 +3181,7 @@ def _async_deep_append_if_needed(
         deep_suppressed_count=deep_suppressed_count,
         combined_eval=combined,
         pr_title=str(pr_context.get("title") or ""),
+        base_sha=str(pr_context.get("base_sha") or ""),
     )
     _submit_deep_evals(
         deep_graded,

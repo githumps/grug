@@ -191,3 +191,23 @@ def test_evidence_is_folded_so_the_email_stays_short():
     sec = board.collapse("What changed - 6 files", "| f | +/- |\n|---|---|\n| a.py | +6/-1 |")
     assert sec.startswith("<details>")     # collapsed by default
     assert "<summary>" in sec
+
+
+# --- #673 item 2: every run discloses what it read -------------------------
+
+
+def test_review_scope_line_names_a_range_not_just_a_commit():
+    """The author pastes this into `git diff`, so a single sha is not an
+    answer - `base..head` is."""
+    assert board.review_scope_line(living_range="aaa..bbb") == "`aaa..bbb`"
+    full = board.review_scope_line(base_sha="base1234567", head_sha="head1234567")
+    assert "base123..head123" in full
+
+
+def test_review_scope_line_degrades_to_head_when_base_is_unknown():
+    assert "head123" in board.review_scope_line(head_sha="head1234567")
+
+
+def test_review_scope_line_is_empty_when_it_knows_nothing():
+    """Better to say nothing than to emit a dangling 'Looked at:'."""
+    assert board.review_scope_line() == ""

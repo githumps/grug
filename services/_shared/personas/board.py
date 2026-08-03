@@ -192,6 +192,34 @@ def verdict_line(
     return _VERDICT_CLEAR
 
 
+def _short(sha: str) -> str:
+    """First 7 chars of a sha - what `git log --oneline` shows, and short
+    enough to read inline."""
+    return (sha or "")[:7]
+
+
+def review_scope_line(
+    *, living_range: str = "", base_sha: str = "", head_sha: str = "",
+) -> str:
+    """What this run actually read (#673 item 2).
+
+    The Living Hunt delta was already disclosed, but only on delta runs - a
+    full base..head review said nothing at all about its scope, which is the
+    common path and every FIRST review of a PR. "What did you look at" is the
+    first question a skeptical reader asks, and it had no answer.
+
+    Both cases name a RANGE, not a single commit: `base..head` is what the
+    author pastes into `git diff` to see exactly what Grug saw.
+    """
+    if living_range:
+        return f"`{living_range}`"
+    if base_sha and head_sha:
+        return f"`{_short(base_sha)}..{_short(head_sha)}`"
+    if head_sha:
+        return f"up to `{_short(head_sha)}`"
+    return ""
+
+
 def tally_line(blocking: int, advisory: int) -> str:
     """The counts, in words a human can act on. Empty when there is nothing
     to count, so a clean review stays a single sentence."""
