@@ -506,3 +506,29 @@ def test_enforcement_gap_query_is_env_scoped() -> None:
     """Each stack alerts only on its own repos."""
     assert "env:dev" in enforcement_gap_query("dev")
     assert "env:prod" not in enforcement_gap_query("dev")
+
+
+# --- #818: a dead LLM backend must reach an operator ------------------------
+
+
+def test_backend_unusable_query_targets_the_terminal_token_only() -> None:
+    """A 402 removed Elder's whole fallback and nobody was told.
+
+    Measured 2026-07-27..08-03: OpenRouter `http_402` x4 (unpaid) and
+    Poolside `http_404` x3 (dead endpoint) - BOTH halves of the SaaS
+    overload valve down at once, so a Cave blip went straight to "Grug
+    could not review this" and the only person informed was the PR author,
+    who cannot pay a bill.
+
+    Must key on `llm_backend_unusable`, never `llm_backend_http_failed`:
+    the latter also fires for ordinary 429/5xx overload, which is the
+    system working as designed.
+    """
+    from components.dd_monitors import backend_unusable_query
+
+    q = backend_unusable_query("prod")
+    assert "llm_backend_unusable" in q
+    assert "llm_backend_http_failed" not in q, (
+        "alerting on the overload token would be pure noise"
+    )
+    assert "env:prod" in q

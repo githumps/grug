@@ -73,6 +73,7 @@ class _MonitorBundle:
     persona_dispatch_unhandled: datadog.Monitor
     elder_llm_degraded: datadog.Monitor
     enforcement_gap: datadog.Monitor
+    backend_unusable: datadog.Monitor
     cf_secret_mismatch: datadog.Monitor
     uptime: datadog.SyntheticsTest
     credential_acquisition_fail: datadog.Monitor
@@ -153,6 +154,29 @@ def poller_cronjob_unhealthy_query() -> str:
     return (
         "max(last_15m):max:kubernetes_state.cronjob.duration_since_last_successful"
         "{" + _NS + ",kube_cronjob:grug-poller} > 3600"
+    )
+
+
+def backend_unusable_query(env: str) -> str:
+    """An LLM backend that is not busy but BROKEN - unpaid, revoked, gone.
+
+    Keys on `llm_backend_unusable` (401/402/403/404), never on
+    `llm_backend_http_failed`, which also carries ordinary 429/5xx overload -
+    the exact condition the SaaS fallback exists to absorb. Alerting on that
+    would page for the system working as designed, so it would be muted, so
+    the real signal would be lost with it.
+
+    Why this monitor exists (#818): between 2026-07-27 and 08-03 OpenRouter
+    answered `http_402` four times (out of credits) and Poolside `http_404`
+    three times (dead endpoint). BOTH halves of Elder's overload valve were
+    down simultaneously. The valve's whole job is to stop a Cave outage
+    failing a review, so with it dead a Cave blip went straight to "Grug
+    could not review this" - and the only person told was the PR author, who
+    can do nothing about an unpaid invoice.
+    """
+    return (
+        f'logs("service:grug-* env:{env} llm_backend_unusable")'
+        '.index("*").rollup("count").last("15m") > 0'
     )
 
 
@@ -759,6 +783,31 @@ def create_all(
     #    the DoR check, for >1h. DogStatsD metric emitted by enforcement.py.
     #    Thresholds on the value, never on the enforcement_type tag: see
     #    enforcement_gap_query for why the tag filter latched this (#716).
+    # An LLM backend that is BROKEN rather than busy. Digest tier on purpose:
+    # it is not a user-facing outage - Elder still reviews from the Cave - but
+    # it silently removes the fallback, so the next Cave blip becomes a failed
+    # review with no safety net. Something to see, not something to wake for.
+    backend_unusable = datadog.Monitor(
+        "grug-backend-unusable",
+        type="log alert",
+        name="[grug] LLM backend unusable (unpaid / revoked / gone)",
+        message=(
+            f"{_DIGEST}\n"
+            "A review backend returned 401/402/403/404 - it is not overloaded, "
+            "it is unusable. 402 = unpaid, 401/403 = key wrong or revoked, "
+            "404 = endpoint or model name gone.\n"
+            "This does NOT fail reviews on its own: the Cave is the primary "
+            "path. It removes the FALLBACK, so the next Cave outage has "
+            "nothing behind it and authors get told Grug could not review.\n"
+            "Runbook: docs/RUNBOOK.md#llm-backend-unusable"
+        ),
+        query=backend_unusable_query(env),
+        tags=_common_tags(env, "grug-consumer") + ["llm:backend"],
+        notify_no_data=False,
+        priority=3,
+        opts=opts,
+    )
+
     enforcement_gap = datadog.Monitor(
         "grug-enforcement-gap",
         type="metric alert",
@@ -861,6 +910,7 @@ def create_all(
         persona_dispatch_unhandled=persona_dispatch_unhandled,
         elder_llm_degraded=elder_llm_degraded,
         enforcement_gap=enforcement_gap,
+        backend_unusable=backend_unusable,
         cf_secret_mismatch=cf_secret_mismatch,
         uptime=uptime,
         credential_acquisition_fail=credential_acquisition_fail,
