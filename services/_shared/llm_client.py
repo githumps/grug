@@ -770,6 +770,57 @@ def _saas_overload_fallback_config(backend: Backend) -> BackendConfig:
     )
 
 
+# A backend that answers with one of these is not busy - it is UNUSABLE, and
+# no amount of retrying or falling back changes that. 401/403 = the key is
+# wrong or revoked. 402 = the bill is unpaid. 404 = the endpoint or model name
+# is gone. All four are operator problems with an operator fix.
+_TERMINAL_BACKEND_STATUSES = frozenset({401, 402, 403, 404})
+
+
+def is_terminal_backend_failure(status: int) -> bool:
+    """Is this a config/billing failure rather than overload?
+
+    The distinction is load-bearing for #818. Measured 2026-07-27..08-03:
+    OpenRouter returned `http_402` (out of credits) four times and Poolside
+    `http_404` three times - BOTH halves of the SaaS overload valve were dead
+    at once. The valve exists precisely so a Cave outage does not fail a
+    review, so with both dead a Cave blip went straight to "Grug could not
+    review this", and the only person told was the PR author, who can do
+    nothing about an unpaid bill.
+
+    429 and 5xx are deliberately NOT terminal: those are the overload this
+    fallback was built for, and paging on them would be paging on the system
+    working as designed.
+    """
+    return status in _TERMINAL_BACKEND_STATUSES
+
+
+def _log_backend_failure(*, backend_value: str, status: int, error: str) -> None:
+    """Log a backend HTTP failure under a token that matches its KIND.
+
+    Terminal failures get their own token so a monitor can alert on them.
+    Alerting on `llm_backend_http_failed` is not an option - it fires for
+    ordinary overload too, so it would be pure noise, which is why a dead
+    OpenRouter key sat unnoticed while it silently removed Elder's fallback.
+    """
+    if is_terminal_backend_failure(status):
+        log.error(
+            "llm_backend_unusable",
+            extra={
+                "backend": backend_value,
+                "status": status,
+                "error": error,
+                # Named so the runbook and the monitor agree on vocabulary.
+                "failure_class": "config_or_billing",
+            },
+        )
+        return
+    log.warning(
+        "llm_backend_http_failed",
+        extra={"backend": backend_value, "status": status, "error": error},
+    )
+
+
 def select_backend(installation_id: int) -> Backend:
     """Stable per-install backend pick via `installation_id % 2`.
 
@@ -2716,9 +2767,8 @@ def _run_review_arm(
             backend=backend, kind="parse_failed", model=model,
             error_text=f"{backend.value}: parse_failed: {err}", parse_err=err,
         )
-    log.warning(
-        "llm_backend_http_failed",
-        extra={"backend": backend.value, "status": resp.status_code, "error": err},
+    _log_backend_failure(
+        backend_value=backend.value, status=resp.status_code, error=err,
     )
     return _ArmOutcome(
         backend=backend, kind="http_failed",
@@ -3172,9 +3222,8 @@ def _review_diff_dispatch(
                     first_parse_fail = (backend, model, err)
                 last_error = f"{backend.value}: parse_failed: {err}"
                 continue
-            log.warning(
-                "llm_backend_http_failed",
-                extra={"backend": backend.value, "status": resp.status_code, "error": err},
+            _log_backend_failure(
+                backend_value=backend.value, status=resp.status_code, error=err,
             )
             last_error = f"{backend.value}: {err}"
 

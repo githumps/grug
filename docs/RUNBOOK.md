@@ -670,3 +670,52 @@ the two ways a reporting repo could go silent, so this should now only happen
 when a repo leaves the estate entirely - deleted, or its installation removed.
 That case is inherent and bounded: it needs a repo to disappear while red, and
 it clears itself within 24h.
+
+## LLM backend unusable
+
+The `[grug] LLM backend unusable` monitor fires when a review backend answers
+401, 402, 403 or 404. That is not overload - it is broken.
+
+| Status | Meaning | Fix |
+|---|---|---|
+| 401 / 403 | API key wrong or revoked | Rotate the key in SSM, redeploy |
+| 402 | Unpaid / out of credits | Top up the account |
+| 404 | Endpoint or model name gone | Check the vendor changed neither |
+
+### Why it matters even though reviews still work
+
+The Cave (self-hosted Spark models) is Elder's PRIMARY path. OpenRouter and
+Poolside are a bounded, single-shot **overload valve** behind it - the
+deliberate 2026-07-14 call to stop a Cave outage leaving a review
+`all_failed`.
+
+So a dead SaaS backend does not fail reviews on its own. It removes the
+safety net, silently. The next Cave blip then goes straight to "Grug could
+not review this", and the only person told is the PR author, who cannot pay
+an invoice or rotate a key.
+
+That is exactly what happened between 2026-07-27 and 08-03: OpenRouter
+returned `http_402` four times and Poolside `http_404` three times. Both
+halves of the valve were down at once and nothing said so, because the only
+log token was `llm_backend_http_failed`, which also fires for ordinary 429s
+and is therefore not alertable.
+
+### Triage
+
+```bash
+pup logs search --query "llm_backend_unusable" \
+  --from "$(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)" --to "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+The log carries `backend`, `status` and `failure_class:config_or_billing`.
+
+Note the two backends are **not** interchangeable: they run different models
+(OpenRouter serves Claude, Poolside serves Laguna), so losing one halves the
+fallback rather than degrading it evenly.
+
+### Check the other personas too
+
+`judge_findings`, `summarize_pr` and `answer_pr_question` use Poolside and
+OpenRouter as their **primary** backend via `select_backend`'s per-install
+round robin - not as a fallback. A dead SaaS backend degrades those directly,
+not just Elder's safety net.

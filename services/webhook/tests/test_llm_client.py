@@ -2835,3 +2835,68 @@ def test_render_learnings_block_redacts_secret_before_truncation() -> None:
     rows = [{"text": f"allow key {fake} in fixtures", "scope_path": ""}]
     block = lc._render_learnings_block(rows)
     assert fake not in block  # redacted before it reached the block
+
+
+# --- #818: a dead backend must page an operator, not degrade a review -------
+
+
+def test_billing_and_auth_failures_are_classified_terminal():
+    """A 402 is not overload - it is an unpaid bill, and no retry fixes it.
+
+    Measured 2026-07-27..2026-08-03: OpenRouter returned `http_402` four
+    times and Poolside `http_404` three times. Both halves of the SaaS
+    overload valve were dead simultaneously, so a Cave failure had NO
+    fallback - and the only visible consequence was an author being told
+    Grug could not review their PR.
+    """
+    from llm_client import is_terminal_backend_failure
+
+    for status in (401, 402, 403, 404):
+        assert is_terminal_backend_failure(status) is True, status
+
+
+def test_overload_and_transport_failures_are_not_terminal():
+    """429/5xx are exactly what the fallback exists for. Treating them as
+    config failures would page an operator for normal load."""
+    from llm_client import is_terminal_backend_failure
+
+    for status in (408, 429, 500, 502, 503, 504):
+        assert is_terminal_backend_failure(status) is False, status
+
+
+def test_terminal_backend_failure_emits_its_own_log_token():
+    """It needs a DISTINCT token so a monitor can alert on it.
+
+    `llm_backend_http_failed` fires for ordinary overload too, so alerting
+    on it would be pure noise. A dead key or a dead endpoint is an operator
+    problem and must be separable.
+    """
+    import logging
+
+    import llm_client
+
+    records = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    lg = logging.getLogger("grug.llm_client")
+    h = _Cap()
+    lg.addHandler(h)
+    try:
+        llm_client._log_backend_failure(
+            backend_value="openrouter", status=402, error="insufficient credits",
+        )
+        llm_client._log_backend_failure(
+            backend_value="openrouter", status=503, error="overloaded",
+        )
+    finally:
+        lg.removeHandler(h)
+
+    assert "llm_backend_unusable" in records, (
+        "a billing/auth/config failure needs its own alertable token"
+    )
+    assert "llm_backend_http_failed" in records, (
+        "ordinary overload keeps the existing token"
+    )
