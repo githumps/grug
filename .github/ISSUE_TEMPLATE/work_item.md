@@ -45,11 +45,15 @@ Blocking issues / sibling repos / external prereqs. Use `Blocked by #N`,
 `Refs #N`, or `closes #N` so Grug's issue-link check passes and the
 graph is navigable.
 
-EPIC LINK REQUIRED. Every work item belongs to an epic. Add `Refs #N`
-pointing at one of the live epics below, or apply the `orphan-ok` label
-to declare this deliberately standalone. An issue with neither is an
-orphan, and orphans are how a backlog stops being a map of live work -
-40% of the open backlog was orphaned when this rule was written.
+EPIC LINK REQUIRED, no exceptions. Every work item belongs to an epic.
+Write `Part of #N` naming one of the live epics below, AND set the
+native sub-issue parent after filing (the epic's "Add sub-issue"
+button). The text is what a reader sees; the sub-issue link is what
+tooling counts.
+
+`Part of` beats `Refs` - `Refs` means "related" and is not parentage.
+There is no orphan-ok escape hatch; if nothing fits, the epic set is
+wrong and needs a new umbrella.
 
 Live epics (verify with `gh issue list --search "epic in:title"`):
   #707 review quality - Elder precision/recall, false positives
@@ -58,8 +62,9 @@ Live epics (verify with `gh issue list --search "epic in:title"`):
   #645 tiered Elder review
   #548 one deep publish-and-record seam
   #522 LORE-class review intelligence
-Label groups: epic-arch-hygiene, epic-deploy-reliability,
-epic-enforcement, epic-resiliency.
+  #791 board + email noise
+  #823 architecture hygiene
+  #824 deploy-pipeline reliability
 -->
 
 - 

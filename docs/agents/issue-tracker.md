@@ -14,13 +14,18 @@ Issues and PRDs for this repo live as GitHub issues at `quadseven/grug`. Use the
   - The implementing PR mirrors this shape and must carry a plain-text `closes #<n>` for Grug's `Grug - Chief` DoR gate to pass.
 - **Labels (full live set, verify with `gh label list --repo quadseven/grug` before relying on this list — it drifts):**
   - State-role: `needs-triage`, `ready-for-agent`, `wontfix`. The canonical five-role vocabulary's other two roles (`needs-info`, `ready-for-human`) are not yet defined as labels in this repo.
-  - Category/other: `arch-review`, `bug`, `dependencies`, `documentation`, `duplicate`, `enhancement`, `feature`, `gh-app-best-practice`, `good first issue`, `grug-pulse`, `help wanted`, `invalid`, `javascript`, `likely-resolved`, `nightly-bot`, `orphan-ok`, `prd`, `preview`, `question`, `stale`.
-  - Live epic groups: `epic-arch-hygiene`, `epic-deploy-reliability`, `epic-enforcement`, `epic-resiliency`.
-  - Retired (history only, never apply): `archived-epic-security` (complete 28/28), `archived-epic-grug-saas` (complete 40/40). Renamed rather than deleted on 2026-08-01 so the association survives on the 68 closed issues that carry them.
+  - Category/other: `arch-review`, `bug`, `dependencies`, `documentation`, `duplicate`, `enhancement`, `feature`, `gh-app-best-practice`, `good first issue`, `grug-pulse`, `help wanted`, `invalid`, `javascript`, `likely-resolved`, `nightly-bot`, `prd`, `preview`, `question`, `stale`.
+  - Live epic groups: `epic-arch-hygiene` (umbrella #823), `epic-deploy-reliability` (umbrella #824). Both now have a real epic ISSUE; the label is a filter, the sub-issue link is the membership.
+  - Retired (history only, never apply): `archived-epic-security` (28/28), `archived-epic-grug-saas` (40/40), `archived-epic-resiliency` (5/5), `archived-epic-enforcement` (11/11). Renamed rather than deleted so the association survives on the closed issues that carry them.
+  - Deleted: `orphan-ok` (2026-08-06) - see the filing rule below.
 
 ## Epic-link filing rule
 
-**Every new issue carries an epic link or the `orphan-ok` label.** Put `Refs #N` in `## Dependencies` naming a live epic, or apply `orphan-ok` to declare the item deliberately standalone. An issue with neither is an orphan.
+**Every new issue is a sub-issue of an epic. There is no exception.**
+
+Membership is a native GitHub **sub-issue** link, not a label and not a text reference. File the issue, then set its parent (Issues UI: "Add sub-issue" on the epic, or `POST /repos/quadseven/grug/issues/<epic>/sub_issues`).
+
+Keep `Part of #N` in `## Dependencies` as well - it is what a reader sees in the body, and it is the tie-breaker when tooling has to infer. `Part of` beats `Refs`: `Refs` means "related", and treating it as parentage put three issues under two epics at once.
 
 Why this exists: the backlog went from roughly 16 open issues on 2026-07-01 to 85 on 2026-07-31, while 34 of those 85 (40%) belonged to no epic. Intake ran at 159 issues per 30 days against 90 closed - the backlog grew regardless of throughput. Filing is frictionless and linking is not, so without a rule the orphan pool grows with the backlog and the epic list stops describing live work.
 
@@ -31,7 +36,9 @@ gh issue list --repo quadseven/grug --state open --search "epic in:title" \
   --json number,title --jq '.[] | "#\(.number) \(.title)"'
 ```
 
-`orphan-ok` is a real answer, not a loophole - a one-off ops fix or a chore genuinely belongs to no epic. It is a deliberate declaration, which is the point: the label makes the choice visible instead of silent.
+The `orphan-ok` label is RETIRED (deleted 2026-08-06). It was the escape hatch in the first version of this rule; in practice it became the place work went to be forgotten. If something genuinely has no home, that is a signal the epic set is wrong - add an umbrella epic rather than an exception. Two were added this way: #823 (architecture hygiene) and #824 (deploy-pipeline reliability), both replacing bare `epic-*` labels that had no issue behind them.
+
+Epic ROOTS have no parent, by definition: the epic issues themselves, and PRD umbrellas like #346. Everything else does.
 - **Create an issue**: `gh issue create --repo quadseven/grug --title "feat(grug): ..." --body "..."`. Use a heredoc for multi-line bodies; follow the template's five-section shape above.
 - **Read an issue**: `gh issue view <number> --repo quadseven/grug --comments`.
 - **List issues**: `gh issue list --repo quadseven/grug --state open --json number,title,body,labels,comments`.
