@@ -6,7 +6,7 @@ NOT scan for `github_user_id` / `install_id` — those are intentionally
 logged across grug today, with DD as the authorized observability sink
 + support-flow needing the raw id. Migrating identifiers to
 `observability.fingerprint()` is a deliberate future call (see
-specs/SLICE_PLAN_TEMPLATE.md §11), not a CI blocker today.
+specs/DESIGN.md appendix), not a CI blocker today.
 
 Webhook-side twin of services/api/tests/test_log_pii_guard.py (tests
 stay per-service and are allowed to differ - ADR-0014); kept

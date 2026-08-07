@@ -6,7 +6,7 @@ NOT scan for `github_user_id` / `install_id` — those are intentionally
 logged across grug today, with DD as the authorized observability sink
 + support-flow needing the raw id. Migrating identifiers to
 `observability.fingerprint()` is a deliberate future call (see
-specs/SLICE_PLAN_TEMPLATE.md §11), not a CI blocker today.
+specs/DESIGN.md appendix), not a CI blocker today.
 
 This test is the structural enforcement of the "no raw secrets in logs"
 rule. New PRs that introduce a `log.X("...", oauth_access_token=...)`

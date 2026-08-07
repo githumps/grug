@@ -1,7 +1,7 @@
 """Datadog dashboard factory for grug observability.
 
 Spec note: dashboards are observability CONFIG, not a behavioral domain
-contract — like `dd_monitors.py` / `dd_rum.py`, they carry no temper spec.
+contract — like `dd_monitors.py` / `dd_rum.py`, they carry no formal spec.
 
 The Elder persona is instrumented with native DD LLM Observability (the
 `LLMObs` SDK — spans + evaluations), so DD's out-of-the-box "LLM Obs

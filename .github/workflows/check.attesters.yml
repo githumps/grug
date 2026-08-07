@@ -1,0 +1,127 @@
+name: Check · attesters
+
+# Static invariant checks over the codebase. Each `attest_*.py` script
+# asserts one structural property that types and unit tests cannot -
+# e.g. that no vendor name leaks into a public repo, that the decrypt
+# boundary is not crossed, that persona surfaces stay coherent.
+#
+# These ran under the temper spec cascade until temper was retired.
+# They never needed it: every script is pure stdlib, reads only the
+# repo tree, and exits non-zero on violation. This workflow runs the
+# same 24 checks with no Rust toolchain and no SMT solver.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/scripts/attest_*.py'
+      - 'services/**/personas/tpm/**'
+      - 'services/**/adapters/**'
+      - 'services/**/github_checks_client.py'
+      - 'services/**/github_reviews_client.py'
+      - 'services/**/personas/code_reviewer/**'
+      - 'services/**/llm_client.py'
+      - 'services/**/crypto/**'
+      - 'services/**/github_app_auth/**'
+      - 'services/**/dispatcher.py'
+      - 'web/public/**'
+      - 'web/index.html'
+      - 'web/app.html'
+      - 'web/vite.config.ts'
+      - 'web/src/main.tsx'
+      - 'web/src/rum.ts'
+      - 'web/package.json'
+      - 'infra/pulumi/components/dd_rum.py'
+      - 'infra/pulumi/__main__.py'
+      - '.github/workflows/check.attesters.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-attesters-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  attest:
+    name: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: attest aggregate passed advisory
+        run: python3 infra/scripts/attest_aggregate_passed_advisory.py
+
+      - name: attest cf shared secret middleware
+        run: python3 infra/scripts/attest_cf_shared_secret_middleware.py
+
+      - name: attest check run result post init
+        run: python3 infra/scripts/attest_check_run_result_post_init.py
+
+      - name: attest code reviewer dispatch
+        run: python3 infra/scripts/attest_code_reviewer_dispatch.py
+
+      - name: attest ddb handle thread safe
+        run: python3 infra/scripts/attest_ddb_handle_thread_safe.py
+
+      - name: attest dor checks mirror
+        run: python3 infra/scripts/attest_dor_checks_mirror.py
+
+      - name: attest dor checks six rules
+        run: python3 infra/scripts/attest_dor_checks_six_rules.py
+
+      - name: attest elder evaluation purity
+        run: python3 infra/scripts/attest_elder_evaluation_purity.py
+
+      - name: attest github reviews client
+        run: python3 infra/scripts/attest_github_reviews_client.py
+
+      - name: attest installation lifecycle
+        run: python3 infra/scripts/attest_installation_lifecycle.py
+
+      - name: attest kms corruption cleanup
+        run: python3 infra/scripts/attest_kms_corruption_cleanup.py
+
+      - name: attest landing cta routing
+        run: python3 infra/scripts/attest_landing_cta_routing.py
+
+      - name: attest landing install url canonical
+        run: python3 infra/scripts/attest_landing_install_url_canonical.py
+
+      - name: attest landing url slug canonical
+        run: python3 infra/scripts/attest_landing_url_slug_canonical.py
+
+      - name: attest mirror policy consistency
+        run: python3 infra/scripts/attest_mirror_policy_consistency.py
+
+      - name: attest no vendor names
+        run: python3 infra/scripts/attest_no_vendor_names.py
+
+      - name: attest persona purity
+        run: python3 infra/scripts/attest_persona_purity.py
+
+      - name: attest persona surface coherence
+        run: python3 infra/scripts/attest_persona_surface_coherence.py
+
+      - name: attest repo config default dict
+        run: python3 infra/scripts/attest_repo_config_default_dict.py
+
+      - name: attest rum pulumi registration
+        run: python3 infra/scripts/attest_rum_pulumi_registration.py
+
+      - name: attest rum sdk in html
+        run: python3 infra/scripts/attest_rum_sdk_in_html.py
+
+      - name: attest token cache retry
+        run: python3 infra/scripts/attest_token_cache_retry.py
+
+      - name: attest user identity no tokens
+        run: python3 infra/scripts/attest_user_identity_no_tokens.py
+
+      - name: attest user with tokens decrypt boundary
+        run: python3 infra/scripts/attest_user_with_tokens_decrypt_boundary.py

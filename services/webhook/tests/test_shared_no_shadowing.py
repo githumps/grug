@@ -8,7 +8,7 @@ retired drift-lint existed to catch, now in import-resolution form.
 
 Runs in the webhook suite (check.python gates every services/** PR);
 infra/scripts/attest_mirror_policy_consistency.py holds the same
-invariant for the temper spec-0010 grounding.
+invariant for the mirror-discipline grounding.
 """
 
 from __future__ import annotations

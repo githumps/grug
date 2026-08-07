@@ -15,8 +15,8 @@ names in CONTEXT.md section "Process-gate concepts" AND that the
 found a frozen=False regression that spec 0006 falsely attested).
 Exits 1 on any drift.
 
-Wire into .github/workflows/check.temper-specs.yml as a step that
-runs alongside `temper verify -s specs/0006-dor-check/`.
+Wired into .github/workflows/check.attesters.yml as one step of the
+static-invariant pass.
 """
 from __future__ import annotations
 

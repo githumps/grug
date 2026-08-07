@@ -76,7 +76,7 @@ class PersonaSpec:
 
     def __post_init__(self) -> None:
         # The store's is_persona_enabled derives its lookup key as
-        # f"{persona}_enabled" (an AST-attested shape, temper spec 0009),
+        # f"{persona}_enabled" (an AST-attested shape, see attest_repo_config_default_dict.py),
         # so a non-convention enabled_flag would silently fail OPEN to
         # enabled with no repo-level off switch (audit #477 H1). Make the
         # naming convention structural instead of folklore.
@@ -290,7 +290,7 @@ def by_canonical(name: str) -> PersonaSpec | None:
 
 def default_persona_config() -> dict[str, bool]:
     """Derive the RepoConfig persona-flag defaults from the registry. The
-    store's `_DEFAULT_PERSONA_CONFIG` stays a LITERAL dict (temper spec 0009
+    store's `_DEFAULT_PERSONA_CONFIG` stays a LITERAL dict (attest_repo_config_default_dict.py
     attests that shape as the extension point); registry<->dict equality is
     locked by test_registry.py so the two cannot drift (ADR-0010)."""
     cfg: dict[str, bool] = {}
