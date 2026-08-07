@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0010.MirrorDiscipline - EXTRACTED state.
+"""Grounding attester for the MirrorDiscipline contract - EXTRACTED state.
 
 The MirrorDiscipline automaton reached its terminal `Extracted` state at
 #77 / ADR-0014: the rule-of-three fired (Smasher was the third async

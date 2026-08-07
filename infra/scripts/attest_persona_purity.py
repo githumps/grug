@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0002.TpmEvaluation.
+"""Grounding attester for the TpmEvaluation contract.
 
 Proves a NECESSARY condition for the bool:
 
   - `evaluate_pull_request_is_pure_function_per_process_gate_concepts`
 
 (Sufficiency requires runtime/property testing — this static attester
-only checks the call graph at the AST level. Spec 0002's bool implies
+only checks the call graph at the AST level. The TpmEvaluation contract's bool implies
 "pure"; this script implies "no direct call to non-allowlisted target
 inside evaluate_pull_request's body" — proves not-impure, not "pure".)
 
@@ -94,7 +94,7 @@ def main() -> int:
             and node.name == "evaluate_pull_request"
         ]
         if not evaluate_fns:
-            failures.append(f"FAIL: {path} has no evaluate_pull_request — spec 0002 broken")
+            failures.append(f"FAIL: {path} has no evaluate_pull_request — the TpmEvaluation contract is broken")
             continue
         if len(evaluate_fns) != 1:
             failures.append(f"FAIL: {path} has {len(evaluate_fns)} evaluate_pull_request defs (expected 1)")
@@ -104,7 +104,7 @@ def main() -> int:
             failures.append(
                 f"FAIL: {path} — evaluate_pull_request is not pure:\n"
                 + "\n".join(f"  {v}" for v in viols)
-                + "\n  Spec 0002 attests purity. Move side-effects to publish_tpm_evaluation."
+                + "\n  The TpmEvaluation contract attests purity. Move side-effects to publish_tpm_evaluation."
             )
     if failures:
         print("\n".join(failures))

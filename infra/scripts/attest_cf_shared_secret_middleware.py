@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0014.CfSharedSecret.
+"""Grounding attester for the CfSharedSecret contract.
 
 Proves three of the five contract bools by AST-walking real source:
   - `middleware_registered_in_both_services_per_auth_boundary_contract`

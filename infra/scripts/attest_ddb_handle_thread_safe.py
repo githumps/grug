@@ -16,7 +16,7 @@ Asserts that in the shared pg_base module (services/_shared/, ADR-0014):
      the RIGHT variable - a spurious `if other is None:` must not pass)
 
 No spec dir for this invariant - the attester IS the contract (the
-spec-0011 automaton models the state machine; this grounds it in code).
+the DdbHandle contract automaton models the state machine; this grounds it in code).
 """
 from __future__ import annotations
 

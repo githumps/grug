@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0004.TokenCache.
+"""Grounding attester for the TokenCache contract.
 
 Proves a NECESSARY condition for these bools:
 

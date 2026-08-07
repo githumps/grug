@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0009.RepoConfig.
+"""Grounding attester for the RepoConfig contract.
 
 Proves NECESSARY conditions for these bools:
 
@@ -101,7 +101,7 @@ def main() -> int:
         if cfg.get("tpm_enabled") is not True:
             failures.append(
                 f"FAIL: {path}: _DEFAULT_PERSONA_CONFIG['tpm_enabled'] is not True "
-                f"(got {cfg.get('tpm_enabled')!r}). Spec 0009 attests defaults-enabled."
+                f"(got {cfg.get('tpm_enabled')!r}). The RepoConfig contract attests defaults-enabled."
             )
 
         get_repo = _has_function(tree, "get_repo_config")

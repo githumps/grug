@@ -77,7 +77,7 @@ jobs:
           echo "CLOUDFLARE_API_TOKEN=$CF_API_TOKEN" >> "$GITHUB_ENV"
           echo "CLOUDFLARE_ACCOUNT_ID=$CF_ACCOUNT_ID" >> "$GITHUB_ENV"
 
-          # DD RUM credentials (spec 0013). Both are public-by-design
+          # DD RUM credentials (RumInstrumentation contract). Both are public-by-design
           # (they live in the browser bundle) but sourced from SSM so a
           # rotation is `pulumi up`, not a git commit. Pulumi component
           # dd_rum.py owns the SSM values. If missing, the build still
@@ -104,7 +104,7 @@ jobs:
         run: npm run typecheck
 
       # Vite build consumes VITE_DD_RUM_* env vars and inlines them into
-      # the SPA bundle via web/src/rum.ts (spec 0013). Resolve the deploy
+      # the SPA bundle via web/src/rum.ts (RumInstrumentation contract). Resolve the deploy
       # env from the branch: `main` and tags = prod, anything else = dev.
       - name: 07. Build
         working-directory: web

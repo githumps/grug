@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0012.Landing.
+"""Grounding attester for the Landing contract.
 
 Proves a NECESSARY condition for the bool:
 
@@ -68,7 +68,7 @@ def main() -> int:
                 failures.append(
                     f"{html.relative_to(REPO_ROOT)}: href={href!r} "
                     f"does NOT contain `/apps/{CANONICAL_SLUG}/` — "
-                    f"spec 0012 install_url_uses_canonical_grug_tribe_slug_per_app_settings"
+                    f"the Landing contract install_url_uses_canonical_grug_tribe_slug_per_app_settings"
                 )
 
     if total_anchors == 0:

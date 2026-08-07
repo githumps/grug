@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0015.ElderEvaluation.
+"""Grounding attester for the ElderEvaluation contract.
 
 Proves NECESSARY conditions for two bools:
 
@@ -7,7 +7,7 @@ Proves NECESSARY conditions for two bools:
   - `evaluate_diff_is_pure_function_no_io_per_elder_persona`
 
 The check uses an **allowlist** of permitted call targets, not a
-denylist (lesson from spec 0002 peer-review HIGH). A future contributor
+denylist (lesson from the TpmEvaluation peer-review HIGH). A future contributor
 adding `requests.get` or `subprocess.run` to either function trips
 this attester at PR time, not in production.
 
@@ -45,7 +45,7 @@ ALLOWED_IN_PARSE_DIFF: frozenset[str] = frozenset({
 # `<param>.<method>` chains are pure-by-construction. Without the explicit
 # allowlist, `_local_or_attribute_safe` previously treated every parameter
 # as a safe call root — meaning `llm_response.some_io_call()` inside
-# evaluate_diff would silently pass the purity attester despite spec 0015's
+# evaluate_diff would silently pass the purity attester despite the ElderEvaluation contract's
 # no-IO claim. Caught by codex peer-review.
 ALLOWED_PARAM_METHODS_PARSE_DIFF: frozenset[tuple[str, str]] = frozenset({
     # `unified_diff` is typed `str`; `.splitlines()` is pure.
@@ -199,7 +199,7 @@ def _check_function(
             and node.name == fn_name
         ]
         if not fns:
-            failures.append(f"FAIL: {path} has no {fn_name} — spec 0015 broken")
+            failures.append(f"FAIL: {path} has no {fn_name} — the ElderEvaluation contract is broken")
             continue
         if len(fns) != 1:
             failures.append(
@@ -211,7 +211,7 @@ def _check_function(
             failures.append(
                 f"FAIL: {path} — {fn_name} is not pure:\n"
                 + "\n".join(f"  {v}" for v in viols)
-                + "\n  Spec 0015 attests purity. No IO inside parse_diff "
+                + "\n  The ElderEvaluation contract attests purity. No IO inside parse_diff "
                 "or evaluate_diff."
             )
     return failures
@@ -220,7 +220,7 @@ def _check_function(
 def main() -> int:
     # Vacuous-pass guards.
     if not PARSE_DIFF_PATHS or not EVALUATE_DIFF_PATHS:
-        print("FAIL: spec 0015 path list empty — refusing to pass vacuously")
+        print("FAIL: ElderEvaluation path list empty — refusing to pass vacuously")
         return 1
     failures: list[str] = []
     failures.extend(

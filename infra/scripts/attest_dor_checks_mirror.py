@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0006.DorCheck - single-copy dor_checks.
+"""Grounding attester for the DorCheck contract - single-copy dor_checks.
 
 Proves the bool:
 

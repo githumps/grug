@@ -213,8 +213,8 @@ ADR-0014 - supersedes the ADR-0001 mirror discipline and its drift-lint).
 Import paths are unchanged (`from adapters.install_store import ...`). Edit
 the shared copy; NEVER create a same-relpath file under `services/api/` or
 `services/webhook/` - it would silently shadow the shared module for that
-service (guarded by `tests/test_shared_no_shadowing.py` + the spec-0010
-attester). Per-service files (main.py, rerun.py, dispatcher/consumer, auth/,
+service (guarded by `tests/test_shared_no_shadowing.py` + the
+mirror-discipline attester). Per-service files (main.py, rerun.py, dispatcher/consumer, auth/,
 crypto/, sast_benchmark/, spark_cave/) stay in their service tree.
 
 <a id="roles-anywhere-credential-path-grug-poller-tracer-388"></a>

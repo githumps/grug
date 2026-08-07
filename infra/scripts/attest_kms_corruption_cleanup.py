@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0005.KmsEnvelope.
+"""Grounding attester for the KmsEnvelope contract.
 
 Proves the bool:
 
@@ -103,11 +103,11 @@ def main() -> int:
         failures.append("CredentialBlobCorrupt handler does not return None — caller can't route to /signin")
 
     if failures:
-        print(f"FAIL: {USER_STORE} — spec 0005 corruption-handler audit pattern broken:")
+        print(f"FAIL: {USER_STORE} — the KmsEnvelope contract corruption-handler audit pattern broken:")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print(f"OK: {USER_STORE.name}: get_user_with_tokens implements the spec 0005 PurgeCorrupt audit pattern")
+    print(f"OK: {USER_STORE.name}: get_user_with_tokens implements the the KmsEnvelope contract PurgeCorrupt audit pattern")
     return 0
 
 

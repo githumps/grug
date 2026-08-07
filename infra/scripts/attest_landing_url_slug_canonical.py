@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0012.Landing.
+"""Grounding attester for the Landing contract.
 
 Proves NECESSARY conditions for the bools:
 

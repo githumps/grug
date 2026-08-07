@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0013.RumInstrumentation.
+"""Grounding attester for the RumInstrumentation contract.
 
 Proves NECESSARY conditions for the bools:
 
@@ -10,7 +10,7 @@ Asserts that `infra/pulumi/__main__.py` AND `infra/pulumi/components/dd_rum.py`
 together:
 
   1. Define a `datadog.RumApplication` resource.
-  2. Pass `name="grug-web"` (the canonical service tag — spec 0013).
+  2. Pass `name="grug-web"` (the canonical service tag — the RumInstrumentation contract).
   3. Use `type="browser"` (catches accidental drift to ios/android/etc).
   4. Set `rum_event_processing_state="ALL"` (anything else drops event
      types we want to capture).
@@ -182,7 +182,7 @@ def _attest_main_callsite(failures: list[str]) -> None:
         failures.append(
             f"{MAIN_PY.relative_to(REPO_ROOT)}: dd_rum.create name={name!r}, "
             f"expected {CANONICAL_SERVICE_NAME!r} (canonical service tag, "
-            f"spec 0013 rum_service_tag_is_grug_web_canonical_per_dd_naming_canon)"
+            f"the RumInstrumentation contract rum_service_tag_is_grug_web_canonical_per_dd_naming_canon)"
         )
 
 

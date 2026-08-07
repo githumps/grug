@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0007.UserIdentity.
+"""Grounding attester for the UserIdentity contract.
 
 Proves NECESSARY conditions for these bools:
 
@@ -10,7 +10,7 @@ Proves NECESSARY conditions for these bools:
 Asserts that `services/_shared/adapters/pg_user_store.py:UserIdentity`:
   1. Is decorated with `@dataclass(frozen=True)` — no post-construction mutation.
   2. Has NO field whose name contains `oauth_`, `token`, `password`, `secret`,
-     or `blob` — token material lives ONLY on UserWithTokens (spec 0008).
+     or `blob` — token material lives ONLY on UserWithTokens.
   3. Defines exactly the identity fields documented in CONTEXT.md:
      github_user_id, login, role, tier, allowlisted, created_at,
      allowlisted_at, allowlisted_by.
@@ -35,7 +35,7 @@ EXPECTED_FIELDS: frozenset[str] = frozenset({
 })
 
 # Substring patterns that indicate token material — must not appear in
-# UserIdentity field names (those belong on UserWithTokens per spec 0008).
+# UserIdentity field names (those belong on UserWithTokens per the UserWithTokens contract).
 FORBIDDEN_FIELD_SUBSTRINGS: tuple[str, ...] = (
     "oauth_", "token", "password", "secret", "blob",
 )
@@ -88,7 +88,7 @@ def main() -> int:
     failures: list[str] = []
 
     if not _is_frozen_dataclass(cls):
-        failures.append("UserIdentity is not @dataclass(frozen=True) — spec 0007 attests frozen.")
+        failures.append("UserIdentity is not @dataclass(frozen=True) — the UserIdentity contract attests frozen.")
 
     fields = _class_fields(cls)
     fieldset = set(fields)
@@ -99,16 +99,16 @@ def main() -> int:
         for forbidden in FORBIDDEN_FIELD_SUBSTRINGS:
             if forbidden in lower:
                 failures.append(
-                    f"UserIdentity has forbidden field `{field}` — token material belongs on UserWithTokens (spec 0008)."
+                    f"UserIdentity has forbidden field `{field}` — token material belongs on UserWithTokens."
                 )
 
     # Closed-set: exactly the expected fields, no more no less.
     extra = fieldset - EXPECTED_FIELDS
     missing = EXPECTED_FIELDS - fieldset
     if extra:
-        failures.append(f"UserIdentity has unexpected fields: {sorted(extra)}. Update spec 0007 + EXPECTED_FIELDS together.")
+        failures.append(f"UserIdentity has unexpected fields: {sorted(extra)}. Update the UserIdentity contract + EXPECTED_FIELDS together.")
     if missing:
-        failures.append(f"UserIdentity is missing expected fields: {sorted(missing)}. Spec 0007 lists them as identity-required.")
+        failures.append(f"UserIdentity is missing expected fields: {sorted(missing)}. The UserIdentity contract lists them as identity-required.")
 
     if failures:
         print(f"FAIL: {USER_STORE.name}:")
