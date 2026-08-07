@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0001.CheckRunResult.
+"""Grounding attester for the CheckRunResult contract.
 
 Proves the bools:
 
@@ -114,7 +114,7 @@ def main() -> int:
         if not _has_post_init_raising_value_error(cls):
             failures.append(
                 f"FAIL: {path}: CheckRunResult.__post_init__ missing or doesn't raise ValueError. "
-                f"Spec 0001 attests post_init_raises_on_cross_field_violation."
+                f"The CheckRunResult contract attests post_init_raises_on_cross_field_violation."
             )
             continue
         # AST passed — try behavioral

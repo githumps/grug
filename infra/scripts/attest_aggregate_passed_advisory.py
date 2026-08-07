@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0002.TpmEvaluation.
+"""Grounding attester for the TpmEvaluation contract.
 
 Proves:
   - `aggregate_passed_iff_all_blocking_checks_passed_per_process_gate_concepts`

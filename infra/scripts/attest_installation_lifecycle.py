@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0003.Installation.
+"""Grounding attester for the Installation contract.
 
 Proves a NECESSARY condition for these bools:
 
@@ -91,7 +91,7 @@ def main() -> int:
         failures.append("no call to `is_install_allowlisted(...)` — allowlist gate not invoked")
 
     if not _has_int_cast_of(tree, "install"):
-        failures.append("no `int(install_id)` / `int(installation_id)` cast — spec 0003 declares install_id is GitHub-issued integer")
+        failures.append("no `int(install_id)` / `int(installation_id)` cast — the Installation contract declares install_id is GitHub-issued integer")
 
     if failures:
         print(f"FAIL: {DISPATCHER}:")

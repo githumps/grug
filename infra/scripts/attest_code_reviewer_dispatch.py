@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0017.CodeReviewerDispatch.
+"""Grounding attester for the CodeReviewerDispatch contract.
 
 Proves NECESSARY (static, AST-based) conditions for the dispatch
 orchestration bools against the real shared `dispatch.py` (services/_shared/).
@@ -544,7 +544,7 @@ def _check_capture(tree: ast.AST, f: ast.FunctionDef, path: Path) -> list[str]:
 
 def main() -> int:
     if not DISPATCH_PATHS:
-        print("FAIL: spec 0017 path list empty — refusing to pass vacuously")
+        print("FAIL: CodeReviewerDispatch path list empty — refusing to pass vacuously")
         return 1
     failures: list[str] = []
     for path in DISPATCH_PATHS:
@@ -556,7 +556,7 @@ def main() -> int:
         failures.extend(_check_dispatch(tree, path))
     if failures:
         print("\n".join(failures))
-        print("\nSpec 0017 attests the dispatch gate + dual-publish independence.")
+        print("\nThe CodeReviewerDispatch contract attests the dispatch gate + dual-publish independence.")
         return 1
     print(
         f"OK: _publish_shape gate (reachable branches + mode flow) + dual-publish "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0012.Landing.
+"""Grounding attester for the Landing contract.
 
 Proves NECESSARY conditions for the bools:
 
@@ -127,7 +127,7 @@ def main() -> int:
                         continue
                     failures.append(
                         f"{rel}: primary CTA `<a class={cls!r}>{text}</a>` "
-                        f"uses mailto: href — spec 0012 primary_ctas_never_use_mailto_protocol_per_design_intent"
+                        f"uses mailto: href — the Landing contract primary_ctas_never_use_mailto_protocol_per_design_intent"
                     )
 
             # Rule 2: Sign in button MUST be /signin.
@@ -136,7 +136,7 @@ def main() -> int:
                 if href != "/signin":
                     failures.append(
                         f"{rel}: Sign in button href={href!r}, expected '/signin' — "
-                        f"spec 0012 signin_button_points_to_react_signin_route_per_design_intent"
+                        f"the Landing contract signin_button_points_to_react_signin_route_per_design_intent"
                     )
 
     if total_btn_primary == 0:
@@ -148,7 +148,7 @@ def main() -> int:
         # post-rename). Absence here means the design regressed; flag it.
         failures.append(
             "no `<a class=\"btn ...\">Sign in</a>` found across landing HTML — "
-            "spec 0012 expects nav-bar Sign in button"
+            "the Landing contract expects nav-bar Sign in button"
         )
 
     if failures:

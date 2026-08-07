@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0006.DorCheck.
+"""Grounding attester for the DorCheck contract.
 
 Proves four bools against the real source files:
 
@@ -12,11 +12,11 @@ Asserts that `services/{api,webhook}/personas/tpm/dor_checks.py` each
 define exactly the 6 canonical `check_*` functions matching the rule
 names in CONTEXT.md section "Process-gate concepts" AND that the
 `CheckResult` dataclass is declared with `frozen=True` (peer-review HIGH
-found a frozen=False regression that spec 0006 falsely attested).
+found a frozen=False regression that the DorCheck attester falsely passed).
 Exits 1 on any drift.
 
-Wire into .github/workflows/check.temper-specs.yml as a step that
-runs alongside `temper verify -s specs/0006-dor-check/`.
+Wired into .github/workflows/check.attesters.yml as one step of the
+static-invariant pass.
 """
 from __future__ import annotations
 
@@ -83,12 +83,12 @@ def main() -> int:
                 f"FAIL: {path}\n"
                 f"  extra:   {sorted(extra) or 'none'}\n"
                 f"  missing: {sorted(missing) or 'none'}\n"
-                f"  Spec 0006 DorCheck declares exactly 5 canonical rules; drift breaks the kernel contract."
+                f"  DorCheck declares exactly 5 canonical rules; drift breaks the contract."
             )
         if not _check_result_is_frozen(path):
             failures.append(
                 f"FAIL: {path}: CheckResult is not @dataclass(frozen=True). "
-                f"Spec 0006 attests `check_result_is_frozen_dataclass`; a bare @dataclass "
+                f"The DorCheck contract attests `check_result_is_frozen_dataclass`; a bare @dataclass "
                 f"lets `evaluation.results[0].passed = False` mutate the rollup silently."
             )
     if failures:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0008.UserWithTokens.
+"""Grounding attester for the UserWithTokens contract.
 
 Proves NECESSARY conditions for these bools:
 
@@ -124,7 +124,7 @@ def main() -> int:
             continue
 
         if not _is_frozen_dataclass(cls):
-            failures.append(f"{store_path.name}: UserWithTokens is not @dataclass(frozen=True) — spec 0008 attests frozen.")
+            failures.append(f"{store_path.name}: UserWithTokens is not @dataclass(frozen=True) — the UserWithTokens contract attests frozen.")
 
         fields = _class_fields(cls)
         extra = set(fields) - EXPECTED_FIELDS
@@ -148,7 +148,7 @@ def main() -> int:
         webhook_hits = _files_referencing("UserWithTokens", WEBHOOK_DIR)
         if webhook_hits:
             failures.append(
-                "Webhook references UserWithTokens — service-scope wall broken (spec 0008 + 0005):\n"
+                "Webhook references UserWithTokens — service-scope wall broken (the UserWithTokens + KmsEnvelope contracts):\n"
                 + "\n".join(f"    {p.relative_to(REPO_ROOT)}" for p in webhook_hits)
             )
 
@@ -176,7 +176,7 @@ def main() -> int:
                     construction_sites.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
         if construction_sites:
             failures.append(
-                "UserWithTokens constructed outside pg_user_store.py — spec 0008 attests get_user_with_tokens is the sole construction site:\n"
+                "UserWithTokens constructed outside pg_user_store.py — the UserWithTokens contract attests get_user_with_tokens is the sole construction site:\n"
                 + "\n".join(f"    {s}" for s in construction_sites)
             )
 

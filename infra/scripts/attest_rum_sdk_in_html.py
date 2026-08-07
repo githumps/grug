@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0013.RumInstrumentation.
+"""Grounding attester for the RumInstrumentation contract.
 
 Proves NECESSARY conditions for the bools:
 
@@ -103,7 +103,7 @@ def _attest_spa_chain(failures: list[str]) -> None:
     if not re.search(rf"""service:\s*["']{re.escape(CANONICAL_SERVICE)}["']""", rum_src):
         failures.append(
             f"web/src/rum.ts: missing `service: \"{CANONICAL_SERVICE}\"` in datadogRum.init(...) — "
-            f"spec 0013 rum_service_tag_is_grug_web_canonical_per_dd_naming_canon"
+            f"the RumInstrumentation contract rum_service_tag_is_grug_web_canonical_per_dd_naming_canon"
         )
 
     # package.json lists the dep

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grounding attester for spec 0016.PrReviewResult.
+"""Grounding attester for the PrReviewResult contract.
 
 Proves NECESSARY conditions for these bools (via AST static analysis):
 
@@ -329,7 +329,7 @@ def main() -> int:
         return 1
     print(
         f"OK: github_reviews_client contracts verified in both "
-        f"{len(CLIENT_PATHS)} shared client module(s) (spec 0016)"
+        f"{len(CLIENT_PATHS)} shared client module(s) (the PrReviewResult contract)"
     )
     return 0
 
