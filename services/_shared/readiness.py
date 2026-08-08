@@ -29,7 +29,19 @@ from botocore.config import Config
 
 log = logging.getLogger("grug.readiness")
 
-_TTL_SECONDS = 5.0
+# 5.0 -> 60.0 (infra#819). The old value was SHORTER than the kubelet's
+# 10s readinessProbe period, so the cache could never hit: every probe on
+# every pod did a fresh SecureString read, and `_check_ssm_kms` decrypts,
+# so each one billed a KMS request. Six pods x 6 probes/min was ~800k
+# KMS decrypts a month - measured as the single largest line on the AWS
+# bill, and CloudTrail attributed it to this role.
+#
+# A cache TTL below the probe period is not a cache; it is a rename of
+# "no cache". 60s keeps the probe's actual purpose - catching a deleted
+# or invalid KMS key, and broken AWS auth - well within a minute, while
+# cutting the call volume ~6x. Keep this ABOVE the probe period in the
+# deployment manifests if that period ever changes.
+_TTL_SECONDS = float(os.environ.get("GRUG_READYZ_TTL_SECONDS", "60"))
 # Module-level single-slot cache. Mutated under uvicorn's effectively
 # serial probe cadence; a benign duplicate check at a TTL boundary is fine.
 _cache: dict = {"at": -1.0e9, "report": None}
