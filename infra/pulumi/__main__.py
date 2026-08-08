@@ -349,6 +349,15 @@ _rerun_jobs_queue = aws.sqs.Queue(
     name="grug-rerun-jobs.fifo",
     fifo_queue=True,
     content_based_deduplication=False,  # api supplies MessageDeduplicationId
+    # Long polling, matching grug-cave-jobs/-results (#312 free-tier guard).
+    # This queue was created WITHOUT it, so every empty receive cost a
+    # billable request: SQS bills per API call, and short polling returns
+    # immediately, so an idle consumer bills continuously for nothing.
+    # Measured 2026-08-08: the account was ~500k requests over the 1M/month
+    # free tier at $0.20/mo, and this was the only short-polling live queue
+    # (infra#819). The DLQs stay at the default - nothing polls them in a
+    # loop; they are read on demand during a redrive.
+    receive_wait_time_seconds=20,
     # Fallback budget for deep Elder reviews if the consumer's review-only
     # ChangeMessageVisibility heartbeat is temporarily unavailable during a
     # deploy. Healthy consumers renew a 600s per-message lease every 120s, so
