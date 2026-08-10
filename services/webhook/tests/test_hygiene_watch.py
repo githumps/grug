@@ -175,6 +175,13 @@ def test_scan_file_aggregates_every_category():
     assert {x.category for x in v} == {"job-timeout", "unpinned-action", "curl-timeout"}
 
 
+def test_scan_file_passes_dead_patterns_through():
+    """The `dead_patterns` argument scan_file has always accepted must
+    actually reach scan_dead_refs when a caller supplies it."""
+    v = hw.scan_file("wf.yml", "  path: /old/cluster", ("/old/cluster",))
+    assert [(x.line, x.category) for x in v] == [(1, "dead-ref")]
+
+
 # --- run loop ------------------------------------------------------------
 
 _DIRTY = "\n".join([
@@ -185,9 +192,14 @@ _DIRTY = "\n".join([
 
 
 def _wire(monkeypatch, *, enabled=True, content=_DIRTY, existing_report=None,
-          claim=True):
+          claim=True, dead_ref_patterns=()):
     monkeypatch.setattr(
-        hw, "get_repo_config", lambda i, r: {"guard_hygiene_watch_enabled": enabled})
+        hw, "get_repo_config",
+        lambda i, r: {
+            "guard_hygiene_watch_enabled": enabled,
+            "guard_hygiene_dead_ref_patterns": dead_ref_patterns,
+        },
+    )
     monkeypatch.setattr(hw, "_discover_files", lambda t, o, r: [".github/workflows/ci.yml"])
     monkeypatch.setattr(hw, "_fetch_file", lambda t, o, r, p: content)
     monkeypatch.setattr(hw, "claim_hygiene_watch_report", lambda i, r: claim)
@@ -311,3 +323,65 @@ def test_report_rows_are_capped_and_the_cap_is_disclosed(monkeypatch):
     hw.run_hygiene_watch_for_install("tok", 1, [{"id": 9, "full_name": "o/r"}])
     body = writes[0][2]["body"]
     assert "and 5 more (capped)" in body
+
+
+# --- #778: dead-ref patterns actually reach the scanner -------------------
+
+def test_configured_dead_ref_pattern_is_found_end_to_end(monkeypatch):
+    """#778 acceptance: with a pattern configured for the repo, a fixture
+    file containing a genuine dead reference produces exactly one dead-ref
+    violation through the FULL run loop (config read -> scan_file ->
+    filed report) - not just a scan_dead_refs unit test.
+
+    Before the fix, run_hygiene_watch_for_install called
+    `scan_file(path, text)` with no patterns, so `dead_patterns` fell back
+    to its `()` default and this file (otherwise hygiene-clean) produced
+    ZERO violations - no report would be filed at all (filed == 0), which
+    is exactly what this test guards against.
+    """
+    fixture = "\n".join([
+        "jobs:",
+        "  build:",
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 5",
+        "    steps:",
+        "      - run: echo deploying to /old/cluster/path",
+    ])
+    writes = _wire(monkeypatch, content=fixture, dead_ref_patterns=("/old/cluster/path",))
+    filed, failed = hw.run_hygiene_watch_for_install("tok", 1, [{"id": 9, "full_name": "o/r"}])
+    assert (filed, failed) == (1, 0)
+    body = writes[0][2]["body"]
+    assert "`dead-ref`" in body
+    assert "reference to decommissioned `/old/cluster/path`" in body
+    assert "UNCONFIGURED" not in body
+
+
+def test_unconfigured_dead_ref_category_is_logged_every_tick(monkeypatch, caplog):
+    """#778 acceptance: while no patterns are configured, that state must
+    be VISIBLE (log), so an empty dead-ref result is never mistaken for a
+    clean scan - even on a repo that is otherwise fully clean and files no
+    report at all (the only place the state would otherwise show up)."""
+    clean = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n"
+    _wire(monkeypatch, content=clean)  # dead_ref_patterns=() by default
+    with caplog.at_level("INFO", logger=hw.log.name):
+        filed, failed = hw.run_hygiene_watch_for_install(
+            "tok", 1, [{"id": 9, "full_name": "o/r"}])
+    assert (filed, failed) == (0, 0)
+    assert any(
+        r.message == "hygiene_watch_dead_ref_unconfigured" for r in caplog.records
+    )
+
+
+def test_unconfigured_dead_ref_category_is_disclosed_in_a_filed_report(monkeypatch):
+    """#778 acceptance: when a report IS filed for other categories while
+    dead-ref has no patterns, the report body must say the category is
+    unconfigured - a reader of the weekly report (not just the logs) must
+    not read the absent dead-ref rows as a clean scan for that category."""
+    writes = _wire(monkeypatch)  # _DIRTY trips job-timeout; no patterns configured
+    filed, failed = hw.run_hygiene_watch_for_install("tok", 1, [{"id": 9, "full_name": "o/r"}])
+    assert (filed, failed) == (1, 0)
+    body = writes[0][2]["body"]
+    assert "job-timeout" in body
+    assert "| `dead-ref` |" not in body  # no dead-ref finding row - it was never checked
+    assert "UNCONFIGURED" in body
+    assert "docs/SELF_HOST.md" in body

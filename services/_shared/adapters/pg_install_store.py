@@ -202,6 +202,14 @@ _EXTRA_REPO_FLAGS = frozenset({
 # These are exempt from the bool-only value check and validated per-flag below.
 _STR_REPO_FLAGS = frozenset({"elder_voice"})
 
+# Repo-level flags whose value is a list of strings. guard_hygiene_dead_ref_
+# patterns (#778) is per-install infrastructure data (decommissioned host/
+# path names) - it CANNOT ship as a hardcoded list in this PUBLIC repo the
+# way workflow_hygiene.py's diff-time list does, so it is read back here
+# from the store instead. Exempt from the bool-only value check; validated
+# per-flag below (list of non-empty str, or None to leave unchanged).
+_LIST_REPO_FLAGS = frozenset({"guard_hygiene_dead_ref_patterns"})
+
 _DEFAULT_PERSONA_CONFIG = {
     "tpm_enabled": True,
     "code_reviewer_enabled": True,
@@ -258,6 +266,13 @@ def get_repo_config(install_id: int, repo_id: int) -> dict[str, Any]:
     # Elder voice pack (#288/#578): stored only for entitled installs that
     # opted in; every other repo reads the caveman free default.
     cfg["elder_voice"] = str(item.get("elder_voice") or "caveman")
+    # Guard hygiene-watch dead-ref patterns (#778): absent row/field reads
+    # back as (), the same "unconfigured, not clean" shape scan_dead_refs
+    # already treats as a no-op - the visibility fix is the caller logging
+    # that empty state, not this read path.
+    cfg["guard_hygiene_dead_ref_patterns"] = tuple(
+        str(p) for p in (item.get("guard_hygiene_dead_ref_patterns") or ())
+    )
     return cfg
 
 
@@ -280,13 +295,62 @@ def _merge_attrs(pk: str, sk: str, attrs: dict[str, Any]) -> None:
         )
 
 
+def _validate_str_repo_flags(persona_flags: dict[str, Any], install_id: int) -> None:
+    """Per-flag validation for _STR_REPO_FLAGS values, split out of
+    set_repo_config (#778, Elder: cyclomatic 17 > cap 15) so a scalar
+    flag's semantics live in one seam instead of growing the write path
+    every time a new kind of flag is added.
+
+    elder_voice (#288/#578): must be "caveman" or "sage", and "sage" is a
+    paid pack gated on the install allowlist. Runs AFTER the caller has
+    already confirmed the flag is known (it is in _STR_REPO_FLAGS)."""
+    voice = persona_flags.get("elder_voice")
+    if voice is None:
+        return
+    if voice not in ("caveman", "sage"):
+        raise ValueError(
+            f"elder_voice must be one of ('caveman', 'sage'), got {voice!r}"
+        )
+    if voice == "sage" and not is_install_allowlisted(install_id):
+        raise ValueError(
+            f"elder_voice='sage' requires an allowlisted (paid) "
+            f"installation; install {install_id} is not entitled"
+        )
+
+
+def _validate_list_repo_flags(persona_flags: dict[str, Any]) -> None:
+    """Per-flag validation for _LIST_REPO_FLAGS values, split out of
+    set_repo_config for the same reason as _validate_str_repo_flags: the
+    write path's branching should not grow with every new flag KIND.
+
+    Loops over _LIST_REPO_FLAGS rather than naming
+    guard_hygiene_dead_ref_patterns directly, so the next list-valued
+    flag needs no new branch here - only a new frozenset member. Each
+    supplied value must be a list of non-empty strings; guard_hygiene_
+    dead_ref_patterns (#778) is the first of these - decommissioned-infra
+    names that are the ONLY writer path into the store (they never
+    appear in this repo's source, see hygiene_watch.py's module
+    docstring), so a typo here is silent for the whole category rather
+    than caught by a linter."""
+    for flag in _LIST_REPO_FLAGS:
+        value = persona_flags.get(flag)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise ValueError(
+                f"{flag} must be a list of non-empty strings, got {value!r}"
+            )
+
+
 def set_repo_config(
     *,
     install_id: int,
     repo_id: int,
     repo_full_name: str,
     updated_by_user_id: str,
-    **persona_flags: bool | str | None,
+    **persona_flags: bool | str | list[str] | None,
 ) -> dict[str, Any]:
     """Upsert per-repo override; returns the FIELDS THAT WERE UPDATED
     (same contract as the DDB adapter). Sparse merge preserves fields
@@ -303,6 +367,7 @@ def set_repo_config(
         - set(_DEFAULT_PERSONA_CONFIG)
         - _EXTRA_REPO_FLAGS
         - _STR_REPO_FLAGS
+        - _LIST_REPO_FLAGS
     )
     if unknown:
         raise TypeError(
@@ -312,31 +377,21 @@ def set_repo_config(
     # Values get the same rigor as keys (audit #477 M3): bool(value)
     # would silently store True for a truthy non-bool like "false" if a
     # caller ever passed a query-string value through. String-valued flags
-    # (_STR_REPO_FLAGS, e.g. elder_voice) are exempt here and validated by
-    # their own per-flag guard below.
+    # (_STR_REPO_FLAGS, e.g. elder_voice) and list-valued flags
+    # (_LIST_REPO_FLAGS, e.g. guard_hygiene_dead_ref_patterns) are exempt
+    # here and validated by their own per-kind helper below.
     non_bool = {
         flag: value for flag, value in persona_flags.items()
         if flag not in _STR_REPO_FLAGS
+        and flag not in _LIST_REPO_FLAGS
         and value is not None and not isinstance(value, bool)
     }
     if non_bool:
         raise TypeError(
             f"set_repo_config() persona flags must be bool or None; got {non_bool!r}"
         )
-    # elder_voice (#288/#578): must be "caveman" or "sage", and "sage" is a
-    # paid pack gated on the install allowlist. This runs AFTER the flag is
-    # accepted (it is in _STR_REPO_FLAGS) so the gate is actually reachable.
-    voice = persona_flags.get("elder_voice")
-    if voice is not None:
-        if voice not in ("caveman", "sage"):
-            raise ValueError(
-                f"elder_voice must be one of ('caveman', 'sage'), got {voice!r}"
-            )
-        if voice == "sage" and not is_install_allowlisted(install_id):
-            raise ValueError(
-                f"elder_voice='sage' requires an allowlisted (paid) "
-                f"installation; install {install_id} is not entitled"
-            )
+    _validate_str_repo_flags(persona_flags, install_id)
+    _validate_list_repo_flags(persona_flags)
     now = datetime.now(timezone.utc).isoformat()
     updated_fields: dict[str, Any] = {
         flag: value

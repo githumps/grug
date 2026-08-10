@@ -32,9 +32,14 @@ The diff-time linter carries a concrete list, but those strings are one
 operator's private cluster paths and grug is a PUBLIC repo - hardcoding
 them would leak private infrastructure names to every reader and would be
 wrong for every other install anyway. `scan_dead_refs` therefore takes
-the patterns as an argument and is wired with an empty tuple until the
-per-repo config surface lands (#657 pilot). The scan logic is complete
-and tested; only the data is deferred.
+the patterns as an argument. They come from the per-repo config surface
+(#778): `guard_hygiene_dead_ref_patterns` in the store, set per-install
+via `set_repo_config` (see docs/SELF_HOST.md - the data cannot ship in
+this repo, so a third-party install configures its own list there). A
+repo with the category enabled but no patterns configured is VISIBLE as
+such, not silently clean: `run_hygiene_watch_for_install` logs
+`hygiene_watch_dead_ref_unconfigured` and, when it files a report at all
+(other categories found something), the report body says so too.
 
 Each scan function is pure `(path, text) -> tuple[Violation, ...]` so it
 is unit-testable against fixture content with no network.
@@ -321,7 +326,7 @@ def _fetch_file(token: str, owner: str, repo: str, path: str) -> str | None:
     return resp.text
 
 
-def _report_body(violations: list[Violation]) -> str:
+def _report_body(violations: list[Violation], *, dead_ref_configured: bool) -> str:
     lines = [
         "Grug Guard walk the OLD trails, not just the new ones. These",
         "wounds already on the main path - nobody cut them today, so",
@@ -343,9 +348,19 @@ def _report_body(violations: list[Violation]) -> str:
         "honours the same inline `# hygiene: allow-...` opt-out as the",
         "diff-time check. Re-checked weekly while hygiene-watch is enabled;",
         "this report refreshes rather than duplicates.",
-        "",
-        _REPORT_MARKER,
     ]
+    if not dead_ref_configured:
+        # A silent empty result reads as "the fourth category found
+        # nothing"; this line makes it read as "the fourth category is
+        # unconfigured" instead (#778).
+        lines += [
+            "",
+            "`dead-ref` has NO patterns configured for this repo, so it is",
+            "UNCONFIGURED, not clean - no `dead-ref` row above means nothing",
+            "was checked, not that nothing was found. See docs/SELF_HOST.md",
+            "to set patterns.",
+        ]
+    lines += ["", _REPORT_MARKER]
     return "\n".join(lines)
 
 
@@ -372,6 +387,7 @@ def _existing_report(token: str, owner: str, repo: str) -> int | None:
 def _write_report(
     token: str, install_id: int, owner: str, name: str,
     violations: list[Violation], existing: int | None,
+    *, dead_ref_configured: bool,
 ) -> None:
     """File or refresh the quarantine report, and get the CLAIM semantics
     right on failure. Split out of the run loop (Elder #766: cognitive 26 >
@@ -385,11 +401,12 @@ def _write_report(
         marker-based refresh makes a later pass safe either way.
     """
     base = f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(name, safe='')}/issues"
+    body = _report_body(violations, dead_ref_configured=dead_ref_configured)
     try:
         if existing:
             resp = httpx.patch(
                 f"{base}/{existing}",
-                json={"body": _report_body(violations)},
+                json={"body": body},
                 headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
             )
         else:
@@ -397,7 +414,7 @@ def _write_report(
                 base,
                 json={
                     "title": f"{_REPORT_TITLE} ({len(violations)} violation(s))",
-                    "body": _report_body(violations),
+                    "body": body,
                 },
                 headers=_api_headers(token), timeout=_FETCH_TIMEOUT,
             )
@@ -426,11 +443,17 @@ def run_hygiene_watch_for_install(
             cfg = get_repo_config(install_id, int(repo_id))
             if not cfg.get("guard_hygiene_watch_enabled", False):
                 continue
+            dead_patterns = tuple(cfg.get("guard_hygiene_dead_ref_patterns") or ())
+            if not dead_patterns:
+                # #778: the category is ENABLED but has nothing to match
+                # against - say so every tick, so a scan that never finds a
+                # dead-ref violation is never mistaken for a clean scan.
+                log.info("hygiene_watch_dead_ref_unconfigured", extra={"repo": full})
             violations: list[Violation] = []
             for path in _discover_files(token, owner, name):
                 text = _fetch_file(token, owner, name, path)
                 if text:
-                    violations.extend(scan_file(path, text))
+                    violations.extend(scan_file(path, text, dead_patterns))
             if not violations:
                 log.info("hygiene_watch_clean", extra={"repo": full})
                 continue
@@ -440,7 +463,10 @@ def run_hygiene_watch_for_install(
             existing = _existing_report(token, owner, name)
             if not claim_hygiene_watch_report(install_id, full):
                 continue
-            _write_report(token, install_id, owner, name, violations, existing)
+            _write_report(
+                token, install_id, owner, name, violations, existing,
+                dead_ref_configured=bool(dead_patterns),
+            )
             filed += 1
             log.info(
                 "hygiene_watch_reported",
