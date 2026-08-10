@@ -204,6 +204,48 @@ so the launcher's `create jobs` grant cannot be used to borrow a privileged
 ServiceAccount and reach `grug-secrets`. See
 `docs/adr/0013-smasher-trial-sandbox.md` for the full boundary design.
 
+## Guard hygiene-watch: dead-reference patterns (#778)
+
+The `guard/hygiene_watch.py` weekly pass has a fourth rule category,
+`dead-ref`, that flags references to decommissioned infrastructure (old
+cluster paths, retired hostnames, ...) left behind in `.github/` YAML on
+the default branch. Unlike the other three categories it ships with
+**no patterns** - a concrete list would be one operator's private
+infrastructure names published in a PUBLIC repo, and meaningless for
+every other install anyway. You supply your own list per repo.
+
+Patterns are NOT a dashboard toggle (that's tracked separately, #768) -
+set them directly through the store, using the same `set_repo_config`
+the API uses, from a Python shell with `GRUG_DATABASE_URL` set to your
+instance's Postgres:
+
+```bash
+cd services/_shared
+GRUG_DATABASE_URL="<your grug_kv connection string>" python3 -c '
+from adapters.pg_install_store import set_repo_config
+set_repo_config(
+    install_id=<your_install_id>,
+    repo_id=<the_repo_id>,
+    repo_full_name="<owner>/<repo>",
+    updated_by_user_id="<your_gh_user_id>",
+    guard_hygiene_watch_enabled=True,
+    guard_hygiene_dead_ref_patterns=["old-cluster.internal", "/mnt/legacy-nfs"],
+)
+'
+```
+
+`guard_hygiene_dead_ref_patterns` must be a list of non-empty strings; a
+non-list value or an empty string in the list raises `ValueError`. Each
+pattern is matched as a plain substring against the non-comment portion
+of every scanned line (same semantics as the other three rules) - no
+regex, so a literal path or hostname is all you need.
+
+While `guard_hygiene_watch_enabled` is on and this list is empty, the
+category is UNCONFIGURED rather than clean: every poller tick logs
+`hygiene_watch_dead_ref_unconfigured` for the repo, and if a report gets
+filed for the other three categories, its body says the `dead-ref` rows
+are absent because nothing was checked, not because nothing was found.
+
 ## Compliance with AGPL-3.0
 
 If you modify Grug and offer the modified version as a network

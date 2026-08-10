@@ -998,6 +998,39 @@ def test_dep_watch_flag_and_targeting(pg):
     assert store.claim_dep_watch_report(4, "o/dep") is False
 
 
+def test_guard_hygiene_dead_ref_patterns_round_trip(pg):
+    """#778: dead-ref patterns are per-install DATA, not a bool flag - the
+    store must round-trip a list of strings, default to an empty tuple on
+    a missing/unset row, and reject a non-list/empty-string value the same
+    way set_repo_config guards every other flag's type."""
+    from adapters import pg_install_store as store
+
+    cfg = store.get_repo_config(5, 301)
+    assert cfg["guard_hygiene_dead_ref_patterns"] == ()
+
+    store.set_repo_config(
+        install_id=5, repo_id=301, repo_full_name="o/r",
+        updated_by_user_id="9",
+        guard_hygiene_dead_ref_patterns=["/old/cluster", "old-host.internal"],
+    )
+    cfg = store.get_repo_config(5, 301)
+    assert cfg["guard_hygiene_dead_ref_patterns"] == ("/old/cluster", "old-host.internal")
+    # Untouched flags on the same row keep their defaults.
+    assert cfg["guard_hygiene_watch_enabled"] is False
+
+    with pytest.raises(ValueError, match="non-empty"):
+        store.set_repo_config(
+            install_id=5, repo_id=302, repo_full_name="o/r2",
+            updated_by_user_id="9",
+            guard_hygiene_dead_ref_patterns=["ok", ""],
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        store.set_repo_config(
+            install_id=5, repo_id=303, repo_full_name="o/r3",
+            updated_by_user_id="9",
+            guard_hygiene_dead_ref_patterns="not-a-list",
+        )
+
 
 def test_ledger_exemplars_cache_and_corpus_scan_exclusion(pg):
     """#538: exemplars cache round-trips under sk=EXEMPLARS, and BOTH
