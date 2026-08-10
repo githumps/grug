@@ -295,6 +295,55 @@ def _merge_attrs(pk: str, sk: str, attrs: dict[str, Any]) -> None:
         )
 
 
+def _validate_str_repo_flags(persona_flags: dict[str, Any], install_id: int) -> None:
+    """Per-flag validation for _STR_REPO_FLAGS values, split out of
+    set_repo_config (#778, Elder: cyclomatic 17 > cap 15) so a scalar
+    flag's semantics live in one seam instead of growing the write path
+    every time a new kind of flag is added.
+
+    elder_voice (#288/#578): must be "caveman" or "sage", and "sage" is a
+    paid pack gated on the install allowlist. Runs AFTER the caller has
+    already confirmed the flag is known (it is in _STR_REPO_FLAGS)."""
+    voice = persona_flags.get("elder_voice")
+    if voice is None:
+        return
+    if voice not in ("caveman", "sage"):
+        raise ValueError(
+            f"elder_voice must be one of ('caveman', 'sage'), got {voice!r}"
+        )
+    if voice == "sage" and not is_install_allowlisted(install_id):
+        raise ValueError(
+            f"elder_voice='sage' requires an allowlisted (paid) "
+            f"installation; install {install_id} is not entitled"
+        )
+
+
+def _validate_list_repo_flags(persona_flags: dict[str, Any]) -> None:
+    """Per-flag validation for _LIST_REPO_FLAGS values, split out of
+    set_repo_config for the same reason as _validate_str_repo_flags: the
+    write path's branching should not grow with every new flag KIND.
+
+    Loops over _LIST_REPO_FLAGS rather than naming
+    guard_hygiene_dead_ref_patterns directly, so the next list-valued
+    flag needs no new branch here - only a new frozenset member. Each
+    supplied value must be a list of non-empty strings; guard_hygiene_
+    dead_ref_patterns (#778) is the first of these - decommissioned-infra
+    names that are the ONLY writer path into the store (they never
+    appear in this repo's source, see hygiene_watch.py's module
+    docstring), so a typo here is silent for the whole category rather
+    than caught by a linter."""
+    for flag in _LIST_REPO_FLAGS:
+        value = persona_flags.get(flag)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise ValueError(
+                f"{flag} must be a list of non-empty strings, got {value!r}"
+            )
+
+
 def set_repo_config(
     *,
     install_id: int,
@@ -330,7 +379,7 @@ def set_repo_config(
     # caller ever passed a query-string value through. String-valued flags
     # (_STR_REPO_FLAGS, e.g. elder_voice) and list-valued flags
     # (_LIST_REPO_FLAGS, e.g. guard_hygiene_dead_ref_patterns) are exempt
-    # here and validated by their own per-flag guard below.
+    # here and validated by their own per-kind helper below.
     non_bool = {
         flag: value for flag, value in persona_flags.items()
         if flag not in _STR_REPO_FLAGS
@@ -341,34 +390,8 @@ def set_repo_config(
         raise TypeError(
             f"set_repo_config() persona flags must be bool or None; got {non_bool!r}"
         )
-    # elder_voice (#288/#578): must be "caveman" or "sage", and "sage" is a
-    # paid pack gated on the install allowlist. This runs AFTER the flag is
-    # accepted (it is in _STR_REPO_FLAGS) so the gate is actually reachable.
-    voice = persona_flags.get("elder_voice")
-    if voice is not None:
-        if voice not in ("caveman", "sage"):
-            raise ValueError(
-                f"elder_voice must be one of ('caveman', 'sage'), got {voice!r}"
-            )
-        if voice == "sage" and not is_install_allowlisted(install_id):
-            raise ValueError(
-                f"elder_voice='sage' requires an allowlisted (paid) "
-                f"installation; install {install_id} is not entitled"
-            )
-    # guard_hygiene_dead_ref_patterns (#778): must be a list of non-empty
-    # strings when supplied. This is the ONLY writer of decommissioned
-    # infra names into the store - they never appear in this repo's source
-    # (see hygiene_watch.py's module docstring), so a typo here is silent
-    # for the whole category rather than caught by a linter.
-    patterns = persona_flags.get("guard_hygiene_dead_ref_patterns")
-    if patterns is not None:
-        if not isinstance(patterns, list) or not all(
-            isinstance(p, str) and p for p in patterns
-        ):
-            raise ValueError(
-                "guard_hygiene_dead_ref_patterns must be a list of non-empty "
-                f"strings, got {patterns!r}"
-            )
+    _validate_str_repo_flags(persona_flags, install_id)
+    _validate_list_repo_flags(persona_flags)
     now = datetime.now(timezone.utc).isoformat()
     updated_fields: dict[str, Any] = {
         flag: value
