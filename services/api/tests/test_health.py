@@ -29,7 +29,7 @@ def test_readyz_returns_200_with_status_ready(monkeypatch) -> None:
     import readiness
     monkeypatch.setattr(
         readiness, "check_readiness",
-        lambda: readiness.ReadinessReport(ready=True, deps={"ssm_kms": True, "postgres": True}),
+        lambda: readiness.ReadinessReport(ready=True, deps={"ssm_auth": True, "postgres": True}),
     )
     r = client.get("/readyz")
     assert r.status_code == 200

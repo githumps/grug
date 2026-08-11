@@ -499,7 +499,7 @@ def test_startup_check_exits_nonzero_when_deps_unreachable(monkeypatch):
     import readiness
     monkeypatch.setattr(
         readiness, "check_readiness",
-        lambda: readiness.ReadinessReport(ready=False, deps={"ssm_kms": False, "postgres": True}),
+        lambda: readiness.ReadinessReport(ready=False, deps={"ssm_auth": False, "postgres": True}),
     )
     with pytest.raises(SystemExit) as exc:
         consumer._startup_check()
@@ -510,7 +510,7 @@ def test_startup_check_passes_when_deps_reachable(monkeypatch):
     import readiness
     monkeypatch.setattr(
         readiness, "check_readiness",
-        lambda: readiness.ReadinessReport(ready=True, deps={"ssm_kms": True, "postgres": True}),
+        lambda: readiness.ReadinessReport(ready=True, deps={"ssm_auth": True, "postgres": True}),
     )
     consumer._startup_check()  # must not raise
 

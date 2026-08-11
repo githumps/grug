@@ -3,8 +3,9 @@
 `/readyz` must mean "this pod can do its job", not just "the process is up".
 A pod whose AWS credentials are broken (the 2026-06-14 deleted-key incident)
 still answered /livez 200, so k8s kept routing to it and a bad rollout
-completed. This module probes the CRITICAL dependencies - SSM+KMS (a
-SecureString read, which exercises AWS auth + KMS decrypt in one call) and
+completed. This module probes the CRITICAL dependencies - AWS auth (an
+UNDECRYPTED SSM parameter read, which exercises credentials, IAM and SSM
+reachability without billing a KMS request - see `_check_ssm_auth`) and
 Postgres (SELECT 1) - and the /readyz handlers return 503 when any is
 unreachable.
 
@@ -31,16 +32,20 @@ log = logging.getLogger("grug.readiness")
 
 # 5.0 -> 60.0 (infra#819). The old value was SHORTER than the kubelet's
 # 10s readinessProbe period, so the cache could never hit: every probe on
-# every pod did a fresh SecureString read, and `_check_ssm_kms` decrypts,
-# so each one billed a KMS request. Six pods x 6 probes/min was ~800k
-# KMS decrypts a month - measured as the single largest line on the AWS
-# bill, and CloudTrail attributed it to this role.
+# every pod did a fresh SecureString read, and the check decrypted, so each
+# one billed a KMS request. Six pods x 6 probes/min was ~800k KMS decrypts
+# a month - measured as the single largest line on the AWS bill, and
+# CloudTrail attributed it to this role.
 #
 # A cache TTL below the probe period is not a cache; it is a rename of
-# "no cache". 60s keeps the probe's actual purpose - catching a deleted
-# or invalid KMS key, and broken AWS auth - well within a minute, while
-# cutting the call volume ~6x. Keep this ABOVE the probe period in the
-# deployment manifests if that period ever changes.
+# "no cache". Keep this ABOVE the probe period in the deployment manifests
+# if that period ever changes.
+#
+# The TTL is no longer what protects the bill: `_check_ssm_auth` stopped
+# decrypting (infra#2431), so probes cost nothing at any TTL. Tuning this
+# number was never able to fit inside the KMS free tier anyway - see that
+# function's docstring for the arithmetic. It stays at 60s purely to keep
+# probe latency and SSM call volume sane.
 _TTL_SECONDS = float(os.environ.get("GRUG_READYZ_TTL_SECONDS", "60"))
 # Module-level single-slot cache. Mutated under uvicorn's effectively
 # serial probe cadence; a benign duplicate check at a TTL boundary is fine.
@@ -66,11 +71,31 @@ class ReadinessReport:
     deps: dict  # dependency name -> reachable bool
 
 
-def _check_ssm_kms() -> None:
-    """SecureString read: exercises AWS auth (catches a deleted/invalid key)
-    AND KMS decrypt. Probes a param the pod already reads, so no extra IAM."""
+def _check_ssm_auth() -> None:
+    """Exercises AWS credentials, IAM and SSM reachability - WITHOUT decrypting.
+
+    `WithDecryption=False` is the entire point (infra#2431). Reading a
+    SecureString with decryption bills a KMS request per call, and this runs on
+    every kubelet probe on every pod. The KMS free tier is 20,000 requests a
+    MONTH; 13 pods on a 10s probe with a 60s cache is ~19,000 a DAY, so the
+    probe alone was ~11x the entire monthly allowance. No cache TTL fixes that -
+    staying inside the free tier by tuning the TTL would need ~47 minutes, which
+    is not a readiness probe any more. So the decryption is removed instead of
+    tuned.
+
+    Reading the same SecureString with `WithDecryption=False` still returns the
+    (encrypted) parameter, so this continues to exercise exactly what the check
+    was built for after the 2026-06-14 incident: valid AWS credentials, the
+    `ssm:GetParameter` grant, and network reachability to SSM. It costs nothing -
+    Parameter Store standard reads are not metered.
+
+    What it deliberately NO LONGER catches: a deleted or disabled KMS key, since
+    that is the part that cost money to ask about. That failure is rare, is not
+    worth 13 pods asking every 10 seconds, and surfaces on the first real token
+    decrypt; alarm on KMS error metrics if it needs its own signal.
+    """
     name = os.environ.get("GRUG_READYZ_SSM_PROBE") or os.environ["GITHUB_APP_ID_SSM"]
-    _ssm.get_parameter(Name=name, WithDecryption=True)
+    _ssm.get_parameter(Name=name, WithDecryption=False)
 
 
 def _check_postgres() -> None:
@@ -99,7 +124,7 @@ def check_readiness(*, now=time.monotonic) -> ReadinessReport:
     if preview_mode():
         checks = {"postgres": _check_postgres}
     else:
-        checks = {"ssm_kms": _check_ssm_kms, "postgres": _check_postgres}
+        checks = {"ssm_auth": _check_ssm_auth, "postgres": _check_postgres}
     deps: dict[str, bool] = {}
     for name, fn in checks.items():
         try:
