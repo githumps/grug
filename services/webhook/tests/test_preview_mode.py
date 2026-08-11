@@ -37,7 +37,7 @@ def test_readiness_skips_ssm_in_preview(monkeypatch):
     monkeypatch.setenv("GRUG_DATABASE_URL", "postgresql://x/y")
     import readiness
     calls = []
-    monkeypatch.setattr(readiness, "_check_ssm_kms", lambda: calls.append("ssm"))
+    monkeypatch.setattr(readiness, "_check_ssm_auth", lambda: calls.append("ssm"))
     monkeypatch.setattr(readiness, "_check_postgres", lambda: calls.append("pg"))
     readiness._reset_cache()
     readiness.check_readiness()
