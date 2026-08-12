@@ -6,8 +6,12 @@ findings enables it explicitly - and one test pins the default-off contract.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
+
+import yaml
 
 from personas.code_reviewer.diff_parser import DiffHunk
 import personas.code_reviewer.lint as lint_mod
@@ -235,3 +239,52 @@ def test_finding_message_does_not_claim_fleet_adoption(monkeypatch):
     assert "noqa: S608" in out[0].message   # tells the author how to settle it
     assert out[0].severity == "high"
     assert out[0].rule_name == "lint-security"
+
+
+# --- production wiring: the env var + the binary in the image --------------
+#
+# Everything above tests the scanner LOGIC and was already green while the
+# source sat fully dead in prod (#707 follow-up, verified live 2026-08-09):
+# GRUG_LINT_EVIDENCE was absent from both k8s Deployments (so _ENABLED was
+# permanently False) AND ruff was not in the image (so even flipping the env
+# var alone would hit the FileNotFoundError path in scan_ruff). These parse
+# the REAL manifests/requirements - same pattern as test_pki_manifests.py -
+# so a future edit cannot silently drop either half of the wiring again.
+
+_ROOT = Path(__file__).resolve().parents[3]
+_K8S = _ROOT / "k8s"
+
+
+def _deployment_containers(manifest: str) -> list[dict]:
+    docs = [d for d in yaml.safe_load_all((_K8S / manifest).read_text()) if d]
+    (deploy,) = [d for d in docs if d.get("kind") == "Deployment"]
+    return deploy["spec"]["template"]["spec"]["containers"]
+
+
+def test_lint_evidence_enabled_on_both_review_workloads():
+    """Mirrors GRUG_SAST_ENGINE (#401), which IS present in both manifests -
+    the positive control proving the sibling scanner shipped correctly and
+    this one was simply forgotten. Without this, _ENABLED is False in every
+    pod regardless of how correct scan_ruff is."""
+    for manifest in ("webhook-deployment.yaml", "consumer-deployment.yaml"):
+        (container,) = _deployment_containers(manifest)
+        env = {e["name"]: e.get("value") for e in container.get("env", [])}
+        assert env.get("GRUG_LINT_EVIDENCE") == "ruff", (
+            f"{manifest}: GRUG_LINT_EVIDENCE=ruff missing - lint evidence "
+            "stays dead in prod even though the scanner is fully built"
+        )
+
+
+def test_ruff_binary_is_pinned_in_the_webhook_image():
+    """The other half of the same gap: enabling the env var alone still
+    hits scan_ruff's FileNotFoundError path (lint.py:277-284) unless ruff
+    ships in the image. Pinned, not bare, matching how semgrep is pinned
+    just above it in the same file - this repo ships requirements.txt
+    into the image while CI installs unpinned, so an unpinned tool can
+    behave differently in CI than in prod."""
+    req = (_ROOT / "services" / "webhook" / "requirements.txt").read_text()
+    line = next(
+        (ln for ln in req.splitlines() if ln.strip().startswith("ruff")), None
+    )
+    assert line is not None, "ruff missing from services/webhook/requirements.txt"
+    assert re.search(r"ruff[><=]=?[\d.]", line), f"ruff pin looks unpinned: {line!r}"
