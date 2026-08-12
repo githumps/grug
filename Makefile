@@ -15,7 +15,7 @@
 
 .PHONY: test webhook-test api-test pg-test pulumi-preview pulumi-up \
         tear-down rebuild smoke docker-build-webhook sast-benchmark \
-        review-latency
+        review-latency elder-eval
 
 # Admin seed values — the row (re)installed after a tear-down so the
 # allowlist gate works on the first PR after rebuild. NO DEFAULTS on
@@ -150,3 +150,19 @@ sast-benchmark:
 review-latency:
 	cd services/webhook && PYTHONPATH=../_shared uv run --with httpx \
 		python -m review_latency $(ARGS)
+
+# Elder replay eval harness (#361 slice 2, #537). Replays Elder over the
+# committed review-ledger corpus and scores catch-rate vs noise per class -
+# NOT a per-PR gate; makes REAL backend calls (free OpenRouter/Poolside
+# keys; sparkles/Cave needs the tailnet) - set GRUG_BENCH_{OPENROUTER,
+# POOLSIDE}_KEY and/or GRUG_BENCH_CAVE_URL+MODEL. Mirrors sast-benchmark
+# above; this harness had no make target before, which is part of why the
+# on-demand CI job (benchmark.elder-eval.yml) had a run count of zero.
+#   make elder-eval                # print report
+#   make elder-eval ARGS=--record  # write baseline.json
+#   make elder-eval ARGS=--check   # exit 1 on regression vs baseline
+# The pure corpus/scoring core is covered by `make webhook-test` (no LLM).
+elder-eval:
+	cd services/webhook && PYTHONPATH=../_shared uv run --with httpx --with pyjwt --with cryptography \
+		--with boto3 --with 'psycopg[binary,pool]' --with 'ddtrace>=3.5,<4' \
+		--with 'datadog-lambda>=6.107,<7' python -m elder_eval $(ARGS)
