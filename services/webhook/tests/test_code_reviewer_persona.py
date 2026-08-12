@@ -615,6 +615,44 @@ def test_with_degradation_folds_in_a_second_passs_partial_coverage() -> None:
     assert combined.coverage == deep_partial.coverage
 
 
+def test_with_degradation_uses_the_degraded_passs_coverage_not_the_clean_ones() -> None:
+    """Regression: an earlier draft kept `evaluation.coverage` whenever it
+    was non-None, which - when Tier-1 ITSELF ran a staged review that
+    completed cleanly (so it has its own real, complete `coverage`) - would
+    report Tier-1's "3/3 cohorts completed" on the SAME evaluation whose
+    `degraded_reason` names a gap that is actually in the deep arm's
+    different cohort plan. `coverage` must travel with whichever pass's
+    `degraded_reason` is being reported, never the other one's."""
+    tier1_clean_but_staged = CodeReviewEvaluation(
+        findings=(),
+        conclusion="success",
+        coverage=ReviewCoverage(
+            total_cohorts=3, completed_cohorts=3, failed_cohorts=(),
+            cohort_labels=("a", "b", "c"),
+        ),
+    )
+    deep_partial = CodeReviewEvaluation(
+        findings=(),
+        conclusion="neutral",
+        degraded_reason="partial_review",
+        coverage=ReviewCoverage(
+            total_cohorts=2, completed_cohorts=1, failed_cohorts=(2,),
+            cohort_labels=("x", "y"),
+        ),
+    )
+
+    combined = with_degradation(tier1_clean_but_staged, deep_partial)
+
+    assert combined.degraded_reason == "partial_review"
+    assert combined.coverage == deep_partial.coverage
+    assert combined.coverage.total_cohorts == 2, (
+        "coverage must be the DEGRADED pass's (deep arm's) own cohort "
+        "count, not the clean pass's - showing the clean pass's numbers "
+        "next to a partial_review reason misrepresents which pass has "
+        "the gap"
+    )
+
+
 def test_with_degradation_is_a_no_op_when_neither_pass_is_degraded() -> None:
     a = CodeReviewEvaluation(findings=(), conclusion="success")
     b = CodeReviewEvaluation(findings=(), conclusion="success")

@@ -258,7 +258,19 @@ def with_degradation(
     `other` here is the pass whose degradation might be missing from
     `evaluation`. If `evaluation` is already degraded, its reason wins
     (first-degradation-wins is arbitrary but stable; both are real). If
-    neither is degraded, this is a no-op. Pure - no IO."""
+    neither is degraded, this is a no-op.
+
+    `coverage` always travels WITH the `degraded_reason` that explains it -
+    both taken from `other`, never mixed with `evaluation`'s. `evaluation`
+    was clean (that's why this function did anything), so if it separately
+    ran its own staged review its `coverage` describes a COMPLETE pass; a
+    reader who sees `degraded_reason="partial_review"` next to that number
+    would see "3/3 cohorts completed" and reasonably read it as complete
+    coverage, when the actual gap - the thing degraded_reason is naming -
+    is in `other`'s own, different, cohort plan. Caught in review: an
+    earlier version kept `evaluation.coverage` whenever it was non-None,
+    which reported the wrong pass's numbers for exactly that case. Pure -
+    no IO."""
     if evaluation.degraded_reason or not other.degraded_reason:
         return evaluation
     return CodeReviewEvaluation(
@@ -266,7 +278,7 @@ def with_degradation(
         conclusion=_derive_conclusion(evaluation.findings, other.degraded_reason),
         dropped_hallucinations=evaluation.dropped_hallucinations,
         degraded_reason=other.degraded_reason,
-        coverage=evaluation.coverage if evaluation.coverage is not None else other.coverage,
+        coverage=other.coverage,
     )
 
 
