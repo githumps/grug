@@ -496,9 +496,12 @@ class LlmReviewResponse:
       - `"reviewed"`: at least one deep backend (the free-tier pair is
         best-effort) returned a parseable payload; findings merge whatever
         answered. `findings` may be empty (clean review). A staged review with
-        at least one failed cohort remains `reviewed` but carries a
-        `partial review: ...` error so the persona can publish valid findings
-        while forcing the check advisory. Always carries backend + model
+        at least one failed cohort, OR an arm whose generation hit its
+        max_tokens cap before finishing (`finish_reason=length`, grug#851),
+        remains `reviewed` but carries a `partial review: ...` error so the
+        persona can publish valid findings while forcing the check advisory -
+        an empty-but-truncated generation must never read the same as an
+        empty-and-genuinely-clean one. Always carries backend + model
         attribution.
       - `"parse_failed"`: LLM responded with non-JSON or prose. Caller
         posts an advisory check-run with the error.
@@ -712,12 +715,26 @@ def _cave_review_config(backend: Backend) -> "BackendConfig | None":
         return None
     if backend == Backend.CAVE_REASONER:
         model = os.getenv("GRUG_CAVE_REASONER_MODEL", _CAVE_REVIEW_REASONER_DEFAULT_MODEL)
+        # Disabled to match the judge's treatment of this SAME model
+        # (_cave_judge_config above) - Laguna's default long-form reasoning
+        # was never turned off here. Under a hard max_tokens cap plus a
+        # schema-constrained decoder, thinking can consume the whole budget
+        # before the decoder ever writes a finding, and a constrained decoder
+        # that runs out of room mid-thought can legally close out
+        # valid-but-empty JSON (`{"findings": []}`) - structurally identical
+        # to a genuinely clean review. grug#851 - the reasoner discovery arm
+        # silently returning an empty review indistinguishable from a clean
+        # one.
         # The HTTP client can time out before vLLM notices the disconnect.
-        # Keep deep reasoning enabled, but give the server its own hard stop so
-        # an abandoned review cannot monopolize the shared Laguna GPU.
+        # max_tokens stays as the server's own hard stop so an abandoned
+        # review still cannot monopolize the shared Laguna GPU - truncation
+        # (finish_reason="length") is now detected in `_run_review_arm` and
+        # surfaced as a degraded result rather than a clean pass, so the cap
+        # firing is no longer silent even when it does happen.
         extra_body = {
             "response_format": _CAVE_FINDINGS_RESPONSE_FORMAT,
             "max_tokens": 6_144,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
     else:
         model = os.getenv("GRUG_CAVE_REVIEW_MODEL", _CAVE_REVIEW_CODER_DEFAULT_MODEL)
@@ -1966,6 +1983,12 @@ class _SuccessfulReview:
     model: str
     findings: tuple[Finding, ...]
     review_span_context: Optional[dict]
+    # grug#851: this arm's generation hit max_tokens (finish_reason=length)
+    # before finishing. Findings are still kept as real, diff-anchored
+    # evidence (same policy as a partial-coverage cohort), but a merge that
+    # includes a truncated review must fold this into the final `error` via
+    # `_truncation_error`/`_partial_review_reason` -- never publish it clean.
+    truncated: bool = False
 
 
 _SEVERITY_RANK = {
@@ -2054,6 +2077,11 @@ def _partition_cohort_responses(
                     model=response.model_name,
                     findings=response.findings,
                     review_span_context=response.review_span_context,
+                    # `_review_reasoner_diff_once` only ever sets this prefix
+                    # via `_truncation_error` (grug#851) - a cohort call is
+                    # single-shot, never itself a cohort merge, so this
+                    # string cannot originate from any other cause here.
+                    truncated=response.error.startswith("partial review:"),
                 )
             )
         else:
@@ -2130,20 +2158,28 @@ def _log_partial_cohorts(
 
 
 def _partial_review_reason(
-    failed_indexes: Sequence[int], plan: ReviewPlan,
+    failed_indexes: Sequence[int],
+    plan: ReviewPlan,
+    truncated_indexes: Sequence[int] = (),
 ) -> str:
     """The `error` string that flags a cohort-merged review as partial.
 
     Must start with the literal `"partial review:"` - that prefix is what
     `personas.code_reviewer.persona.evaluate_diff` matches to set
     `degraded_reason="partial_review"` and force the check-run advisory.
-    Two independent causes fold into the SAME signal, because both mean
-    the identical thing to a reader: some ground was not walked.
+    THREE independent causes fold into the SAME signal, because all three
+    mean the identical thing to a reader: some ground was not walked.
       - `failed_indexes`: cohorts that RAN and failed (outage, unparseable).
       - `plan.truncated`: cohorts the packer planned but `max_cohorts`
         dropped before any of them ran - these never reach `responses` at
         all, so they would otherwise be invisible to this check (#813/#707).
-    Empty string only when neither happened - a genuinely complete pass.
+      - `truncated_indexes`: cohorts that RAN, parsed, and are counted as
+        successful (their findings are real, diff-anchored evidence), but
+        whose generation hit the reasoner's max_tokens cap before finishing
+        (`finish_reason=length`, grug#851) - the model may not have reasoned
+        about the rest of that cohort's diff.
+    Empty string only when none of the three happened - a genuinely
+    complete pass.
     """
     reasons: list[str] = []
     if failed_indexes:
@@ -2151,6 +2187,10 @@ def _partial_review_reason(
     if plan.truncated:
         dropped = plan.total_cohorts_planned - len(plan.cohorts)
         reasons.append(f"{dropped} cohort(s) dropped before running (budget)")
+    if truncated_indexes:
+        reasons.append(
+            f"cohorts {list(truncated_indexes)} hit the generation token cap"
+        )
     return f"partial review: {'; '.join(reasons)}" if reasons else ""
 
 
@@ -2169,6 +2209,16 @@ def _merge_cohort_responses(
         _log_partial_cohorts(
             failed_indexes, responses, installation_id, pr_context, coverage,
         )
+        # A truncated cohort counts as "successful" above (its findings are
+        # real, diff-anchored evidence, so `failed_indexes` must not swallow
+        # them) - but grug#851 means it must still surface as partial, not
+        # silently merge into a clean `error==""`.
+        truncated_indexes = [
+            index
+            for index, response in enumerate(responses, start=1)
+            if response.kind == "reviewed"
+            and response.error.startswith("partial review:")
+        ]
         return LlmReviewResponse(
             kind="reviewed",
             findings=_merge_review_findings(successful),
@@ -2177,7 +2227,7 @@ def _merge_cohort_responses(
             review_span_context=first.review_span_context,
             backends_used=backends,
             models_used=models,
-            error=_partial_review_reason(failed_indexes, plan),
+            error=_partial_review_reason(failed_indexes, plan, truncated_indexes),
             coverage=coverage,
         )
 
@@ -2499,6 +2549,9 @@ def _review_reasoner_diff_once(
             review_span_context=outcome.span_context,
             backends_used=(Backend.CAVE_REASONER,),
             models_used=(outcome.model,),
+            error=_truncation_error(
+                (Backend.CAVE_REASONER,) if outcome.truncated else (),
+            ),
         )
     if outcome.kind == "parse_failed":
         return LlmReviewResponse(
@@ -2648,6 +2701,35 @@ class _ArmOutcome:
     # composed last_error message) -- `first_parse_fail` downstream expects
     # this exact raw value, unpacked into `LlmReviewResponse.error`.
     parse_err: str = ""
+    # Only meaningful when kind == "success": the completion hit its
+    # max_tokens cap (`finish_reason == "length"`) before the model finished.
+    # A schema-constrained decoder cut off mid-thought can legally close out
+    # valid-but-incomplete JSON (e.g. `{"findings": []}`), structurally
+    # identical to a genuinely clean review -- grug#851. Callers must fold
+    # this into `LlmReviewResponse.error` via the SAME `"partial review: "`
+    # seam `_partial_review_reason` uses (see `evaluate_diff`'s
+    # `error[:15] == "partial review:"` check), never treat it as clean.
+    truncated: bool = False
+
+
+def _truncation_error(backends: Sequence["Backend"]) -> str:
+    """The `error` string that flags a truncated-but-parseable generation as
+    degraded, reusing the SAME `"partial review: ..."` seam
+    `_partial_review_reason` uses for cohort failures (PR #844) rather than
+    inventing a new `degraded_reason` vocabulary. `evaluate_diff` already
+    treats any `kind="reviewed"` response whose `error` starts with
+    `"partial review:"` as `degraded_reason="partial_review"` and forces
+    `conclusion` away from `"success"` via `_derive_conclusion` -- so every
+    downstream consumer of that label (board rendering, `is_partial_coverage`,
+    `worth_an_email`) keeps working unchanged. Empty when nothing truncated.
+    """
+    if not backends:
+        return ""
+    names = ", ".join(b.value for b in backends)
+    return (
+        f"partial review: {names} hit the generation token cap before "
+        "finishing (finish_reason=length)"
+    )
 
 
 def _run_review_arm(
@@ -2760,10 +2842,12 @@ def _run_review_arm(
             )
             body = {}
         content = ""
+        finish_reason = ""
         if isinstance(body, dict):
             choices = body.get("choices") or []
             if choices and isinstance(choices[0], dict):
                 content = (choices[0].get("message") or {}).get("content", "")
+                finish_reason = choices[0].get("finish_reason") or ""
         usage_metrics = _extract_usage_metrics(body)
         _llmobs_annotate(
             span=span,
@@ -2776,6 +2860,7 @@ def _run_review_arm(
                 "kind": "reviewed" if not err else (
                     "parse_failed" if resp.status_code == 200 else "http_error"
                 ),
+                "finish_reason": finish_reason,
             },
             metrics={
                 "latency_ms": _elapsed_ms(start_ns),
@@ -2789,9 +2874,27 @@ def _run_review_arm(
 
     if not err:
         resolved_model = model or config.model
+        # grug#851: a completion that hit its max_tokens cap
+        # (finish_reason="length") parses as valid JSON (the constrained
+        # decoder legally closes it out, e.g. `{"findings": []}`) but is NOT
+        # a complete review -- the model may not have reasoned about most of
+        # the diff. Flagged here so every caller folds it into
+        # `LlmReviewResponse.error` via the `"partial review: "` seam
+        # instead of letting it read as a clean pass.
+        truncated = finish_reason == "length"
+        if truncated:
+            log.warning(
+                "llm_response_truncated",
+                extra={
+                    "backend": backend.value,
+                    "model": resolved_model,
+                    "finish_reason": finish_reason,
+                    "finding_count": len(findings),
+                },
+            )
         return _ArmOutcome(
             backend=backend, kind="success", model=resolved_model,
-            findings=findings, span_context=span_context,
+            findings=findings, span_context=span_context, truncated=truncated,
         )
     if resp.status_code == 200:
         # 200 + parse failure — the LLM responded but the content wasn't
@@ -3114,6 +3217,7 @@ def _review_diff_dispatch(
                     replace(finding, origins=(origin,)) for finding in outcome.findings
                 ),
                 review_span_context=outcome.span_context,
+                truncated=outcome.truncated,
             ))
             if early_exit:
                 return LlmReviewResponse(
@@ -3124,6 +3228,7 @@ def _review_diff_dispatch(
                     review_span_context=outcome.span_context,
                     backends_used=(backend,),
                     models_used=(resolved_model,),
+                    error=_truncation_error((backend,) if outcome.truncated else ()),
                 )
             continue
         if outcome.kind == "parse_failed":
@@ -3305,6 +3410,9 @@ def _review_diff_dispatch(
             review_span_context=first.review_span_context,
             backends_used=tuple(review.backend for review in successes),
             models_used=tuple(review.model for review in successes),
+            error=_truncation_error(
+                tuple(review.backend for review in successes if review.truncated),
+            ),
         )
 
     # Every backend failed. Prefer the specific parse_failed kind (a backend

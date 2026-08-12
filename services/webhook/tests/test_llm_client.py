@@ -9,6 +9,7 @@ import pytest
 
 import llm_client as lc
 from llm_client import Backend, Finding, Hunk, LlmReviewResponse, review_diff
+from personas.code_reviewer.persona import evaluate_diff
 from review_pipeline import ReviewCohort, ReviewPlan
 
 
@@ -305,6 +306,37 @@ def test_merge_cohort_responses_stays_clean_when_the_plan_was_not_truncated() ->
     assert merged.error == ""
     assert merged.coverage.complete is True
     assert merged.coverage.fraction == 1.0
+
+
+def test_merge_cohort_responses_flags_a_truncated_cohort_as_partial() -> None:
+    """grug#851: a cohort whose OWN generation hit the token cap
+    (`_review_reasoner_diff_once` sets `error="partial review: ..."` via
+    `_truncation_error`) still counts as `successful` for merge purposes -
+    its findings are real, diff-anchored evidence - but the merge must not
+    silently drop that on the floor and report a clean `error==""` just
+    because every cohort technically "succeeded"."""
+    plan = ReviewPlan(cohorts=(_plan_cohort("a"), _plan_cohort("b")), total_diff_chars=10)
+    responses = [
+        LlmReviewResponse(
+            kind="reviewed", findings=(), backend_used=Backend.CAVE_REASONER,
+            model_name="m",
+            error="partial review: cave-reasoner hit the generation token "
+            "cap before finishing (finish_reason=length)",
+        ),
+        LlmReviewResponse(
+            kind="reviewed", findings=(), backend_used=Backend.CAVE_REASONER,
+            model_name="m",
+        ),
+    ]
+
+    merged = lc._merge_cohort_responses(responses, 1, None, plan)
+
+    assert merged.kind == "reviewed"
+    assert merged.error.startswith("partial review:"), (
+        f"error={merged.error!r} - a truncated cohort must read as partial"
+    )
+    assert "token cap" in merged.error
+    assert merged.coverage.complete is True  # both cohorts RAN and parsed
 
 
 # --- cohort retry -----------------------------------------------------------
@@ -904,6 +936,73 @@ def test_cave_reasoner_has_server_side_completion_budget() -> None:
     assert reasoner.extra_body["max_tokens"] == 6_144
     assert coder is not None
     assert "max_tokens" not in coder.extra_body
+
+
+def test_cave_reasoner_disables_default_thinking_like_the_judge() -> None:
+    """grug#851: the judge (_cave_judge_config) disables Laguna's default
+    long-form reasoning on this SAME model because it "turned this small call
+    into a five-minute constrained-decoding pass and triggered xgrammar FSM
+    errors live" - that mitigation was applied to the judge and never to the
+    reasoner discovery arm. Under the reasoner's hard max_tokens cap plus its
+    schema-constrained decoder, unchecked thinking can consume the whole
+    budget before a single finding is written, and the decoder can legally
+    close out valid-but-empty JSON when it runs out of room - a silent,
+    indistinguishable-from-clean failure. Must match the judge's config."""
+    reasoner = lc._cave_review_config(Backend.CAVE_REASONER)
+    judge = lc._cave_judge_config()
+
+    assert reasoner is not None
+    assert judge is not None
+    assert reasoner.extra_body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert reasoner.extra_body["chat_template_kwargs"] == judge.extra_body["chat_template_kwargs"]
+    # The coder arm's decode budget is short enough that this mitigation was
+    # never needed there; scoping the assertion to the reasoner only.
+    coder = lc._cave_review_config(Backend.CAVE)
+    assert coder is not None
+    assert "chat_template_kwargs" not in coder.extra_body
+
+
+def test_review_reasoner_diff_truncated_generation_is_not_a_clean_pass(monkeypatch) -> None:
+    """grug#851: `finish_reason` is never read anywhere in `services/` on
+    main - a generation cut off at the reasoner's max_tokens cap parses as a
+    complete, clean review (a schema-constrained decoder that runs out of
+    budget mid-thought can legally close out `{"findings": []}`). That must
+    not be indistinguishable from a genuinely clean pass: the check-run
+    conclusion must never read "Elder clear - no markings" with `success`
+    over ground the reasoner never actually walked.
+
+    MUST fail on main (`out.error == ""`, `evaluation.conclusion ==
+    "success"`) and pass after the fix (`out.error` starts with
+    `"partial review:"`, `evaluation.conclusion == "neutral"`) - routed
+    through the SAME `degraded_reason`/`_derive_conclusion` seam PR #844
+    built for cohort partial coverage, not a new vocabulary term.
+    """
+    monkeypatch.setenv("GRUG_CAVE_GATEWAY_URL", "http://cave.test")
+    body = _openai_json_response('{"findings": []}')
+    body["choices"][0]["finish_reason"] = "length"
+    response = httpx.Response(200, json=body)
+
+    with patch.object(httpx, "post", return_value=response):
+        out = lc.review_reasoner_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "reviewed"
+    assert out.findings == ()
+    assert out.error.startswith("partial review:"), (
+        f"error={out.error!r} - a truncated (finish_reason=length) "
+        "generation must read as partial, never as a silent clean pass"
+    )
+
+    # Full round trip through the persona layer: no findings and no real
+    # hunks were needed for the anti-hallucination filter here (findings is
+    # already empty), so an empty hunks tuple isolates the assertion to the
+    # exact thing #851 broke - conclusion must never be "success".
+    evaluation = evaluate_diff((), out)
+    assert evaluation.degraded_reason == "partial_review"
+    assert evaluation.conclusion == "neutral", (
+        f"conclusion={evaluation.conclusion!r} - a truncated generation must "
+        'never surface as "Elder clear - no markings" with a success '
+        "conclusion"
+    )
 
 
 def test_openrouter_review_uses_opus_with_high_adaptive_reasoning() -> None:
