@@ -26,6 +26,27 @@ across repos; `--ab-practices` and
 `--ab-few-shot` print their ON-vs-OFF deltas separately - the #527 and
 #538 measurements. An empty derived block skips its ON arm loudly (an
 A/A replay printed as a delta would be a fabricated result).
+
+WITHOUT `--production`, this measures ONE monolithic backend call
+(`sast_benchmark.backends`) - never `review_diff` - so it skips the
+cohort planner, the Cave coder/reasoner arms, the judge/verify/refute
+gates, and the publication gates that decide what actually posts. Every
+printed report says so (`_methodology_note`) precisely because a bare
+"catch rate" with no such label is how a bench-mode number (e.g. the 0.16
+quoted in PR #846) gets read as an Elder number.
+
+`--production` drives the SHIPPED `review_diff` pipeline instead, so its
+number reflects what the deployed reviewer actually does. It needs the
+Cave gateway (GRUG_BENCH_CAVE_URL, a private tailnet address) reachable -
+`review_diff`'s coder arm always calls Cave first, falling back to
+OpenRouter/Poolside only as a bounded overload fallback, never as a
+substitute for it. Without network access to Cave (e.g. this repo's local
+dev/CI environment outside the tailnet), every case's `review()` call
+raises or times out and the run reports `all_errored`, never a fabricated
+score - that is the honest-failure behavior working as designed, not a
+bug. `benchmark.elder-eval.yml`'s `workflow_dispatch` inputs do not
+currently offer a production mode (`mode` is record/check/report against
+the bench backends only) - wiring that dispatch path is still open.
 """
 
 from __future__ import annotations
@@ -53,13 +74,46 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_JSONL = _REPO_ROOT / "logs" / "review-ledger.jsonl"
 
 
+def _methodology_note(name: str) -> str:
+    """A one-line self-description of what `name`'s number actually
+    measures. The reported "overall catch 0.16" that circulated as if it
+    were Elder's number came from the DEFAULT bench mode - one monolithic
+    backend call that never touches `review_diff` - printed with no such
+    label. Whatever this harness prints must say which pipeline produced
+    it."""
+    if name.startswith("production"):
+        gates = "cohort planner, Cave coder+reasoner arms, judge/verify/refute"
+        if "published" in name:
+            gates += ", publication gates"
+        return (
+            f"  methodology: shipped review_diff pipeline ({gates}) - "
+            "requires the private Cave gateway to be reachable; this is "
+            "what actually posts to a PR"
+        )
+    return (
+        "  methodology: ONE monolithic backend call via "
+        "sast_benchmark.backends - bypasses the deployed pipeline (cohort "
+        "planner, Cave coder+reasoner arms, judge/verify/refute, "
+        "publication gates); NOT comparable to a --production run"
+    )
+
+
 def _print_report(name: str, report: EvalReport) -> None:
     print(f"\n=== backend: {name} ===")
+    print(_methodology_note(name))
     print(
         f"  overall catch: {report.overall_catch:.2f}   "
         f"noise: {report.noise_rate:.2f}   "
         f"cases scored: {report.cases_scored}"
     )
+    if report.cases_scored:
+        unanchored = report.cases_scored - len(report.anchored_cases)
+        print(
+            f"  anchored to pre-fix snapshot (#545): {len(report.anchored_cases)}/"
+            f"{report.cases_scored} scored cases; {unanchored} replayed the "
+            "PR's FINAL merged diff instead (KNOWN METHODOLOGY BIAS - "
+            "see specs/DESIGN.md)"
+        )
     for cls in sorted(report.per_class_catch):
         print(f"    {cls:28s} catch={report.per_class_catch[cls]:.2f}")
     if report.errored_cases:

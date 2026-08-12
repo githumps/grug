@@ -37,6 +37,20 @@ def normalize_class(label: str) -> str:
     return _NORM_RE.sub("-", label.lower()).strip("-")
 
 
+# Abbreviated-to-full git SHA range. Guards against the `commit` field's
+# free-text history ('sed-sim-test', 'golang:1.26', '-', ...) - see #545 and
+# the ledger row schema note in `ledger.py`. Real hex SHAs never collide with
+# that junk (it always carries a char outside [0-9a-f] or the wrong length).
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _looks_like_sha(value: str | None) -> bool:
+    """Best-effort git-sha shape check, not a GitHub round-trip - the real
+    validation is the API call failing loudly (falls back to unanchored,
+    #545)."""
+    return bool(value) and bool(_SHA_RE.fullmatch(value.strip().lower()))
+
+
 ELDER_CLASSES: frozenset[str] = frozenset(normalize_class(c) for c in _BUG_CLASSES)
 
 # Ledger vocabulary -> Elder vocabulary, where the words differ but the
@@ -86,6 +100,11 @@ class EvalCase:
     false-positive (a typo or a new verdict value) - excluded from
     scoring, but COUNTED so a mislabeled corpus cannot silently yield an
     empty eval.
+
+    `anchor_head_sha` / `anchor_fix_commit` (#545): how to replay this case
+    against the PRE-FIX snapshot instead of the PR's final merged diff -
+    see `anchored`. At most one is set; `anchor_head_sha` wins when both a
+    row's `head_sha` and another row's `commit` would qualify.
     """
 
     repo: str
@@ -94,6 +113,8 @@ class EvalCase:
     fp_only_classes: frozenset[str]
     out_of_taxonomy: dict[str, int]
     unknown_verdicts: dict[str, int]
+    anchor_head_sha: str | None = None
+    anchor_fix_commit: str | None = None
 
     @property
     def case_id(self) -> str:
@@ -103,6 +124,57 @@ class EvalCase:
     def scorable(self) -> bool:
         """Worth an LLM call: contributes to catch or noise denominators."""
         return bool(self.expected_classes or self.fp_only_classes)
+
+    @property
+    def anchored(self) -> bool:
+        """True when a pre-fix snapshot is derivable for this case (#545):
+        either a row recorded the reviewed head SHA directly, or a row's
+        `commit` parses as a fix-commit SHA whose PARENT stands in for it.
+        False means only the PR's final merged diff is available - the
+        KNOWN METHODOLOGY BIAS documented in specs/DESIGN.md: a `fixed`
+        row replayed there may look like a miss when Elder correctly saw
+        nothing wrong in already-fixed code."""
+        return bool(self.anchor_head_sha or self.anchor_fix_commit)
+
+
+def _case_anchor(rows: list[LedgerRow]) -> tuple[str | None, str | None]:
+    """(anchor_head_sha, anchor_fix_commit) for one (repo, pr) group (#545).
+
+    First sha-shaped `head_sha` seen wins; only when NO row has one does a
+    sha-shaped `commit` (historical rows: the FIX commit) stand in. Rows
+    disagreeing on the value are logged, not raised - `elder_eval` must
+    keep running on a messy corpus, it just cannot promise which of the
+    disagreeing SHAs it picked."""
+    head_sha: str | None = None
+    fix_commit: str | None = None
+    head_sha_conflict = False
+    fix_commit_conflict = False
+    for r in rows:
+        if _looks_like_sha(r.head_sha):
+            candidate = r.head_sha.strip().lower()
+            if head_sha is None:
+                head_sha = candidate
+            elif head_sha != candidate:
+                head_sha_conflict = True
+        elif _looks_like_sha(r.commit):
+            candidate = r.commit.strip().lower()
+            if fix_commit is None:
+                fix_commit = candidate
+            elif fix_commit != candidate:
+                fix_commit_conflict = True
+    if head_sha_conflict:
+        log.warning(
+            "eval_case_head_sha_conflict repo=%s pr=%s using=%s",
+            rows[0].repo, rows[0].pr, head_sha,
+        )
+    if fix_commit_conflict:
+        log.warning(
+            "eval_case_fix_commit_conflict repo=%s pr=%s using=%s",
+            rows[0].repo, rows[0].pr, fix_commit,
+        )
+    # An explicit reviewed head always outranks a derived fix-commit, even
+    # if some other row on the same PR only carries the latter.
+    return head_sha, (fix_commit if head_sha is None else None)
 
 
 def build_cases(rows: Iterable[LedgerRow]) -> tuple[EvalCase, ...]:
@@ -171,6 +243,7 @@ def build_cases(rows: Iterable[LedgerRow]) -> tuple[EvalCase, ...]:
                 # must not vanish - a mislabeled corpus that yields zero
                 # expected cells needs to say WHY.
                 unknown_verdicts[r.verdict] += 1
+        anchor_head_sha, anchor_fix_commit = _case_anchor(grouped[(repo, pr)])
         cases.append(
             EvalCase(
                 repo=repo,
@@ -179,6 +252,8 @@ def build_cases(rows: Iterable[LedgerRow]) -> tuple[EvalCase, ...]:
                 # A class both accepted AND FP'd on the same PR is not
                 # fp-only - emitting it there is a legitimate catch.
                 fp_only_classes=frozenset(fp_elder - accepted_elder),
+                anchor_head_sha=anchor_head_sha,
+                anchor_fix_commit=anchor_fix_commit,
                 out_of_taxonomy=dict(out_of_taxonomy),
                 unknown_verdicts=dict(unknown_verdicts),
             )

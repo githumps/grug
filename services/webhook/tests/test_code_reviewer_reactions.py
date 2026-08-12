@@ -191,6 +191,11 @@ def test_trusted_reaction_refreshes_ledger_practices_and_examples(monkeypatch):
     assert rows[0]["verdict"] == "declined"
     assert rows[0]["class"] == "null-deref"
     assert rows[0]["evidence"] == "github-review-comment:5"
+    # #545: the reviewed PR-head SHA lands under its own explicit field
+    # (not just the legacy `commit`) so the eval replay can trust it as
+    # "reviewed head" without guessing at `commit`'s meaning.
+    assert rows[0]["commit"] == "abc123"
+    assert rows[0]["head_sha"] == "abc123"
     assert practices[0][0]["finding_class"] == "null-deref"
     assert exemplars[0][0]["class"] == "null-deref"
 

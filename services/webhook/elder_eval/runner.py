@@ -8,9 +8,18 @@ real behavior, never a reimplementation's.
 
 This module makes network calls at runtime - `fetch_pr_diff` and live
 `run_case` never run in the per-PR CI suite. Its pure pieces
-(`classes_for_findings`, `diff_to_hunks`, `run_eval` with an injected
-fetch) ARE unit-tested there. Live runs happen only from the on-demand
+(`classes_for_findings`, `diff_to_hunks`, `run_eval`/`run_production_eval`/
+`diff_for_case` with injected fetch + anchor-resolution callables) ARE
+unit-tested there. Live runs happen only from the on-demand
 `benchmark.elder-eval.yml` job or a manual `python -m elder_eval`.
+
+`diff_for_case` (#545) resolves each case's pre-fix snapshot when the
+corpus row(s) carry a usable anchor (`EvalCase.anchored`) - see
+`corpus.py` and `resolve_anchor_sha`/`fetch_anchored_diff` below. It is
+the follow-up to the KNOWN METHODOLOGY BIAS in specs/DESIGN.md: without
+it, every case replays the PR's FINAL merged diff, so a `fixed` ledger
+row whose bug was fixed inside that same PR is graded against code where
+the bug no longer exists.
 """
 
 from __future__ import annotations
@@ -172,6 +181,113 @@ def fetch_pr_diff(repo: str, pr: int, token: str = "") -> str:
     return resp.text
 
 
+def _github_headers(token: str, accept: str) -> dict[str, str]:
+    headers = {"Accept": accept}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def fetch_pr_base_sha(repo: str, pr: int, token: str = "") -> str:
+    """The PR's base-branch SHA (#545) - the immutable start point for an
+    anchored compare. A separate JSON call from `fetch_pr_diff`: that one
+    requests the diff media type and returns text, this needs the `base`
+    object out of the default JSON representation."""
+    resp = httpx.get(
+        f"{_GITHUB_API}/repos/{repo}/pulls/{pr}",
+        headers=_github_headers(token, "application/vnd.github+json"),
+        timeout=_DIFF_TIMEOUT_SECONDS,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.json()["base"]["sha"]
+
+
+def fetch_commit_parent_sha(repo: str, commit_sha: str, token: str = "") -> str | None:
+    """The first parent of `commit_sha` (#545), or None if it has none (a
+    root commit - degenerate, cannot derive a pre-fix state from it). Used
+    to turn a historical ledger row's `commit` (the FIX commit, per
+    `EvalCase.anchor_fix_commit`) into the pre-fix snapshot: the state just
+    before the fix landed still carries the bug."""
+    resp = httpx.get(
+        f"{_GITHUB_API}/repos/{repo}/commits/{commit_sha}",
+        headers=_github_headers(token, "application/vnd.github+json"),
+        timeout=_DIFF_TIMEOUT_SECONDS,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    parents = resp.json().get("parents") or []
+    return parents[0]["sha"] if parents else None
+
+
+def resolve_anchor_sha(
+    case: EvalCase,
+    token: str = "",
+    *,
+    fetch_parent: Callable[[str, str, str], str | None] = fetch_commit_parent_sha,
+) -> str | None:
+    """The SHA to diff the PR's base against for case (#545), or None when
+    the case carries no usable anchor (final-diff replay, unanchored)."""
+    if case.anchor_head_sha:
+        return case.anchor_head_sha
+    if case.anchor_fix_commit:
+        return fetch_parent(case.repo, case.anchor_fix_commit, token)
+    return None
+
+
+def fetch_anchored_diff(
+    repo: str,
+    pr: int,
+    anchor_sha: str,
+    token: str = "",
+    *,
+    fetch_base: Callable[[str, int, str], str] = fetch_pr_base_sha,
+) -> str:
+    """The unified diff from the PR's base to `anchor_sha` (#545) - the
+    pre-fix snapshot the finding was actually recorded against, immutable
+    (a real commit SHA, unlike the PR's mutable current head)."""
+    base_sha = fetch_base(repo, pr, token)
+    resp = httpx.get(
+        f"{_GITHUB_API}/repos/{repo}/compare/{base_sha}...{anchor_sha}",
+        headers=_github_headers(token, "application/vnd.github.v3.diff"),
+        timeout=_DIFF_TIMEOUT_SECONDS,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.text
+
+
+def diff_for_case(
+    case: EvalCase,
+    token: str = "",
+    *,
+    fetch_final: Callable[[str, int, str], str] = fetch_pr_diff,
+    resolve_anchor: Callable[..., str | None] = resolve_anchor_sha,
+    fetch_anchored: Callable[..., str] = fetch_anchored_diff,
+) -> tuple[str, bool]:
+    """The diff to replay `case` against, plus whether it is anchored to the
+    pre-fix snapshot (#545).
+
+    An anchored case tries `base...anchor_sha` first - the state the
+    finding was actually recorded against, still carrying the bug. Anything
+    that keeps that from resolving (no usable anchor on the case, the
+    fix-commit's parent lookup fails, the compare call fails) falls back to
+    `fetch_final` (the PR's current merged diff) and reports unanchored -
+    resolution trouble must never turn a replayable case into an errored
+    one, it only widens the KNOWN METHODOLOGY BIAS slice honestly."""
+    if case.anchored:
+        try:
+            anchor_sha = resolve_anchor(case, token)
+            if anchor_sha:
+                return fetch_anchored(case.repo, case.pr, anchor_sha, token), True
+        except Exception as e:  # noqa: BLE001 - fall back, never abort the case
+            log.warning(
+                "eval_case_anchor_resolution_failed case=%s kind=%s",
+                case.case_id, type(e).__name__,
+            )
+    return fetch_final(case.repo, case.pr, token), False
+
+
 def run_case(
     backend: BenchBackend,
     case: EvalCase,
@@ -179,10 +295,14 @@ def run_case(
     *,
     team_practices: str = "",
     few_shot: str = "",
+    anchored: bool = False,
 ) -> CaseReplay:
     """Replay ONE case. Any failure (empty/unparseable diff, transport,
     parse) returns errored=True + logs - it must never abort the sweep, and
-    a non-run must never read as "Elder found nothing" (honest-zero rule)."""
+    a non-run must never read as "Elder found nothing" (honest-zero rule).
+    `anchored` (#545) just rides straight into the CaseReplay - the caller
+    (`run_eval`, via `diff_for_case`) already decided whether `diff_text`
+    is the pre-fix snapshot or the PR's final merged diff."""
     try:
         hunks, truncated = bounded_hunks(diff_text)
         if truncated:
@@ -218,6 +338,7 @@ def run_case(
         emitted=classes_for_findings(findings),
         errored=False,
         truncated=truncated,
+        anchored=anchored,
     )
 
 
@@ -229,6 +350,7 @@ def run_production_case(
     published: bool = False,
     grade: Callable[..., tuple[FindingJudgement, ...]] = grade_findings,
     refute: Callable[..., tuple[FindingJudgement, ...]] = refute_findings,
+    anchored: bool = False,
 ) -> CaseReplay:
     """Replay one case through production's staged discovery path.
 
@@ -236,7 +358,7 @@ def run_production_case(
     parsed hunk to ``review_diff`` so its real cohort planner, specialist
     routing, merge, and coverage contract are measured. Partial coverage is a
     non-run for scoring: its apparent misses cannot honestly be compared with
-    a complete baseline.
+    a complete baseline. `anchored` (#545): see `run_case`.
     """
     try:
         diff_hunks = parse_diff(diff_text)
@@ -285,6 +407,7 @@ def run_production_case(
         case_id=case.case_id,
         emitted=classes_for_findings(findings),
         errored=False,
+        anchored=anchored,
     )
 
 
@@ -296,11 +419,14 @@ def run_production_eval(
     review: Callable[..., LlmReviewResponse] = review_diff,
     published: bool = False,
 ) -> dict[str, CaseReplay]:
-    """Replay the corpus through the shipped staged discovery pipeline."""
+    """Replay the corpus through the shipped staged discovery pipeline.
+    `fetch` is the FINAL-diff fallback (injectable for tests, same as
+    `run_eval`); `diff_for_case` (#545) tries each case's anchored pre-fix
+    snapshot first and falls back to it."""
     replays: dict[str, CaseReplay] = {}
     for case in cases:
         try:
-            diff = fetch(case.repo, case.pr, token)
+            diff, anchored = diff_for_case(case, token, fetch_final=fetch)
         except Exception as e:  # noqa: BLE001 - fetch failure is an errored case
             log.warning(
                 "eval_diff_fetch_failed case=%s kind=%s",
@@ -314,7 +440,7 @@ def run_production_eval(
             )
             continue
         replays[case.case_id] = run_production_case(
-            case, diff, review=review, published=published
+            case, diff, review=review, published=published, anchored=anchored,
         )
     return replays
 
@@ -328,13 +454,16 @@ def run_eval(
     team_practices: str = "",
     few_shot: str = "",
 ) -> dict[str, CaseReplay]:
-    """Replay the whole corpus through one backend. `fetch` is injectable
-    for tests. Returns case_id -> CaseReplay for `scoring.score`."""
+    """Replay the whole corpus through one backend. `fetch` is the
+    FINAL-diff fallback and is injectable for tests; `diff_for_case` (#545)
+    tries each case's anchored pre-fix snapshot first and falls back to it
+    on any resolution trouble. Returns case_id -> CaseReplay for
+    `scoring.score`."""
     log.info("eval_start backend=%s cases=%d", backend.name, len(cases))
     replays: dict[str, CaseReplay] = {}
     for case in cases:
         try:
-            diff = fetch(case.repo, case.pr, token)
+            diff, anchored = diff_for_case(case, token, fetch_final=fetch)
         except httpx.HTTPStatusError as e:
             # Transient (401/403/429: auth or rate limit - the rest of the
             # sweep is probably doomed too) vs PERMANENT (404: the corpus
@@ -371,7 +500,7 @@ def run_eval(
             continue
         replays[case.case_id] = run_case(
             backend, case, diff, team_practices=team_practices,
-            few_shot=few_shot,
+            few_shot=few_shot, anchored=anchored,
         )
     errored = sum(1 for r in replays.values() if r.errored)
     if errored:

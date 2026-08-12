@@ -2,9 +2,18 @@
 
 The operator's pipeline emits one row per review finding into
 `logs/review-ledger.jsonl`: {ts, repo, pr, reviewer, severity, class,
-finding, verdict, commit, evidence}. `verdict` is the ground-truth label
-- `fixed` / `declined` (a real finding acted on or consciously kept) vs
-`false-positive` (the reviewer was wrong).
+finding, verdict, commit, evidence, head_sha}. `verdict` is the
+ground-truth label - `fixed` / `declined` (a real finding acted on or
+consciously kept) vs `false-positive` (the reviewer was wrong).
+
+`head_sha` (#545, optional): the full PR-head SHA the finding was actually
+recorded against - the pre-fix snapshot, still carrying the bug. The
+`_record_reaction_learning` writer (`personas.code_reviewer.reactions`)
+populates it from the same `CommentRecord.head_sha` it already stamps onto
+`commit` (that field predates this one and stays for display continuity;
+`head_sha` is the one the eval replay trusts). Historical rows written
+before #545 lack it - `elder_eval.corpus` falls back to treating `commit`
+as a FIX commit sha and replaying its parent (see `corpus.EvalCase.anchored`).
 
 This module is the PURE corpus layer: parse rows, and derive the two
 aggregations the rest of the learning loop consumes -
@@ -56,6 +65,9 @@ class LedgerRow:
     evidence: str = ""
     ts: str = ""
     commit: str | None = None
+    # #545: the reviewed PR-head SHA, when the writer captured it directly
+    # (see module docstring). Optional - most historical rows predate it.
+    head_sha: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -88,6 +100,7 @@ def parse_row(d: dict) -> LedgerRow | None:
             evidence=str(d.get("evidence", "")),
             ts=str(d.get("ts", "")),
             commit=d.get("commit"),
+            head_sha=d.get("head_sha"),
         )
     except (KeyError, ValueError, TypeError):
         return None
