@@ -9,6 +9,7 @@ import pytest
 
 import llm_client as lc
 from llm_client import Backend, Finding, Hunk, LlmReviewResponse, review_diff
+from review_pipeline import ReviewCohort, ReviewPlan
 
 
 @pytest.fixture(autouse=True)
@@ -237,6 +238,73 @@ def test_staged_scheduler_marks_unstarted_cohorts_partial_when_budget_is_low() -
     assert responses[1].kind == "all_failed"
     assert responses[1].error == "cohort skipped: staged review budget exhausted"
     assert responses[2].error == "cohort skipped: staged review budget exhausted"
+
+
+# --- #813/#707: cohorts dropped by max_cohorts BEFORE any of them ran ------
+#
+# `_run_staged_cohorts` (above) synthesizes explicit `all_failed` responses
+# for cohorts skipped mid-run, so they correctly become `failed_indexes`.
+# But `max_cohorts` truncation happens earlier, inside `plan_review` itself
+# - those cohorts never reach `_run_staged_cohorts` at all, so they were
+# invisible to `_merge_cohort_responses` until `ReviewPlan.total_cohorts_
+# planned` existed to carry the true count through.
+
+
+def _plan_cohort(label: str) -> ReviewCohort:
+    return ReviewCohort(
+        label=label, hunk_indexes=(0,), paths=(f"{label}.py",),
+        diff_chars=10, oversized=False, layers=("implementation",),
+    )
+
+
+def test_merge_cohort_responses_flags_a_truncated_plan_as_partial() -> None:
+    """2 cohorts ran and both succeeded, but the plan was for 5 - 3 were
+    dropped by `max_cohorts` before they ever ran. Must still read as a
+    partial review: MUST fail on main (error=="", coverage.complete==True)
+    and pass after the fix."""
+    plan = ReviewPlan(
+        cohorts=(_plan_cohort("a"), _plan_cohort("b")),
+        total_diff_chars=100,
+        total_cohorts_planned=5,
+    )
+    responses = [
+        LlmReviewResponse(
+            kind="reviewed", findings=(), backend_used=Backend.POOLSIDE,
+            model_name="m",
+        ),
+        LlmReviewResponse(
+            kind="reviewed", findings=(), backend_used=Backend.POOLSIDE,
+            model_name="m",
+        ),
+    ]
+
+    merged = lc._merge_cohort_responses(responses, 1, None, plan)
+
+    assert merged.kind == "reviewed"
+    assert merged.error.startswith("partial review:"), (
+        f"error={merged.error!r} - a truncated plan must read as partial"
+    )
+    assert "dropped before running" in merged.error
+    assert merged.coverage is not None
+    assert merged.coverage.total_cohorts == 5
+    assert merged.coverage.complete is False
+    assert merged.coverage.fraction == 2 / 5
+
+
+def test_merge_cohort_responses_stays_clean_when_the_plan_was_not_truncated() -> None:
+    plan = ReviewPlan(cohorts=(_plan_cohort("a"),), total_diff_chars=10)
+    responses = [
+        LlmReviewResponse(
+            kind="reviewed", findings=(), backend_used=Backend.POOLSIDE,
+            model_name="m",
+        ),
+    ]
+
+    merged = lc._merge_cohort_responses(responses, 1, None, plan)
+
+    assert merged.error == ""
+    assert merged.coverage.complete is True
+    assert merged.coverage.fraction == 1.0
 
 
 # --- cohort retry -----------------------------------------------------------

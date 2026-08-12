@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-
-from review_pipeline import plan_review, render_review_map
+from review_pipeline import ReviewCoverage, plan_review, render_review_map
 
 
 @dataclass(frozen=True)
@@ -216,3 +215,63 @@ def test_non_positive_cohort_cap_is_rejected() -> None:
     # nothing - fail loudly like the other planner budgets do.
     with pytest.raises(ValueError):
         plan_review(_many_areas(4), max_cohort_chars=100, max_cohorts=0)
+
+
+# --- #813/#707: truncated plans must say so in a NUMBER, not just prose ----
+
+
+def test_truncated_plan_reports_the_true_planned_total() -> None:
+    """`total_cohorts_planned` is what the packer WOULD have run - kept +
+    dropped - not `len(cohorts)`. A caller deriving coverage only from
+    `len(cohorts)` cannot tell "reviewed everything" from "reviewed
+    everything it was allowed to start"."""
+    plan = plan_review(_many_areas(8), max_cohort_chars=100, max_cohorts=3)
+
+    assert len(plan.cohorts) == 3
+    assert plan.total_cohorts_planned == 8
+    assert plan.truncated is True
+
+
+def test_untruncated_plan_total_matches_cohort_count() -> None:
+    plan = plan_review(_many_areas(3), max_cohort_chars=100, max_cohorts=3)
+
+    assert plan.total_cohorts_planned == len(plan.cohorts) == 3
+    assert plan.truncated is False
+
+
+def test_single_cohort_plan_is_never_truncated() -> None:
+    plan = plan_review([_Hunk("src/a.py", "a" * 20)], max_cohort_chars=100)
+
+    assert plan.total_cohorts_planned == 1
+    assert plan.truncated is False
+
+
+def test_empty_diff_plan_is_never_truncated() -> None:
+    plan = plan_review([], max_cohort_chars=100)
+
+    assert plan.cohorts == ()
+    assert plan.total_cohorts_planned == 0
+    assert plan.truncated is False
+
+
+def test_coverage_fraction_is_a_number_not_a_mood() -> None:
+    """(#645 eval harness) `fraction` is the one field a harness can chart
+    over time without parsing board prose."""
+    full = ReviewCoverage(
+        total_cohorts=4, completed_cohorts=4, failed_cohorts=(),
+        cohort_labels=("a", "b", "c", "d"),
+    )
+    assert full.fraction == 1.0
+    assert full.complete is True
+
+    half = ReviewCoverage(
+        total_cohorts=4, completed_cohorts=2, failed_cohorts=(3, 4),
+        cohort_labels=("a", "b", "c", "d"),
+    )
+    assert half.fraction == 0.5
+    assert half.complete is False
+
+    empty = ReviewCoverage(
+        total_cohorts=0, completed_cohorts=0, failed_cohorts=(), cohort_labels=(),
+    )
+    assert empty.fraction == 1.0  # nothing planned covers all of nothing

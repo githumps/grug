@@ -14,6 +14,7 @@ Why a hand-rolled parser and not unidiff/pypatch:
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -128,6 +129,87 @@ def split_reviewable_hunks(
         else:
             kept.append(h)
     return tuple(kept), tuple(excluded)
+
+
+# Matches the `@@` header's OLD side, re-parsed straight from `DiffHunk.body`
+# (the parser discards old-start/old-count once new_lines is built, so a
+# whole-new-file check has to look at the raw header text again).
+_OLD_SIDE_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+")
+
+# Below this many characters, an identical hunk is more likely a coincidence
+# (an empty `__init__.py`, a one-line stub) than a real byte-identical copy
+# worth excluding - and excluding it buys nothing since it was cheap to
+# review anyway.
+_MIN_DUPLICATE_CHARS = 200
+
+
+def _whole_new_file_content(hunk: DiffHunk) -> str | None:
+    """The full added-file text when `hunk` is git's shape for a BRAND NEW
+    file (`@@ -0,0 +1,N @@`, every content line added) - `None` otherwise.
+
+    `-0,0` is git's convention for "the old side had nothing" and is also
+    (ambiguously, a real unified-diff limitation) how a pure insertion at
+    the very top of an existing non-empty file can render. Guarded by
+    `_MIN_DUPLICATE_CHARS` in the caller and an EXACT content match against
+    another hunk in the same diff, so the failure mode of that ambiguity is
+    at worst excluding one boilerplate-shaped block from review - never a
+    wrong finding, and always named in the board (#813 acceptance: no
+    silent exclusion)."""
+    m = _OLD_SIDE_RE.match(hunk.body.splitlines()[0]) if hunk.body else None
+    if not m or m.group(1) != "0" or m.group(2) != "0":
+        return None
+    lines: list[str] = []
+    for raw in hunk.body.splitlines()[1:]:
+        if raw.startswith("\\"):
+            continue
+        if not raw.startswith("+"):
+            return None
+        lines.append(raw[1:])
+    return "\n".join(lines)
+
+
+def split_duplicate_hunks(
+    hunks: tuple[DiffHunk, ...],
+) -> tuple[tuple[DiffHunk, ...], tuple[tuple[str, str], ...]]:
+    """Partition hunks into (reviewable, duplicates).
+
+    `duplicates` is `((path, original_path), ...)` in encounter order: a
+    byte-identical whole-file copy of `original_path`, ADDED earlier in the
+    SAME diff. Reviewing the same bytes twice teaches the LLM nothing the
+    first pass didn't already establish, and it is not free - #813 measured
+    a PR losing coverage on its genuinely novel logic because ~60KB of
+    provably-unchanged copies ate the cohort budget before Elder ever
+    reached the real change.
+
+    Scope: this catches only SAME-DIFF duplicates (a file copied to two
+    locations in one PR - the exact #813 shape, common when a build tool
+    like kustomize can't symlink outside its root). A copy of a file that
+    already exists elsewhere in the repo, untouched by this diff, is
+    invisible here - detecting that needs the rest of the tree, which this
+    pure diff-only function does not have access to (tracked separately;
+    would need a repo-tree fetch this module deliberately does not make).
+
+    Only whole-new-file hunks (see `_whole_new_file_content`) at or above
+    `_MIN_DUPLICATE_CHARS` are compared; a partial edit is never excluded,
+    however coincidentally its bytes match another hunk. The FIRST
+    occurrence of any given content is always kept reviewable - only later
+    occurrences are named as duplicates of it. Pure - no IO."""
+    kept: list[DiffHunk] = []
+    duplicates: list[tuple[str, str]] = []
+    first_path_for_hash: dict[str, str] = {}
+    for h in hunks:
+        content = _whole_new_file_content(h)
+        if content is None or len(content) < _MIN_DUPLICATE_CHARS:
+            kept.append(h)
+            continue
+        digest = hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
+        original = first_path_for_hash.get(digest)
+        if original is None:
+            first_path_for_hash[digest] = h.file_path
+            kept.append(h)
+        else:
+            duplicates.append((h.file_path, original))
+    return tuple(kept), tuple(duplicates)
 
 
 def split_oversized_hunks(

@@ -442,3 +442,99 @@ class TestOversizedHunkSplit:
         # whole diff because a config value was missing or misparsed.
         hunks = (self._hunk("a.py", 5_000),)
         assert split_oversized_hunks(hunks, 0) == (hunks, ())
+
+
+# --- #813: byte-identical whole-file duplicate split ------------------------
+
+from personas.code_reviewer.diff_parser import (  # noqa: E402
+    split_duplicate_hunks,
+)
+
+
+class TestDuplicateHunkSplit:
+    def _new_file(self, path, content):
+        """Git's shape for a brand-new file: old side `-0,0`, every content
+        line added."""
+        body_lines = ["@@ -0,0 +1,{} @@".format(content.count("\n") + 1)]
+        body_lines.extend(f"+{line}" for line in content.splitlines())
+        return DiffHunk(
+            file_path=path, new_start=1,
+            new_lines=frozenset(range(1, content.count("\n") + 2)),
+            body="\n".join(body_lines),
+        )
+
+    def _edit(self, path, content="x" * 250):
+        """A hunk that is NOT a whole-new-file (old side non-empty) -
+        used to prove edits are never treated as duplicate candidates
+        however coincidentally their bytes match."""
+        return DiffHunk(
+            file_path=path, new_start=5,
+            new_lines=frozenset({5}),
+            body=f"@@ -5,1 +5,1 @@\n-old\n+{content}",
+        )
+
+    def test_second_byte_identical_copy_is_excluded_and_named(self):
+        content = "line\n" * 60  # well over _MIN_DUPLICATE_CHARS
+        original = self._new_file("production/zippie/travel/bond-agent/x.py", content)
+        copy = self._new_file(
+            "production/oke/manifests/zippie-home/zippie-pkg/x.py", content,
+        )
+        kept, duplicates = split_duplicate_hunks((original, copy))
+
+        assert [h.file_path for h in kept] == [original.file_path]
+        assert duplicates == ((copy.file_path, original.file_path),)
+
+    def test_first_occurrence_is_always_kept_reviewable(self):
+        """The exclusion always points a LATER path at an EARLIER one -
+        never the reverse - so there is always exactly one reviewable
+        instance of any duplicated content."""
+        content = "yyyyyyyyyy\n" * 60  # well over _MIN_DUPLICATE_CHARS
+        first = self._new_file("a/one.py", content)
+        second = self._new_file("b/two.py", content)
+        third = self._new_file("c/three.py", content)
+
+        kept, duplicates = split_duplicate_hunks((first, second, third))
+
+        assert kept == (first,)
+        assert duplicates == (
+            ("b/two.py", "a/one.py"),
+            ("c/three.py", "a/one.py"),
+        )
+
+    def test_non_identical_copy_is_reviewed_in_full(self):
+        original = self._new_file("a/one.py", "same\n" * 60)
+        different = self._new_file("b/two.py", "different\n" * 60)
+
+        kept, duplicates = split_duplicate_hunks((original, different))
+
+        assert set(h.file_path for h in kept) == {"a/one.py", "b/two.py"}
+        assert duplicates == ()
+
+    def test_partial_edit_is_never_treated_as_a_duplicate_candidate(self):
+        """Two ordinary edits that happen to leave identical bytes on the
+        new side must never be excluded - only a WHOLE new file (`-0,0`)
+        qualifies. Reviewing a partial edit again is never wasted budget in
+        the sense #813 means: it's the actual change."""
+        same_text = "z" * 250
+        edit_a = self._edit("a.py", same_text)
+        edit_b = self._edit("b.py", same_text)
+
+        kept, duplicates = split_duplicate_hunks((edit_a, edit_b))
+
+        assert kept == (edit_a, edit_b)
+        assert duplicates == ()
+
+    def test_small_identical_files_are_not_flagged(self):
+        """Below `_MIN_DUPLICATE_CHARS`, a coincidental match (two empty
+        `__init__.py`) is not worth excluding - and costs nothing to review
+        anyway."""
+        a = self._new_file("pkg1/__init__.py", "")
+        b = self._new_file("pkg2/__init__.py", "")
+
+        kept, duplicates = split_duplicate_hunks((a, b))
+
+        assert kept == (a, b)
+        assert duplicates == ()
+
+    def test_no_hunks_is_a_no_op(self):
+        assert split_duplicate_hunks(()) == ((), ())
