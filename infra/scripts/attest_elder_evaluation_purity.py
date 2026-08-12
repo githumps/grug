@@ -57,6 +57,10 @@ ALLOWED_PARAM_METHODS_EVALUATE_DIFF: frozenset[tuple[str, str]] = frozenset()
 # Allowlist for `evaluate_diff` body.
 ALLOWED_IN_EVALUATE_DIFF: frozenset[str] = frozenset({
     "_hunk_line_index", "_is_static_declarative_scalar",
+    # grug#813/#707: the conclusion-derivation rule, single-sourced so
+    # evaluate_diff/with_extra_findings/with_findings cannot drift into
+    # three different answers (severity in -> conclusion out; no IO).
+    "_derive_conclusion",
     "CodeReviewEvaluation", "Finding",
     "tuple", "list", "set", "frozenset", "len", "all", "any", "isinstance",
 })
