@@ -178,6 +178,11 @@ spec:
             # offline rules - the consumer runs full Elder re-runs, so it needs
             # the same engine as the webhook. The semgrep CLI ships in the image.
             - {name: GRUG_SAST_ENGINE, value: semgrep}
+            # Lint evidence (#681, epic #707): ruff over changed Python files -
+            # the consumer runs full Elder re-runs, so it needs the same engine
+            # as the webhook. The ruff CLI ships in the image (same image as
+            # webhook; services/webhook/requirements.txt).
+            - {name: GRUG_LINT_EVIDENCE, value: ruff}
             # Smasher Trial (#469): the consumer re-drives Smasher on the rerun
             # lane, so it needs the same master flag + Job image as the webhook.
             - {name: GRUG_SMASHER_ENABLED_SSM, value: /grug/smasher-enabled}

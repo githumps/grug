@@ -162,6 +162,12 @@ spec:
             # offline rules. Default off (builtin) elsewhere; on for the review
             # workloads (webhook + consumer). The semgrep CLI ships in the image.
             - {name: GRUG_SAST_ENGINE, value: semgrep}
+            # Lint evidence (#681, epic #707): ruff over changed Python files,
+            # selecting flake8-bandit/bugbear/async (S/B/ASYNC) for the recall
+            # gap #707 measured. Default off elsewhere; on for the review
+            # workloads, same shape as GRUG_SAST_ENGINE above. The ruff CLI
+            # ships in the image (services/webhook/requirements.txt).
+            - {name: GRUG_LINT_EVIDENCE, value: ruff}
             # Smasher Trial (#469): global master kill switch (default OFF - the
             # SSM param is absent/false until the operator opts in) + the image
             # the sandbox Job runs (the SAME webhook image, so personas.smasher

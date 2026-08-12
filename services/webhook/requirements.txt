@@ -20,3 +20,11 @@ psycopg[binary,pool]>=3.2,<4.0
 # it (the api never runs reviews); the mirrored sast.py shells out rather than
 # importing it, so the api copy is unaffected.
 semgrep>=1.166,<2.0
+# Ruff - the lint-evidence detection engine (#681, epic #707). Invoked as a
+# CLI subprocess (lint.py), same shape as semgrep above: NOT imported, just
+# needs to be on PATH. Was measured missing from the runtime image on
+# 2026-07-31 (`exec: "ruff": executable file not found in $PATH`), which left
+# GRUG_LINT_EVIDENCE=ruff a no-op even when set. Pinned, not bare - this repo
+# ships requirements.txt into the image while CI installs unpinned, so an
+# unpinned tool can behave differently in CI than in prod.
+ruff>=0.16,<0.17
