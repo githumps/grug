@@ -574,6 +574,46 @@ def _to_llm_hunks(hunks: tuple[DiffHunk, ...]) -> list[LlmHunk]:
     return [LlmHunk(path=h.file_path, body=h.body) for h in hunks]
 
 
+def _path_tail(paths: tuple, limit: int = 10) -> str:
+    """The `(+N more)` tail for a truncated path list, or empty.
+
+    Extracted because THREE transparency blocks - excluded, oversized and
+    duplicate - each rebuilt this same ternary inline, and each one is a branch
+    the complexity cap counts. #813's third block pushed _review_transparency to
+    cyclomatic 17 against this repo's own cap of 15; folding the repeated shape
+    into one place is the fix Elder's deterministic rule asked for.
+    """
+    return f" (+{len(paths) - limit} more)" if len(paths) > limit else ""
+
+
+def _coverage_lines(coverage) -> str:
+    """The coverage sentence plus any reviewability concerns.
+
+    Split out of _review_transparency for the same cap: the concern loop and
+    its heading marker are self-contained and were the densest branch cluster
+    in a function that had five other independent blocks.
+    """
+    failed = (
+        f"; failed: {', '.join(str(index) for index in coverage.failed_cohorts)}"
+        if coverage.failed_cohorts
+        else ""
+    )
+    lines = (
+        f"\n\nCoverage: {coverage.completed_cohorts}/{coverage.total_cohorts} "
+        f"cohorts completed{failed}."
+    )
+    for concern in coverage.concerns:
+        paths = ", ".join(f"`{_md_code_span(path)}`" for path in concern.paths[:6])
+        lines += (
+            f"\n- `{_md_code_span(concern.kind)}`: "
+            f"{_defused(concern.message)} Paths: {paths}"
+        )
+    if coverage.concerns:
+        marker = lines.index("\n- ", lines.index("Coverage:"))
+        lines = f"{lines[:marker]}\n\n**Reviewability**{lines[marker:]}"
+    return lines
+
+
 def _review_transparency(
     evaluation: CodeReviewEvaluation,
     suppressed_count: int,
@@ -588,31 +628,12 @@ def _review_transparency(
     )
     coverage = evaluation.coverage
     if coverage is not None:
-        failed = (
-            f"; failed: {', '.join(str(index) for index in coverage.failed_cohorts)}"
-            if coverage.failed_cohorts
-            else ""
-        )
-        lines += (
-            f"\n\nCoverage: {coverage.completed_cohorts}/{coverage.total_cohorts} "
-            f"cohorts completed{failed}."
-        )
-        for concern in coverage.concerns:
-            paths = ", ".join(f"`{_md_code_span(path)}`" for path in concern.paths[:6])
-            lines += (
-                f"\n- `{_md_code_span(concern.kind)}`: "
-                f"{_defused(concern.message)} Paths: {paths}"
-            )
-        if coverage.concerns:
-            marker = lines.index("\n- ", lines.index("Coverage:"))
-            lines = f"{lines[:marker]}\n\n**Reviewability**{lines[marker:]}"
+        lines += _coverage_lines(coverage)
     if excluded_paths:
         shown = ", ".join(
             f"`{path.replace(chr(96), '')}`" for path in excluded_paths[:10]
         )
-        more = (
-            f" (+{len(excluded_paths) - 10} more)" if len(excluded_paths) > 10 else ""
-        )
+        more = _path_tail(excluded_paths)
         lines += (
             f"\n\nGrug not read {len(excluded_paths)} data/generated "
             f"file(s) - no meat for review there: {shown}{more}."
@@ -625,10 +646,7 @@ def _review_transparency(
         shown = ", ".join(
             f"`{path.replace(chr(96), '')}`" for path in oversized_paths[:10]
         )
-        more = (
-            f" (+{len(oversized_paths) - 10} more)"
-            if len(oversized_paths) > 10 else ""
-        )
+        more = _path_tail(oversized_paths)
         lines += (
             f"\n\nGrug not read {len(oversized_paths)} file(s) whose change "
             f"landed as one hunk too big to hold in a single look: "
@@ -642,10 +660,7 @@ def _review_transparency(
             f"`{path.replace(chr(96), '')}` (= `{original.replace(chr(96), '')}`)"
             for path, original in duplicate_paths[:10]
         )
-        more = (
-            f" (+{len(duplicate_paths) - 10} more)"
-            if len(duplicate_paths) > 10 else ""
-        )
+        more = _path_tail(duplicate_paths)
         lines += (
             f"\n\nGrug not spend budget re-reading {len(duplicate_paths)} "
             f"file(s) byte-identical to a path already in this diff: "
