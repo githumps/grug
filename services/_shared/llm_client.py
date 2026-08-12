@@ -2066,8 +2066,18 @@ def _cohort_coverage(
     responses: Sequence[LlmReviewResponse],
     failed_indexes: Sequence[int],
 ) -> ReviewCoverage:
+    """`total_cohorts` is `plan.total_cohorts_planned`, NOT `len(plan.cohorts)`.
+
+    `max_cohorts` truncation drops cohorts before any of them run, so they
+    never reach `responses` and never become a `failed_cohorts` entry either
+    - counting only `len(plan.cohorts)` made a truncated plan report
+    `complete=True` (grug#813/#707: budget-driven partial coverage silently
+    reads as a full pass). The true total makes `coverage.complete` and
+    `coverage.fraction` honest about cohorts that were planned but never
+    attempted, not just the ones that ran and failed.
+    """
     return ReviewCoverage(
-        total_cohorts=len(plan.cohorts),
+        total_cohorts=plan.total_cohorts_planned,
         completed_cohorts=len(responses) - len(failed_indexes),
         failed_cohorts=tuple(failed_indexes),
         cohort_labels=tuple(cohort.label for cohort in plan.cohorts),
@@ -2094,8 +2104,10 @@ def _log_partial_cohorts(
     responses: Sequence[LlmReviewResponse],
     installation_id: int,
     pr_context: Optional[PrContext],
+    coverage: ReviewCoverage | None = None,
 ) -> None:
-    if not failed_indexes:
+    truncated = coverage is not None and coverage.total_cohorts > len(responses)
+    if not failed_indexes and not truncated:
         return
     ctx = pr_context or {}
     log.warning(
@@ -2103,11 +2115,43 @@ def _log_partial_cohorts(
         extra={
             "failed_cohorts": list(failed_indexes),
             "cohort_count": len(responses),
+            # The number, not the mood (#645 eval harness): how much of the
+            # planned review actually ran, as a fraction in [0, 1].
+            "coverage_fraction": coverage.fraction if coverage is not None else None,
+            "coverage_total_planned": (
+                coverage.total_cohorts if coverage is not None else None
+            ),
+            "truncated": truncated,
             "installation_id": installation_id,
             "repo": ctx.get("repo"),
             "pr_number": ctx.get("pr_number"),
         },
     )
+
+
+def _partial_review_reason(
+    failed_indexes: Sequence[int], plan: ReviewPlan,
+) -> str:
+    """The `error` string that flags a cohort-merged review as partial.
+
+    Must start with the literal `"partial review:"` - that prefix is what
+    `personas.code_reviewer.persona.evaluate_diff` matches to set
+    `degraded_reason="partial_review"` and force the check-run advisory.
+    Two independent causes fold into the SAME signal, because both mean
+    the identical thing to a reader: some ground was not walked.
+      - `failed_indexes`: cohorts that RAN and failed (outage, unparseable).
+      - `plan.truncated`: cohorts the packer planned but `max_cohorts`
+        dropped before any of them ran - these never reach `responses` at
+        all, so they would otherwise be invisible to this check (#813/#707).
+    Empty string only when neither happened - a genuinely complete pass.
+    """
+    reasons: list[str] = []
+    if failed_indexes:
+        reasons.append(f"cohorts {list(failed_indexes)} failed")
+    if plan.truncated:
+        dropped = plan.total_cohorts_planned - len(plan.cohorts)
+        reasons.append(f"{dropped} cohort(s) dropped before running (budget)")
+    return f"partial review: {'; '.join(reasons)}" if reasons else ""
 
 
 def _merge_cohort_responses(
@@ -2122,7 +2166,9 @@ def _merge_cohort_responses(
     if successful:
         first = successful[0]
         backends, models = _cohort_attribution(responses)
-        _log_partial_cohorts(failed_indexes, responses, installation_id, pr_context)
+        _log_partial_cohorts(
+            failed_indexes, responses, installation_id, pr_context, coverage,
+        )
         return LlmReviewResponse(
             kind="reviewed",
             findings=_merge_review_findings(successful),
@@ -2131,11 +2177,7 @@ def _merge_cohort_responses(
             review_span_context=first.review_span_context,
             backends_used=backends,
             models_used=models,
-            error=(
-                f"partial review: cohorts {failed_indexes} failed"
-                if failed_indexes
-                else ""
-            ),
+            error=_partial_review_reason(failed_indexes, plan),
             coverage=coverage,
         )
 

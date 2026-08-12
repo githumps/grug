@@ -9,6 +9,7 @@ import pytest
 
 from llm_client import Backend, Finding as LlmFinding, LlmReviewResponse
 from personas.code_reviewer import dispatch as cr_dispatch
+from review_pipeline import ReviewCoverage
 
 
 _DIFF = """diff --git a/src/auth.py b/src/auth.py
@@ -210,3 +211,78 @@ def test_async_deep_skipped_after_staged_tier1(monkeypatch):
         cr_dispatch.dispatch_code_review(_payload(), blocking=False)
 
     assert reasoner_calls == []
+
+
+def test_async_deep_partial_coverage_never_publishes_success(monkeypatch):
+    """Reproduces the PR #127 shape (grug#813/#707): Tier-1 is clean, but
+    the deep (reasoner) arm exceeds ITS OWN cohort budget and comes back
+    `partial_review` with no novel findings (everything it did see was
+    already covered by Tier-1). Before the fix, the merge that builds
+    `combined` for the deep check-run only ever looked at Tier-1's
+    `degraded_reason` - the deep arm's own partial coverage was silently
+    dropped, and the deep check-run published `success` over ground the
+    deep arm never finished walking. This is the exact mismatch reported
+    live: a board comment saying "some ground not walked" next to a
+    check-run conclusion of `success`.
+
+    MUST fail on main (deep check conclusion == "success") and pass once
+    `with_degradation` folds the deep arm's coverage into `combined`.
+    """
+    tier1 = LlmReviewResponse(
+        kind="reviewed", findings=(),
+        backend_used=Backend.CAVE, model_name="coder",
+        backends_used=(Backend.CAVE,), models_used=("coder",),
+    )
+    deep = LlmReviewResponse(
+        kind="reviewed", findings=(),
+        backend_used=Backend.CAVE_REASONER, model_name="reasoner",
+        backends_used=(Backend.CAVE_REASONER,), models_used=("reasoner",),
+        # The deep arm's own cohort plan ran out of budget - #813's shape,
+        # measured on byte-identical copies eating the budget before the
+        # novel logic. `findings=()` means nothing NEW survives dedup
+        # against Tier-1, which is exactly the case that used to erase the
+        # degradation entirely.
+        error="partial review: cohorts [2] failed",
+        coverage=ReviewCoverage(
+            total_cohorts=2, completed_cohorts=1, failed_cohorts=(2,),
+            cohort_labels=("a", "b"),
+        ),
+    )
+    posted_checks: list = []
+
+    monkeypatch.setattr(cr_dispatch, "review_diff", lambda *a, **kw: tier1)
+    monkeypatch.setattr(cr_dispatch, "review_reasoner_diff", lambda *a, **kw: deep)
+    monkeypatch.setattr(
+        cr_dispatch, "post_check_run",
+        lambda token, owner, repo, result, external_id=None: (
+            posted_checks.append(
+                {"external_id": external_id, "conclusion": result.conclusion}
+            )
+            or {"id": len(posted_checks)}
+        ),
+    )
+    monkeypatch.setattr(cr_dispatch, "post_review", lambda *a, **k: {"id": 1})
+    monkeypatch.setattr(cr_dispatch, "grade_findings", lambda *a, **kw: ())
+    monkeypatch.setattr(
+        cr_dispatch, "_fetch_current_review_snapshot",
+        lambda *a, **k: ("base5678ijkl", "abcd1234efgh", "t", "b"),
+    )
+    with patch("adapters.install_store.put_elder_last_reviewed", lambda **k: None), \
+         patch("adapters.install_store.get_elder_last_reviewed", return_value=None), \
+         patch("httpx.get", return_value=_diff_response()):
+        # `blocking=True` -> mode="blocking": `_publish_shape` only forces
+        # `neutral` from `evaluation.degraded_reason`, not from mode itself.
+        # advisory mode (`blocking=False`) forces `neutral` unconditionally
+        # and would pass this test even with the bug present - it has to be
+        # blocking mode to actually exercise the coverage-honesty check.
+        cr_dispatch.dispatch_code_review(_payload(), blocking=True)
+
+    deep_checks = [
+        c for c in posted_checks
+        if (c["external_id"] or "").startswith("grug-cr-deep:")
+    ]
+    assert deep_checks, "deep check-run was never posted"
+    assert deep_checks[-1]["conclusion"] != "success", (
+        "deep arm hit partial coverage but its check-run reported success - "
+        "coverage honesty regression"
+    )

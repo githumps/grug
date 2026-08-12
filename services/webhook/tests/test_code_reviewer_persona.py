@@ -12,6 +12,7 @@ from personas.code_reviewer.persona import (
     CodeReviewEvaluation,
     Finding,
     evaluate_diff,
+    with_degradation,
 )
 from review_pipeline import ReviewCoverage
 
@@ -524,6 +525,113 @@ def test_partial_review_keeps_valid_findings_and_marks_coverage_degraded() -> No
     assert len(out.findings) == 1
     assert out.degraded_reason == "partial_review"
     assert out.coverage == llm.coverage
+
+
+def test_partial_review_conclusion_is_never_success() -> None:
+    """grug#813/#707 - `evaluate_diff` must not build a `CodeReviewEvaluation`
+    whose `conclusion` disagrees with its own `degraded_reason`.
+
+    Before the fix, `evaluate_diff` only checked for blocking findings and
+    fell through to `conclusion="success"` whenever there weren't any - it
+    never consulted the `degraded_reason` it was about to set three lines
+    later. A staged review that exceeded its budget (`partial review: ...`)
+    but produced only advisory (or zero) findings therefore published a
+    self-contradictory evaluation: `conclusion="success"` alongside
+    `degraded_reason="partial_review"`. `with_extra_findings`/`with_findings`
+    always used the correct 3-way rule and said so in their own docstrings
+    ("the SAME rule evaluate_diff uses") - a claim that was false until now.
+
+    MUST fail on main (`out.conclusion == "success"`) and pass after the fix
+    (`out.conclusion == "neutral"`). This is the acceptance test: a diff that
+    exceeds the budget must not produce a success conclusion.
+    """
+    hunks = parse_diff(_DIFF)
+    llm = LlmReviewResponse(
+        kind="reviewed",
+        # No findings at all - the emptiest, most "looks clean" shape, and
+        # therefore the one most likely to be mistaken for a full pass.
+        findings=(),
+        backend_used=Backend.POOLSIDE,
+        error="partial review: cohorts [2] failed",
+        coverage=ReviewCoverage(
+            total_cohorts=2, completed_cohorts=1, failed_cohorts=(2,),
+            cohort_labels=("src", "tests"),
+        ),
+    )
+
+    out = evaluate_diff(hunks, llm)
+
+    assert out.degraded_reason == "partial_review"
+    assert out.conclusion == "neutral", (
+        f"conclusion={out.conclusion!r} but degraded_reason={out.degraded_reason!r} "
+        "- a partial-coverage evaluation must never report success"
+    )
+    assert out.passed is True  # advisory, not a block - Elder still doesn't gate on this
+
+
+def test_partial_review_with_blocking_finding_still_fails() -> None:
+    """The 3-way rule's precedence: a blocking finding wins over a partial
+    pass - `failure`, not `neutral`. Partial coverage softens a clean
+    verdict; it must never soften a real blocking finding into advisory."""
+    hunks = parse_diff(_DIFF)
+    llm = LlmReviewResponse(
+        kind="reviewed",
+        findings=(_llm_finding(line=2, severity="critical"),),
+        backend_used=Backend.POOLSIDE,
+        error="partial review: cohorts [2] failed",
+        coverage=ReviewCoverage(
+            total_cohorts=2, completed_cohorts=1, failed_cohorts=(2,),
+            cohort_labels=("src", "tests"),
+        ),
+    )
+
+    out = evaluate_diff(hunks, llm)
+
+    assert out.degraded_reason == "partial_review"
+    assert out.conclusion == "failure"
+    assert out.passed is False
+
+
+def test_with_degradation_folds_in_a_second_passs_partial_coverage() -> None:
+    """The deep-review merge bug: combining Tier-1 (clean) with the deep
+    arm's OWN partial coverage must not silently drop the deep arm's
+    degradation. Reproduces the fold `dispatch._run_deep_review` applies to
+    `combined` after `with_extra_findings`/a bare Tier-1 evaluation."""
+    tier1_clean = CodeReviewEvaluation(findings=(), conclusion="success")
+    deep_partial = CodeReviewEvaluation(
+        findings=(),
+        conclusion="neutral",
+        degraded_reason="partial_review",
+        coverage=ReviewCoverage(
+            total_cohorts=2, completed_cohorts=1, failed_cohorts=(2,),
+            cohort_labels=("a", "b"),
+        ),
+    )
+
+    combined = with_degradation(tier1_clean, deep_partial)
+
+    assert combined.degraded_reason == "partial_review"
+    assert combined.conclusion == "neutral"
+    assert combined.coverage == deep_partial.coverage
+
+
+def test_with_degradation_is_a_no_op_when_neither_pass_is_degraded() -> None:
+    a = CodeReviewEvaluation(findings=(), conclusion="success")
+    b = CodeReviewEvaluation(findings=(), conclusion="success")
+    assert with_degradation(a, b) is a
+
+
+def test_with_degradation_prefers_evaluations_own_reason() -> None:
+    """If `evaluation` is already degraded, its own reason wins - the
+    function only BACKFILLS a missing degradation, it never overwrites one
+    that is already present."""
+    already_degraded = CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="all_failed",
+    )
+    other = CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="partial_review",
+    )
+    assert with_degradation(already_degraded, other) is already_degraded
 
 
 def test_diff_hunk_rejects_missing_at_at_in_body() -> None:

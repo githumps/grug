@@ -55,8 +55,8 @@ from personas.code_reviewer.dedup import (
     rule_marker,
 )
 from personas.code_reviewer.diff_parser import (
-    DiffHunk, DiffParseError, parse_diff, split_oversized_hunks,
-    split_reviewable_hunks,
+    DiffHunk, DiffParseError, parse_diff, split_duplicate_hunks,
+    split_oversized_hunks, split_reviewable_hunks,
 )
 from personas.code_reviewer.precedent import (
     class_precision, match_precedent, render_precedent_note,
@@ -77,7 +77,8 @@ from personas.code_reviewer.judge import (
     refute_findings, submit_evals,
 )
 from personas.code_reviewer.persona import (
-    CodeReviewEvaluation, Finding, evaluate_diff, with_extra_findings, with_findings,
+    CodeReviewEvaluation, Finding, evaluate_diff, with_degradation,
+    with_extra_findings, with_findings,
 )
 from personas.code_reviewer.snapshot import review_freshness_id_from_pr
 from personas.code_reviewer.verify import verify_findings
@@ -578,6 +579,7 @@ def _review_transparency(
     suppressed_count: int,
     excluded_paths: tuple[str, ...],
     oversized_paths: tuple[str, ...] = (),
+    duplicate_paths: tuple[tuple[str, str], ...] = (),
 ) -> str:
     lines = (
         f"\n\nGrug held back {suppressed_count} weak finding(s) his judge doubted."
@@ -632,6 +634,23 @@ def _review_transparency(
             f"landed as one hunk too big to hold in a single look: "
             f"{shown}{more}. Split the change to get eyes on it."
         )
+    if duplicate_paths:
+        # Named as PAIRS (#813 acceptance): the exclusion must say WHICH
+        # path it duplicates, not just that it was skipped, or "byte-
+        # identical" is an unverifiable claim.
+        shown = ", ".join(
+            f"`{path.replace(chr(96), '')}` (= `{original.replace(chr(96), '')}`)"
+            for path, original in duplicate_paths[:10]
+        )
+        more = (
+            f" (+{len(duplicate_paths) - 10} more)"
+            if len(duplicate_paths) > 10 else ""
+        )
+        lines += (
+            f"\n\nGrug not spend budget re-reading {len(duplicate_paths)} "
+            f"file(s) byte-identical to a path already in this diff: "
+            f"{shown}{more}."
+        )
     return lines
 
 
@@ -639,6 +658,7 @@ def _clean_review_scope(
     living_range: str,
     excluded_paths: tuple[str, ...],
     oversized_paths: tuple[str, ...] = (),
+    duplicate_paths: tuple[tuple[str, str], ...] = (),
 ) -> str:
     if living_range:
         return (
@@ -646,7 +666,7 @@ def _clean_review_scope(
             "runtime signal when mapped). No markings survived the judge. "
             "Code walk steady."
         )
-    if excluded_paths or oversized_paths:
+    if excluded_paths or oversized_paths or duplicate_paths:
         return (
             "Elder walked the reviewable diff (full file + cross-file + "
             "Omen when mapped), skipping data/generated paths listed "
@@ -698,6 +718,7 @@ def _summary_markdown(
     suppressed_count: int = 0,
     excluded_paths: tuple[str, ...] = (),
     oversized_paths: tuple[str, ...] = (),
+    duplicate_paths: tuple[tuple[str, str], ...] = (),
     living_range: str = "",
     review_phase: Literal["tier1", "deep", "dual"] = "dual",
 ) -> tuple[str, str]:
@@ -715,6 +736,7 @@ def _summary_markdown(
     """
     held = _review_transparency(
         evaluation, suppressed_count, excluded_paths, oversized_paths,
+        duplicate_paths,
     )
     hunt = (
         (
@@ -753,7 +775,9 @@ def _summary_markdown(
             if not suppressed_count
             else "Elder clear - weak markings held back"
         )
-        scope = _clean_review_scope(living_range, excluded_paths, oversized_paths)
+        scope = _clean_review_scope(
+            living_range, excluded_paths, oversized_paths, duplicate_paths,
+        )
         return hunt_title(title), ("## Markings Board\n\n" + scope) + held + hunt
 
     blocking = sum(1 for f in evaluation.findings if f.severity in ("high", "critical"))
@@ -1941,6 +1965,24 @@ def dispatch_code_review(
                     "cohort_budget_chars": cohort_budget,
                 },
             )
+        # #813: a byte-identical whole-file copy of another file already IN
+        # this diff (e.g. one file added under two paths because a build
+        # tool can't symlink outside its root) is provably unchanged
+        # content. Reviewing it again spends full cohort budget re-reading
+        # bytes Elder already judged this pass, which was measured to push
+        # the genuinely novel logic in the SAME diff out of the budget
+        # entirely. Drop it HERE, named against the path it duplicates, so
+        # the budget goes to content nobody has looked at yet.
+        hunks, duplicate_paths = split_duplicate_hunks(hunks)
+        if duplicate_paths:
+            log.info(
+                "code_review_hunks_deduplicated",
+                extra={
+                    "pr": f"{owner}/{repo_name}#{pull_number}",
+                    "duplicates": list(duplicate_paths)[:20],
+                    "count": len(duplicate_paths),
+                },
+            )
     except (httpx.HTTPStatusError, httpx.RequestError, DiffParseError) as e:
         log.warning(
             "code_review_fetch_or_parse_failed",
@@ -2249,6 +2291,7 @@ def dispatch_code_review(
         evaluation, suppressed_count=len(suppressed),
         excluded_paths=excluded_paths,
         oversized_paths=oversized_paths,
+        duplicate_paths=duplicate_paths,
         living_range=living_range,
         review_phase=tier1_phase,
     )
@@ -2415,6 +2458,13 @@ def dispatch_code_review(
             "findings_count": len(evaluation.findings),
             "dropped_hallucinations": evaluation.dropped_hallucinations,
             "degraded_reason": evaluation.degraded_reason,
+            # How much of the diff was actually walked, as a number the
+            # eval harness (#645) can track directly instead of parsing
+            # board prose - 1.0 for a review with no cohort plan at all
+            # (single-call reviews carry no ReviewCoverage).
+            "coverage_fraction": (
+                evaluation.coverage.fraction if evaluation.coverage is not None else 1.0
+            ),
             # True when the prior-comments fetch failed on a re-review:
             # dedup fell back to post-everything, so duplicate comments
             # this cycle are a fetch artifact, not new findings.
@@ -3141,6 +3191,16 @@ def _async_deep_append_if_needed(
             extra={"pr": f"{owner}/{repo_name}#{pull_number}"},
         )
         combined = evaluation
+
+    # `combined` so far only carries TIER-1's degraded_reason - the merge
+    # above never looked at deep_eval's own. The deep arm is an INDEPENDENT
+    # review pass with its own cohort plan and its own budget; if IT hit
+    # partial coverage (#813: budget burned on byte-identical content) while
+    # Tier-1 was clean, that fact must not vanish just because Tier-1 had
+    # nothing to report it. Without this, a deep pass that ran out of
+    # budget on a diff Tier-1 already judged clean published `success` over
+    # ground the deep arm never finished walking.
+    combined = with_degradation(combined, deep_eval)
 
     conclusion, event = _publish_shape(combined, mode=mode)
     title, summary = _summary_markdown(

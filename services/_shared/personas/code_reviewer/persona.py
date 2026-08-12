@@ -172,28 +172,49 @@ class CodeReviewEvaluation:
         return self.conclusion != "failure"
 
 
+def _derive_conclusion(
+    findings: tuple[Finding, ...], degraded_reason: str | None,
+) -> CheckConclusion:
+    """The ONE rule every `CodeReviewEvaluation` constructor uses to pick a
+    conclusion from findings + coverage: any high/critical finding blocks,
+    full stop; short of that, a degraded or partial pass stays `neutral` -
+    NEVER `success`, because Elder is vouching only for the ground it
+    actually walked; otherwise a genuinely clean pass is `success`.
+
+    Centralised so `evaluate_diff`, `with_extra_findings`, and
+    `with_findings` cannot drift into three different answers for the same
+    inputs. They used to: `with_extra_findings`/`with_findings` implemented
+    this 3-way rule and said in their own docstrings that `evaluate_diff`
+    used "the SAME rule" — but `evaluate_diff` only ever checked for
+    blocking findings and fell through to `success` whenever there weren't
+    any, even when it had JUST set `degraded_reason="partial_review"` three
+    lines later. A `CodeReviewEvaluation` could carry
+    `conclusion="success"` and `degraded_reason="partial_review"` in the
+    SAME instance — self-contradictory, and exactly the shape of grug#813/
+    #707's "did not fit one look" pass whose check-run still read `success`.
+    """
+    if any(f.severity in _BLOCKING_SEVERITIES for f in findings):
+        return "failure"
+    if degraded_reason is not None:
+        return "neutral"
+    return "success"
+
+
 def with_extra_findings(
     evaluation: CodeReviewEvaluation, extra: tuple[Finding, ...]
 ) -> CodeReviewEvaluation:
     """Merge additional findings (e.g. SAST candidates the exploitability judge
-    KEPT, #400) into an evaluation and re-derive `conclusion` by the SAME rule
-    `evaluate_diff` uses: any high/critical -> failure; else preserve a degraded
-    `neutral`; else success. Pure — no IO. The `extra` are already diff-anchored
+    KEPT, #400) into an evaluation and re-derive `conclusion` via
+    `_derive_conclusion`. Pure — no IO. The `extra` are already diff-anchored
     (built from real hunk line numbers), so they need no re-filtering. Returning
     a new value (frozen dataclass) keeps the merge honest + testable; `passed`
     re-derives from the new conclusion automatically."""
     if not extra:
         return evaluation
     combined = evaluation.findings + extra
-    if any(f.severity in _BLOCKING_SEVERITIES for f in combined):
-        conclusion: CheckConclusion = "failure"
-    elif evaluation.degraded_reason is not None:
-        conclusion = "neutral"
-    else:
-        conclusion = "success"
     return CodeReviewEvaluation(
         findings=combined,
-        conclusion=conclusion,
+        conclusion=_derive_conclusion(combined, evaluation.degraded_reason),
         dropped_hallucinations=evaluation.dropped_hallucinations,
         degraded_reason=evaluation.degraded_reason,
         coverage=evaluation.coverage,
@@ -203,24 +224,49 @@ def with_extra_findings(
 def with_findings(
     evaluation: CodeReviewEvaluation, findings: tuple[Finding, ...]
 ) -> CodeReviewEvaluation:
-    """Replace an evaluation's findings and re-derive `conclusion` by the
-    SAME rule as `with_extra_findings` / `evaluate_diff`. Used by the
-    judge-gated publish path (#467) to publish only the KEPT findings.
-    Suppression only ever removes advisory-severity findings, so the
-    conclusion is provably unchanged - but re-deriving keeps the invariant
-    honest rather than relying on it. Pure - no IO."""
-    if any(f.severity in _BLOCKING_SEVERITIES for f in findings):
-        conclusion: CheckConclusion = "failure"
-    elif evaluation.degraded_reason is not None:
-        conclusion = "neutral"
-    else:
-        conclusion = "success"
+    """Replace an evaluation's findings and re-derive `conclusion` via
+    `_derive_conclusion` (the SAME rule `with_extra_findings` / `evaluate_diff`
+    use). Used by the judge-gated publish path (#467) to publish only the
+    KEPT findings. Suppression only ever removes advisory-severity findings,
+    so the conclusion is provably unchanged - but re-deriving keeps the
+    invariant honest rather than relying on it. Pure - no IO."""
     return CodeReviewEvaluation(
         findings=findings,
-        conclusion=conclusion,
+        conclusion=_derive_conclusion(findings, evaluation.degraded_reason),
         dropped_hallucinations=evaluation.dropped_hallucinations,
         degraded_reason=evaluation.degraded_reason,
         coverage=evaluation.coverage,
+    )
+
+
+def with_degradation(
+    evaluation: CodeReviewEvaluation, other: CodeReviewEvaluation,
+) -> CodeReviewEvaluation:
+    """Fold ANOTHER pass's degradation into this one.
+
+    Elder runs Tier-1 and an async deep (reasoner) arm as two INDEPENDENT
+    review passes that each carry their own `degraded_reason`/`coverage`.
+    When the deep arm's novel findings are merged on top of Tier-1
+    (`with_extra_findings(tier1_eval, novel_deep)`, or a bare `tier1_eval`
+    when the deep arm found nothing new), the merge only ever consulted
+    `tier1_eval.degraded_reason` — if Tier-1 was clean but the deep arm hit
+    partial coverage of its OWN (e.g. #813's budget burned on byte-identical
+    content), that fact was silently dropped on the floor: the combined
+    evaluation, and the check-run built from it, reported a clean pass over
+    ground the deep arm never finished walking.
+
+    `other` here is the pass whose degradation might be missing from
+    `evaluation`. If `evaluation` is already degraded, its reason wins
+    (first-degradation-wins is arbitrary but stable; both are real). If
+    neither is degraded, this is a no-op. Pure - no IO."""
+    if evaluation.degraded_reason or not other.degraded_reason:
+        return evaluation
+    return CodeReviewEvaluation(
+        findings=evaluation.findings,
+        conclusion=_derive_conclusion(evaluation.findings, other.degraded_reason),
+        dropped_hallucinations=evaluation.dropped_hallucinations,
+        degraded_reason=other.degraded_reason,
+        coverage=evaluation.coverage if evaluation.coverage is not None else other.coverage,
     )
 
 
@@ -291,19 +337,25 @@ def evaluate_diff(
             )
         )
 
-    has_blocking = any(f.severity in _BLOCKING_SEVERITIES for f in kept)
-    conclusion: CheckConclusion = "failure" if has_blocking else "success"
+    kept_findings = tuple(kept)
+    # Staged review preserves useful findings when another cohort fails (or
+    # `max_cohorts` truncated the plan before it ran, #813/#707), but the
+    # check must say coverage was partial and stay advisory. The inline
+    # findings are still valid, diff-anchored evidence.
+    degraded_reason = (
+        "partial_review"
+        if llm_response.error[:15] == "partial review:"
+        else None
+    )
     return CodeReviewEvaluation(
-        findings=tuple(kept),
-        conclusion=conclusion,
+        findings=kept_findings,
+        # SAME rule with_extra_findings/with_findings use (_derive_conclusion):
+        # blocking -> failure; degraded (including partial coverage) ->
+        # neutral; else success. `conclusion` and `degraded_reason` must never
+        # disagree within one CodeReviewEvaluation - a "success" alongside
+        # degraded_reason="partial_review" is the bug this closes.
+        conclusion=_derive_conclusion(kept_findings, degraded_reason),
         dropped_hallucinations=dropped,
-        # Staged review preserves useful findings when another cohort fails,
-        # but the check must say coverage was partial and stay advisory. The
-        # inline findings are still valid, diff-anchored evidence.
-        degraded_reason=(
-            "partial_review"
-            if llm_response.error[:15] == "partial review:"
-            else None
-        ),
+        degraded_reason=degraded_reason,
         coverage=llm_response.coverage,
     )

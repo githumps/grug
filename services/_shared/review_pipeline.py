@@ -58,15 +58,40 @@ class ReviewabilityConcern:
 
 @dataclass(frozen=True, slots=True)
 class ReviewPlan:
-    """Stable review decomposition and the shared structural context map."""
+    """Stable review decomposition and the shared structural context map.
+
+    `cohorts` is what the executor actually RUNS - after `max_cohorts`
+    truncates the tail. `total_cohorts_planned` is what the packer would
+    have run with no cap: `len(cohorts)` plus whatever `max_cohorts` cut.
+    The two differ exactly when the plan was truncated, and that
+    difference is the fact a coverage number must carry - a caller that
+    only ever sees `len(cohorts)` cannot tell "reviewed everything" from
+    "reviewed everything I was allowed to start" (grug#813/#707: partial
+    coverage silently reporting complete)."""
 
     cohorts: tuple[ReviewCohort, ...]
     total_diff_chars: int
     concerns: tuple[ReviewabilityConcern, ...] = ()
+    total_cohorts_planned: int = 0
+
+    def __post_init__(self) -> None:
+        # 0 means "caller didn't pass it" (every real construction site
+        # below does). Floor at len(cohorts) so an omitted value can never
+        # UNDER-report the true total and manufacture false truncation.
+        if self.total_cohorts_planned < len(self.cohorts):
+            object.__setattr__(self, "total_cohorts_planned", len(self.cohorts))
 
     @property
     def staged(self) -> bool:
         return len(self.cohorts) > 1 or any(cohort.oversized for cohort in self.cohorts)
+
+    @property
+    def truncated(self) -> bool:
+        """True when `max_cohorts` dropped cohorts the packer had planned.
+
+        Distinct from `staged`: a plan can be staged (multiple cohorts)
+        without ever being truncated (the cap never bit)."""
+        return self.total_cohorts_planned > len(self.cohorts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +107,16 @@ class ReviewCoverage:
     @property
     def complete(self) -> bool:
         return self.completed_cohorts == self.total_cohorts and not self.failed_cohorts
+
+    @property
+    def fraction(self) -> float:
+        """Completed cohorts as a fraction of the TRUE planned total, in
+        [0.0, 1.0]. A number, not a mood - the eval harness (#645) can
+        track this directly instead of parsing board prose. 1.0 for a
+        review with nothing planned (an empty diff covers all of it)."""
+        if self.total_cohorts <= 0:
+            return 1.0
+        return max(0.0, min(1.0, self.completed_cohorts / self.total_cohorts))
 
 
 @dataclass(slots=True)
@@ -457,6 +492,10 @@ def plan_review(
         # The TRUE size of the change, not the reviewed slice - callers log
         # this to spot diffs that keep outgrowing the budget.
         total_diff_chars=total_chars,
+        # kept + dropped, NOT len(kept): a caller deriving coverage from
+        # this plan must be able to see the truncation, not just the slice
+        # that ran.
+        total_cohorts_planned=len(frozen_cohorts),
         concerns=_reviewability_concerns(kept, hunks, max_cohort_chars, dropped),
     )
 
