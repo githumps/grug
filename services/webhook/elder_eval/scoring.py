@@ -41,6 +41,10 @@ class CaseReplay:
     emitted: Mapping[str, int]
     errored: bool
     truncated: bool = False
+    # #545: True when this replay used the pre-fix snapshot diff
+    # (base...anchor_sha) rather than the PR's final merged diff. Only
+    # meaningful when errored=False - a non-run has no diff to speak of.
+    anchored: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,10 @@ class EvalReport:
     out_of_taxonomy: dict[str, int]
     unknown_verdicts: dict[str, int]
     cases_scored: int
+    # #545: scored cases replayed against the pre-fix snapshot, not the PR's
+    # final merged diff. `cases_scored - len(anchored_cases)` scored on the
+    # final diff instead - the KNOWN METHODOLOGY BIAS corpus slice.
+    anchored_cases: tuple[str, ...] = ()
 
     @property
     def all_errored(self) -> bool:
@@ -74,6 +82,7 @@ def score(
     total_emitted = 0
     errored: list[str] = []
     truncated: list[str] = []
+    anchored: list[str] = []
     out_of_taxonomy: Counter[str] = Counter()
     unknown_verdicts: Counter[str] = Counter()
     scored = 0
@@ -98,6 +107,8 @@ def score(
             continue
         if replay.truncated:
             truncated.append(case.case_id)
+        if replay.anchored:
+            anchored.append(case.case_id)
         scored += 1
         emitted_classes = {c for c, n in replay.emitted.items() if n > 0}
         for ledger_cls, elder_set in case.expected_classes.items():
@@ -124,6 +135,7 @@ def score(
         out_of_taxonomy=dict(out_of_taxonomy),
         unknown_verdicts=dict(unknown_verdicts),
         cases_scored=scored,
+        anchored_cases=tuple(anchored),
     )
 
 
@@ -142,6 +154,10 @@ def to_baseline_dict(report: EvalReport, *, prompt_sha: str, backend: str) -> di
                 # Cases whose diff was hunk-bounded: their misses may be
                 # amputation, not Elder - the baseline must say so.
                 "truncated_cases": sorted(report.truncated_cases),
+                # #545: which scored cases replayed the pre-fix snapshot vs
+                # the PR's final merged diff - the anchored/unanchored split
+                # a mixed corpus must keep visible, not average away.
+                "anchored_cases": sorted(report.anchored_cases),
             }
         },
     }

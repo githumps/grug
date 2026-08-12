@@ -219,6 +219,12 @@ def _record_reaction_learning(
         "evidence": f"github-review-comment:{record['comment_id']}",
         "ts": "",
         "commit": record.get("head_sha") or None,
+        # #545: same value as `commit` above (kept for display continuity),
+        # but under its own explicit field so elder_eval.corpus can trust it
+        # as the reviewed PR-head SHA without having to guess whether
+        # `commit` means "reviewed head" (this writer) or "fix commit"
+        # (older hand-appended ledger rows use `commit` that way).
+        "head_sha": record.get("head_sha") or None,
     }
     # #540: attribute the human verdict to the MODEL(s) that produced the
     # finding, so reviewer_precision() splits per backend/model -> the routing

@@ -7,6 +7,14 @@
 # gate (test_elder_eval.py): a change to code_review_prompt.py fails CI until
 # this job (or a local run) re-records baseline.json in the same PR.
 #
+# `mode` below only ever runs the DEFAULT bench path (`elder_eval.runner`'s
+# ONE monolithic backend call via sast_benchmark.backends) - it does NOT run
+# `python -m elder_eval --production` (the shipped `review_diff` pipeline).
+# Wiring a production dispatch path is open follow-up work (see #545's PR
+# for the anchored-replay half of this eval's known issues); a manual
+# `--production` run still needs GRUG_BENCH_CAVE_URL reachable over this
+# job's tailnet join, same as sparkles below.
+#
 # PUBLIC-REPO DISCIPLINE: every endpoint/key arrives via secrets - the Cave
 # (sparkles) URL is a private tailnet address and is NEVER committed.
 #

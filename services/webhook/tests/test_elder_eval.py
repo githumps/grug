@@ -42,6 +42,8 @@ def _row(
     reviewer: str = "codex",
     severity: str = "HIGH",
     repo: str = "quadseven/grug",
+    commit: str | None = None,
+    head_sha: str | None = None,
 ) -> LedgerRow:
     return LedgerRow(
         repo=repo,
@@ -51,6 +53,8 @@ def _row(
         finding_class=finding_class,
         finding=f"synthetic {finding_class} finding",
         verdict=verdict,
+        commit=commit,
+        head_sha=head_sha,
     )
 
 
@@ -154,6 +158,85 @@ def test_build_cases_counts_unknown_verdicts():
     # mislabeled corpus must say why it yielded nothing.
     assert case.unknown_verdicts == {"pending": 1, "wontfix": 1}
     assert set(case.expected_classes) == {"correctness"}
+
+
+# --- #545: snapshot-anchored replay corpus derivation -----------------------
+
+
+_SHA_A = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+_SHA_B = "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3"
+
+
+def test_parse_row_reads_head_sha():
+    from ledger import parse_row
+
+    row = parse_row({
+        "repo": "quadseven/grug", "pr": 1, "reviewer": "codex",
+        "class": "correctness", "finding": "f", "verdict": "fixed",
+        "head_sha": _SHA_A,
+    })
+    assert row is not None
+    assert row.head_sha == _SHA_A
+
+
+def test_build_cases_anchors_on_explicit_head_sha():
+    """A row carrying `head_sha` (#545, the reviewed PR-head) anchors the
+    case directly - no fix-commit guessing needed."""
+    (case,) = build_cases([_row(600, "correctness", head_sha=_SHA_A)])
+    assert case.anchored
+    assert case.anchor_head_sha == _SHA_A
+    assert case.anchor_fix_commit is None
+
+
+def test_build_cases_falls_back_to_commit_as_fix_sha():
+    """Historical rows have no `head_sha` - a sha-shaped `commit` is treated
+    as the FIX commit (its PARENT is the pre-fix state, resolved later by
+    the live runner)."""
+    (case,) = build_cases([_row(601, "correctness", commit="65103f0")])
+    assert case.anchored
+    assert case.anchor_fix_commit == "65103f0"
+    assert case.anchor_head_sha is None
+
+
+def test_build_cases_rejects_non_sha_commit_junk():
+    """The real corpus's `commit` field carries free text on many rows
+    ('-', 'golang:1.26', 'sed-sim-test', ...) - none of that may be treated
+    as a fix-commit SHA. Unanchored means final-diff replay, tagged False."""
+    for junk in ("-", "golang:1.26", "sed-sim-test", "GRUG_RA_ROLE_ARN"):
+        (case,) = build_cases([_row(602, "correctness", commit=junk)])
+        assert not case.anchored, f"{junk!r} must not look like a sha"
+        assert case.anchor_fix_commit is None
+
+
+def test_build_cases_no_anchor_information_is_unanchored():
+    (case,) = build_cases([_row(603, "correctness")])
+    assert not case.anchored
+    assert case.anchor_head_sha is None
+    assert case.anchor_fix_commit is None
+
+
+def test_build_cases_head_sha_outranks_fix_commit():
+    """A PR with one row carrying a fix-commit and another carrying the
+    real reviewed head must prefer the explicit head - it is strictly more
+    trustworthy than a guess."""
+    rows = [
+        _row(604, "correctness", commit="65103f0"),
+        _row(604, "silent-failure", head_sha=_SHA_A),
+    ]
+    (case,) = build_cases(rows)
+    assert case.anchor_head_sha == _SHA_A
+    assert case.anchor_fix_commit is None
+
+
+def test_build_cases_anchor_conflict_keeps_first_seen_and_does_not_crash():
+    """Two rows on the same PR disagreeing on `head_sha` must not raise -
+    the eval keeps running on a messy corpus (logged, not fatal)."""
+    rows = [
+        _row(605, "correctness", head_sha=_SHA_A),
+        _row(605, "silent-failure", head_sha=_SHA_B),
+    ]
+    (case,) = build_cases(rows)
+    assert case.anchor_head_sha == _SHA_A
 
 
 # --- scoring: catch-rate ----------------------------------------------------
@@ -491,6 +574,29 @@ def test_score_threads_truncated_cases_into_report():
     assert baseline["backends"]["cave"]["truncated_cases"] == ["quadseven/grug#1"]
 
 
+def test_score_threads_anchored_cases_into_report_and_baseline():
+    """#545: which scored cases replayed the pre-fix snapshot must reach
+    the report AND the baseline - a mixed corpus must not average the bias
+    away silently."""
+    rows = [_row(1, "correctness"), _row(2, "correctness")]
+    cases = build_cases(rows)
+    replays = {
+        "quadseven/grug#1": CaseReplay(
+            case_id="quadseven/grug#1", emitted={"correctness": 1},
+            errored=False, anchored=True,
+        ),
+        "quadseven/grug#2": CaseReplay(
+            case_id="quadseven/grug#2", emitted={"correctness": 1},
+            errored=False, anchored=False,
+        ),
+    }
+    report = score(cases, replays)
+    assert report.anchored_cases == ("quadseven/grug#1",)
+    assert report.cases_scored == 2
+    baseline = to_baseline_dict(report, prompt_sha="abc", backend="cave")
+    assert baseline["backends"]["cave"]["anchored_cases"] == ["quadseven/grug#1"]
+
+
 def test_run_case_parse_failure_is_errored(monkeypatch):
     """A broken/unparseable LLM response must be errored=True, never a
     fabricated 'Elder found nothing' - a fake zero recorded into the
@@ -722,6 +828,189 @@ def test_run_eval_fetch_failure_is_errored_case():
     assert all(r.errored for r in replays.values())
     report = score(cases, replays)
     assert report.all_errored
+
+
+# --- #545: snapshot-anchored replay (live runner, no network) ---------------
+
+
+def test_resolve_anchor_sha_prefers_explicit_head_sha():
+    """An explicit reviewed head never needs a GitHub round-trip."""
+    from elder_eval.runner import resolve_anchor_sha
+
+    (case,) = build_cases([_row(610, "correctness", head_sha=_SHA_A)])
+
+    def must_not_be_called(*_a, **_kw):
+        raise AssertionError("fetch_parent must not run when head_sha is set")
+
+    assert resolve_anchor_sha(case, "tok", fetch_parent=must_not_be_called) == _SHA_A
+
+
+def test_resolve_anchor_sha_resolves_fix_commit_parent():
+    """No head_sha - the (sha-shaped) `commit` is the FIX commit; its
+    PARENT is the pre-fix anchor, resolved through the injected callable."""
+    from elder_eval.runner import resolve_anchor_sha
+
+    (case,) = build_cases([_row(611, "correctness", commit="65103f0")])
+    seen = {}
+
+    def fetch_parent(repo: str, commit_sha: str, token: str) -> str | None:
+        seen["args"] = (repo, commit_sha, token)
+        return "parent-sha"
+
+    assert resolve_anchor_sha(case, "tok", fetch_parent=fetch_parent) == "parent-sha"
+    assert seen["args"] == ("quadseven/grug", "65103f0", "tok")
+
+
+def test_resolve_anchor_sha_none_when_case_unanchored():
+    from elder_eval.runner import resolve_anchor_sha
+
+    (case,) = build_cases([_row(612, "correctness")])
+    assert resolve_anchor_sha(case, "tok") is None
+
+
+def test_diff_for_case_uses_anchored_diff_when_resolvable():
+    """The core #545 behavior: an anchored case replays base...anchor_sha,
+    NOT the PR's final merged diff, and reports anchored=True."""
+    from elder_eval.runner import diff_for_case
+
+    (case,) = build_cases([_row(613, "correctness", head_sha=_SHA_A)])
+    calls = []
+
+    def fake_resolve(case_, token, **_kw):
+        calls.append(("resolve", case_.case_id, token))
+        return _SHA_A
+
+    def fake_fetch_anchored(repo, pr, anchor_sha, token):
+        calls.append(("fetch_anchored", repo, pr, anchor_sha, token))
+        return "PRE-FIX DIFF"
+
+    def fake_fetch_final(repo, pr, token):
+        calls.append(("fetch_final",))
+        return "FINAL DIFF"
+
+    diff, anchored = diff_for_case(
+        case, "tok",
+        fetch_final=fake_fetch_final,
+        resolve_anchor=fake_resolve,
+        fetch_anchored=fake_fetch_anchored,
+    )
+    assert (diff, anchored) == ("PRE-FIX DIFF", True)
+    assert ("fetch_final",) not in calls
+    assert ("fetch_anchored", "quadseven/grug", 613, _SHA_A, "tok") in calls
+
+
+def test_diff_for_case_falls_back_when_case_unanchored():
+    from elder_eval.runner import diff_for_case
+
+    (case,) = build_cases([_row(614, "correctness")])
+    diff, anchored = diff_for_case(
+        case, "", fetch_final=lambda repo, pr, token: "FINAL DIFF"
+    )
+    assert (diff, anchored) == ("FINAL DIFF", False)
+
+
+def test_diff_for_case_falls_back_when_anchor_resolution_raises():
+    """A GitHub error resolving the fix-commit's parent (or the compare
+    call) must fall back to the final diff, never error the whole case -
+    only #545's own resolution machinery may be flaky, not the case."""
+    from elder_eval.runner import diff_for_case
+
+    (case,) = build_cases([_row(615, "correctness", head_sha=_SHA_A)])
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("github unreachable")
+
+    diff, anchored = diff_for_case(
+        case, "",
+        fetch_final=lambda repo, pr, token: "FINAL DIFF",
+        resolve_anchor=boom,
+    )
+    assert (diff, anchored) == ("FINAL DIFF", False)
+
+
+def test_diff_for_case_falls_back_when_anchor_unresolvable():
+    """A fix commit with no reachable parent (resolve_anchor returns None,
+    e.g. a root commit) must fall back, not raise or silently error."""
+    from elder_eval.runner import diff_for_case
+
+    (case,) = build_cases([_row(616, "correctness", commit="65103f0")])
+    diff, anchored = diff_for_case(
+        case, "",
+        fetch_final=lambda repo, pr, token: "FINAL DIFF",
+        resolve_anchor=lambda case_, token: None,
+    )
+    assert (diff, anchored) == ("FINAL DIFF", False)
+
+
+def test_run_eval_threads_anchored_flag_from_diff_for_case(monkeypatch):
+    """run_eval must stamp whatever `diff_for_case` decided onto the
+    CaseReplay it produces - the report/baseline split (#545) is built on
+    this."""
+    import json
+
+    import httpx
+
+    from elder_eval import runner
+    from elder_eval.runner import run_eval
+    from sast_benchmark.backends import BenchBackend
+
+    (case,) = build_cases([_row(617, "correctness", head_sha=_SHA_A)])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+
+    diff = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    monkeypatch.setattr(
+        runner, "diff_for_case",
+        lambda case_, token, fetch_final: (diff, True),
+    )
+    monkeypatch.setattr(
+        runner, "_post",
+        lambda b, m: httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "choices": [{"message": {"content": json.dumps({"findings": [
+                    {"path": "a.py", "line": 1, "rule": "correctness",
+                     "severity": "high", "message": "m"},
+                ]})}}],
+            },
+            request=httpx.Request("POST", "http://invalid"),
+        ),
+    )
+
+    replays = run_eval(backend, [case])
+    assert replays[case.case_id].anchored is True
+    assert replays[case.case_id].emitted == {"correctness": 1}
+
+
+def test_run_production_eval_threads_anchored_flag_from_diff_for_case(monkeypatch):
+    from elder_eval import runner
+    from elder_eval.runner import run_production_eval
+
+    (case,) = build_cases([_row(618, "correctness", head_sha=_SHA_A)])
+    monkeypatch.setattr(
+        runner, "diff_for_case",
+        lambda case_, token, fetch_final: (
+            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n",
+            True,
+        ),
+    )
+
+    def review(_hunks, **_kwargs):
+        return LlmReviewResponse(
+            kind="reviewed",
+            findings=(Finding(
+                path="a.py", line=1, rule="correctness",
+                severity="high", message="wrong result",
+            ),),
+        )
+
+    replays = run_production_eval([case], review=review)
+    assert replays[case.case_id].anchored is True
+    assert replays[case.case_id].emitted == {"correctness": 1}
 
 
 def test_diff_to_hunks_converts_unified_diff():
