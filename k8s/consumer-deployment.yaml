@@ -120,11 +120,25 @@ spec:
             # escalation / sample. Rollback to always-on dual-arm: deep.
             # Fast = coder-first with reasoner only if coder fails.
             - {name: GRUG_REVIEW_DEPTH, value: tiered}
-            # Escalation knobs (llm_client.decide_deep_escalation) — tuned for
-            # speed: fewer free samples; auto-deep only when added lines > 500
-            # (exclusive; see llm_client.decide_deep_escalation).
-            - {name: GRUG_DEEP_SAMPLE_RATE, value: "0.05"}
-            - {name: GRUG_DEEP_DIFF_LINES, value: "500"}
+            # Escalation knobs (llm_client.decide_deep_escalation). Were
+            # tuned for speed: 0.05 sample, auto-deep only above 500 added
+            # lines (exclusive bound - 500 does NOT escalate).
+            #
+            # Measured 2026-08-12 while diagnosing "Elder reviews nothing":
+            # grug's own recent PRs added 18, 60, 76, 88, 259 and 827 lines.
+            # Only the 827 escalated. The other five got the tier-1 coder arm
+            # alone and reported "Elder clear - no markings", which reads to an
+            # author as "reviewed and clean" and actually meant "the cheap arm
+            # found nothing and the reasoner never ran". Zero candidates ever
+            # reached the judge on this repo in 14 days.
+            #
+            # 200/0.20: catch substantial PRs outright, and still deep-review
+            # 1 in 5 small ones so there is a sample to measure against. The
+            # cost is more reasoner contention on the shared Spark, which is
+            # what the previous tuning was protecting. Revisit with real
+            # numbers once grug#853's anchored eval can report them.
+            - {name: GRUG_DEEP_SAMPLE_RATE, value: "0.20"}
+            - {name: GRUG_DEEP_DIFF_LINES, value: "200"}
             # #646: reasoner after Tier-1 publish (0 = disable async deep)
             - {name: GRUG_DEEP_ASYNC, value: "1"}
             - {name: GRUG_OPENROUTER_REVIEW_MODEL, value: anthropic/claude-opus-4.7}

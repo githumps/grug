@@ -126,9 +126,16 @@ spec:
             # their existing lower-cost OpenRouter model configuration.
             # Tiered Elder (#645): see consumer-deployment for full comments.
             - {name: GRUG_REVIEW_DEPTH, value: tiered}
-            # Tighter deep escalation = less reasoner contention (speed).
-            - {name: GRUG_DEEP_SAMPLE_RATE, value: "0.05"}
-            - {name: GRUG_DEEP_DIFF_LINES, value: "500"}
+            # Deep escalation (#645). WAS 500 lines / 0.05 sample, tuned for
+            # speed. Measured 2026-08-12: grug's own PRs run 18-260 added
+            # lines, so 5 of 6 never escalated and only ever saw the tier-1
+            # coder arm - "Elder clear - no markings" meant "the weak arm
+            # looked". Widened to 200/0.20 to buy coverage back. This costs
+            # reasoner contention on the shared Spark; it is a dial, and
+            # grug#853 makes the effect measurable rather than a matter of
+            # opinion. Full comments in consumer-deployment.
+            - {name: GRUG_DEEP_SAMPLE_RATE, value: "0.20"}
+            - {name: GRUG_DEEP_DIFF_LINES, value: "200"}
             - {name: GRUG_DEEP_ASYNC, value: "1"}
             # Keep the compatibility worker's staging policy identical to the
             # durable consumer even though production uses the consumer path.
