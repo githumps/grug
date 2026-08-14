@@ -153,12 +153,18 @@ spec:
             # In-cluster spark-gateway for the evidence-scoped judge. Keep the
             # role assignment identical on both Elder-capable workloads.
             - {name: GRUG_CAVE_GATEWAY_URL, value: http://spark-gateway.spark-gateway.svc:8080}
-            - {name: GRUG_CAVE_JUDGE_MODEL, value: poolside/Laguna-S-2.1-NVFP4}
-            # Review ensemble arms (#593). Qwen coder stays on Sparkles;
-            # Laguna is the permanently resident Sparkicus vLLM reasoner.
-            # Model names are pinned to the exact names exposed by each server.
+            # infra#2451/#2454 precedent: the sparkicus vLLM resident is not a
+            # fixed identity (infra#2452 swapped poolside/Laguna-S-2.1-NVFP4 ->
+            # Qwen/Qwen3.8-27B-FP8 same-day). spark_gateway.py's `spark:warm-any`
+            # sentinel routes to whichever vLLM target is reachable and rewrites
+            # the outgoing model name to what it actually serves, so this stops
+            # needing a lockstep edit on every future sparkicus swap - the same
+            # fix already applied to macchina-cave-connector/the judge (#2450)
+            # and hermes-discord (#2454). Qwen coder stays pinned on Sparkles
+            # (an Ollama exact-name target, unaffected by the vLLM swap).
+            - {name: GRUG_CAVE_JUDGE_MODEL, value: "spark:warm-any"}
             - {name: GRUG_CAVE_REVIEW_MODEL, value: qwen3-coder-next:q8_0}
-            - {name: GRUG_CAVE_REASONER_MODEL, value: poolside/Laguna-S-2.1-NVFP4}
+            - {name: GRUG_CAVE_REASONER_MODEL, value: "spark:warm-any"}
             # Omen production-signal fusion (#470). All three fail-open:
             # absent params/mapping = zero DD calls = today's review.
             - {name: GRUG_DD_API_KEY_SSM, value: /grug/dd-api-key}
