@@ -15,6 +15,7 @@ and never runs in the per-PR CI suite. It runs only from the on-demand
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -29,8 +30,40 @@ from .corpus import CorpusSample
 
 log = logging.getLogger("grug.sast_benchmark")
 
-_TIMEOUT_SECONDS = 150.0
-_RETRY_ATTEMPTS = 2
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a positive float from the environment, else the default.
+
+    Anything unparseable or <= 0 falls back and says so. A timeout silently
+    read as 0 would make every case fail instantly, which reads as "the model
+    caught nothing" rather than "the harness is misconfigured".
+    """
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("bench_env_not_a_number", extra={"var": name, "raw": raw[:40]})
+        return default
+    if value <= 0:
+        log.warning("bench_env_not_positive", extra={"var": name, "value": value})
+        return default
+    return value
+
+
+# Per-request ceiling for one backend call. Overridable because it is not one
+# number for all backends: a hosted frontier model answers a review in seconds,
+# while a local model on the Cave takes minutes on a large diff and gets slower
+# the bigger the PR.
+#
+# Measured 2026-08-15 recording a baseline against the Cave: 2 of 18 cases hit
+# ReadTimeout at 150s - one a 5236-line, 56-file diff. Because `--record`
+# rightly refuses to write a baseline from a partial run, those two timeouts
+# made the eval UNRECORDABLE, which in turn blocked every prompt change behind
+# the prompt-sha gate. A hardcoded ceiling that no operator could raise turned
+# a slow model into a stuck pipeline.
+_TIMEOUT_SECONDS = _positive_float_env("GRUG_BENCH_TIMEOUT_SECONDS", 150.0)
+_RETRY_ATTEMPTS = int(_positive_float_env("GRUG_BENCH_RETRY_ATTEMPTS", 2))
 # Measure the SHIPPED prompt. `_build_messages` keys `_SYSTEM_PROMPTS` by
 # PromptVariant ("v1"/"v2", #191 A/B); deep production uses v2. Passing
 # a non-member (the old "benchmark") raises KeyError -> every sample errors.
