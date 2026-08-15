@@ -1,0 +1,108 @@
+# Curated offline Opengrep rules for Swift (#859 - "infra's YAML and
+# macchina's Swift have none").
+#
+# WHY THIS FILE EXISTS. Opengrep already ships with the vendored offline
+# ruleset invoked by sast.py; the engine was never the gap. Before this file,
+# `sast_rules/` had zero rules with `languages: [swift]`, so every Swift file
+# staged for a scan got dropped before opengrep even looked at it - not a
+# scan that found nothing, a file that was never scanned. #866 made that
+# silence visible (`sast_opengrep_files_not_scanned`); this file is what
+# closes it, for Swift specifically.
+#
+# VERIFIED, not assumed. Opengrep's language list documents Swift support,
+# but a documented language and a rule that actually fires are different
+# claims (the same gap this whole file exists to close, one level up). Each
+# rule below was run with the real `opengrep` binary (v1.27.1, osx_arm64)
+# against a small Swift file with the matching defect planted, confirmed to
+# (a) appear in `paths.scanned` and (b) produce exactly the expected
+# `vuln_class` finding on the right line - and against a clean-code negative
+# control that produced zero findings. See services/webhook/tests/
+# test_sast_rules.py's PLANTED dict for the same fixtures wired into the
+# engine-backed test suite (skipped where no engine is on PATH, same as the
+# existing python.yml/yaml_ci_k8s.yml checks).
+#
+# Same conventions as python.yml/yaml_ci_k8s.yml: vendored so the review path
+# needs NO network, `metadata.vuln_class` on every rule (the runner DROPS any
+# finding without one), pattern-based over Swift/Foundation/CryptoKit APIs
+# that are common in an iOS/macOS codebase (grug reviews at least one Swift
+# app repo) - not an attempt at exhaustive coverage. Every `vuln_class` here
+# already has a label in sast.py's `_CLASS_LABELS`, so no runner change was
+# needed to ship this.
+#
+# LICENSING. No third-party rule pack is vendored here - every rule below is
+# hand-authored in this repo, same as python.yml/yaml_ci_k8s.yml. That keeps
+# the free/open-source-only constraint trivially satisfied (there is no
+# licence to check) rather than relying on one.
+rules:
+  - id: grug-swift-hardcoded-credential
+    languages: [swift]
+    severity: ERROR
+    message: Hardcoded credential/key - a secret assigned a string literal in source.
+    metadata: {vuln_class: hardcoded-credential}
+    patterns:
+      - pattern: let $NAME = "..."
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i)(password|passwd|secret|token|api_?key|access_?key|secret_?key|private_?key|credential|client_?secret)
+
+  - id: grug-swift-weak-crypto
+    languages: [swift]
+    severity: WARNING
+    message: Weak/misused crypto - MD5/SHA1 are not safe for security use.
+    metadata: {vuln_class: weak-crypto}
+    patterns:
+      - pattern-either:
+          - pattern: Insecure.MD5.hash(...)
+          - pattern: Insecure.SHA1.hash(...)
+
+  - id: grug-swift-cleartext-secret-log
+    languages: [swift]
+    severity: ERROR
+    message: Possible clear-text logging of a secret.
+    metadata: {vuln_class: cleartext-secret-log}
+    # Swift has no varargs logging sink to match the way python.yml matches
+    # `$LOG.$LVL(..., $SECRET, ...)` - the idiom here is string interpolation
+    # inside a single string-literal argument (`print("token: \(token)")`),
+    # which is a single AST node opengrep's structural patterns cannot pick
+    # apart by argument name. pattern-regex over the source line does the
+    # same liberal recall job as sast.py's own `_SECRET_TOKEN_RE`
+    # (substring match, deliberately no word boundary - Swift identifiers
+    # are camelCase, so `sessionToken` would not match a `\btoken\b` anchor).
+    pattern-regex: (?i)\b(?:print|NSLog|os_log)\s*\(.*?\\\(.*?(password|passwd|secret|token|api[_-]?key|access[_-]?key|credential)
+
+  - id: grug-swift-unsafe-deserialization
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      Unsafe deserialization - NSKeyedUnarchiver.unarchiveObject(with:/withFile:)
+      decodes without type validation and can instantiate arbitrary classes from
+      untrusted data. Use unarchivedObject(ofClass:from:) (NSSecureCoding)
+      instead.
+    metadata: {vuln_class: unsafe-deserialization}
+    patterns:
+      - pattern-either:
+          - pattern: "NSKeyedUnarchiver.unarchiveObject(with: ...)"
+          - pattern: "NSKeyedUnarchiver.unarchiveObject(withFile: ...)"
+
+  - id: grug-swift-command-injection
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      Possible command injection - a shell (/bin/sh or /bin/bash) is launched
+      as the process, so any argument built from untrusted input executes as
+      shell syntax rather than a plain argument.
+    metadata: {vuln_class: command-injection}
+    patterns:
+      - pattern-either:
+          - pattern: $TASK.launchPath = "/bin/sh"
+          - pattern: $TASK.launchPath = "/bin/bash"
+          - pattern: "Process.launchedProcess(launchPath: \"/bin/sh\", arguments: ...)"
+          - pattern: "Process.launchedProcess(launchPath: \"/bin/bash\", arguments: ...)"
+
+  - id: grug-swift-path-traversal
+    languages: [swift]
+    severity: ERROR
+    message: Possible path traversal - file path built from untrusted input via string concatenation.
+    metadata: {vuln_class: path-traversal}
+    patterns:
+      - pattern: "FileManager.default.contents(atPath: \"...\" + ...)"
