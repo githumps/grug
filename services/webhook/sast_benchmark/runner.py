@@ -45,6 +45,19 @@ def _post(backend: BenchBackend, messages: list[dict[str, str]]) -> httpx.Respon
         "model": backend.model,
         "messages": messages,
         "response_format": {"type": "json_object"},
+        # Temperature 0 is not a tuning preference, it is what makes this a
+        # MEASUREMENT. Without it the request inherits the server default and
+        # every run samples differently: two identical runs of the same 18
+        # cases against the same model scored 0.30 and 0.17 (2026-08-15), a 76%
+        # swing with nothing changed. Per-class noise was worse still -
+        # upstream-semantics moved 0.71 -> 0.00 and security-scope 0.00 -> 0.33
+        # between those runs, which is more than any prompt change is likely to
+        # buy. Every A/B ever run through this harness was therefore
+        # unfalsifiable: the instrument could not resolve the effect it existed
+        # to detect.
+        "temperature": 0,
+        # Belt and braces for backends that honour it; harmless where ignored.
+        "seed": 0,
         **backend.extra_body,
     }
     headers = {}
