@@ -1,0 +1,27 @@
+#!/bin/sh
+# Block private-infrastructure identifiers before the commit exists.
+#
+# Install once per clone:   git config core.hooksPath .githooks
+#
+# This is layer 1 of 2. It is the fast one - it runs offline, needs no
+# credentials, and gives feedback before anything is written to history. The CI
+# check is the backstop for when this hook is not installed: a fresh clone, a
+# different machine, a worktree, or an agent that never ran `git config`.
+#
+# Deliberately NOT bypassed by default. If you need to commit an exemption, add
+# the marker `leak-guard-allow` to the offending line so the exemption is
+# visible in review, or use `git commit --no-verify` and expect CI to catch it.
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+GUARD="$REPO_ROOT/scripts/check_private_leaks.py"
+
+[ -f "$GUARD" ] || exit 0   # guard removed/renamed: do not wedge commits
+
+if ! python3 "$GUARD" --staged; then
+    echo "" >&2
+    echo "pre-commit: BLOCKED. Nothing was committed." >&2
+    echo "Fix the lines above, or add 'leak-guard-allow' to any line that is" >&2
+    echo "genuinely safe. This repo is public." >&2
+    exit 1
+fi
