@@ -20,6 +20,27 @@ the follow-up to the KNOWN METHODOLOGY BIAS in specs/DESIGN.md: without
 it, every case replays the PR's FINAL merged diff, so a `fixed` ledger
 row whose bug was fixed inside that same PR is graded against code where
 the bug no longer exists.
+
+`run_case` (#859 follow-up) STAGES an oversized diff into multiple bounded
+cohort calls via the real `plan_review` packer, the same one dispatch.py
+and `review_diff` pack against - instead of the pre-#859 behavior of
+sending the whole diff as one monolithic backend call. A small diff still
+gets exactly one call (`plan_review` returns a single cohort and this is
+byte-identical to the old path), so only genuinely oversized cases change
+methodology. Deliberately UNBOUNDED cohort count (`max_cohorts=None`,
+unlike live production's webhook-latency-bound cap): a batch baseline
+needs COMPLETENESS, not the per-request latency guarantee that cap
+exists for, so nothing here reports "too big to review in full". A hunk
+too large for even one cohort on its own still cannot be reviewed (the
+planner refuses to truncate it - see `split_oversized_hunks`'s
+docstring), and a staged case is scored ALL-OR-NOTHING: any cohort
+failure errors the WHOLE case, mirroring `run_production_case`'s refusal
+to score incomplete `review_diff` coverage - a partial replay's misses
+would be amputation, not Elder. `CaseReplay.staged` rides into the report
+and baseline (`staged_cases`) so a reader can see exactly which cases
+were reviewed via multiple calls instead of one - the comparability
+caveat non-negotiable in #859: those cases' numbers describe a different
+methodology than an unstaged replay, not a like-for-like rerun.
 """
 
 from __future__ import annotations
@@ -34,6 +55,14 @@ from code_review_prompt import RULES
 # Elder's exact prompt + parser - deliberate private imports, same
 # rationale + caveat as the SAST runner: if their signatures change, this
 # runner must follow (measuring the shipped prompt is the whole point).
+#
+# `_review_cohort_paths` is the same kind of deliberate private import: it
+# is the live GRUG_REVIEW_COHORT_FILES-tunable cap the real cohort planner
+# packs against (see `review_cohort_char_budget`'s own docstring on why
+# the public/private split exists - "so the two layers cannot drift apart
+# on a config change"). Bench mode's staging (below) reuses it for the
+# same reason: measuring Elder's real behavior means packing against the
+# same numbers Elder's planner packs against, not a second guess at them.
 from llm_client import (
     Finding,
     FindingJudgement,
@@ -41,6 +70,8 @@ from llm_client import (
     LlmReviewResponse,
     _build_messages,
     _parse_response,
+    _review_cohort_paths,
+    review_cohort_char_budget,
     review_diff,
 )
 from personas.code_reviewer.diff_parser import parse_diff
@@ -55,6 +86,7 @@ from personas.code_reviewer.persona import (
     evaluate_diff,
 )
 from personas.code_reviewer.verify import verify_findings
+from review_pipeline import ReviewPlan, plan_review, render_review_map
 from sast_benchmark.backends import BenchBackend
 from sast_benchmark.runner import _post
 
@@ -288,6 +320,29 @@ def diff_for_case(
     return fetch_final(case.repo, case.pr, token), False
 
 
+def _bench_plan(hunks: list[Hunk]) -> ReviewPlan:
+    """Pack `hunks` into bounded cohorts via the REAL planner Elder's own
+    `review_diff` packs against - same char/path budgets
+    (`review_cohort_char_budget`/`_review_cohort_paths`), so a bench replay
+    stages a diff exactly where production would.
+
+    `max_cohorts=None` (unbounded) is the one deliberate divergence from
+    the live webhook path, which caps cohort count to protect a single
+    request's wall-clock budget. A batch baseline recording is not on that
+    clock - what it needs is COMPLETENESS, and `--record` already refuses
+    a baseline built from any incomplete case (see `run_case` below), so
+    there is no honest number to be had from truncating the plan instead
+    of the diff. If a future corpus case needs so many cohorts that this
+    becomes a real wall-clock problem, that will show up as `errored` (a
+    cohort call timing out) rather than as a silently truncated plan."""
+    return plan_review(
+        hunks,
+        max_cohort_chars=review_cohort_char_budget(),
+        max_cohort_paths=_review_cohort_paths(),
+        max_cohorts=None,
+    )
+
+
 def run_case(
     backend: BenchBackend,
     case: EvalCase,
@@ -302,7 +357,31 @@ def run_case(
     a non-run must never read as "Elder found nothing" (honest-zero rule).
     `anchored` (#545) just rides straight into the CaseReplay - the caller
     (`run_eval`, via `diff_for_case`) already decided whether `diff_text`
-    is the pre-fix snapshot or the PR's final merged diff."""
+    is the pre-fix snapshot or the PR's final merged diff.
+
+    A diff too big for one bounded cohort is STAGED (#859 follow-up) into
+    several `_post` calls via `_bench_plan`, instead of the pre-existing
+    behavior of sending the whole thing as one monolithic call - the
+    latter is what made a 56-file/5236-line corpus case (grug#494)
+    unrecordable even at a 900s per-request ceiling: not slow because the
+    model is slow, but because nothing this large should ever have been
+    one request. A diff that already fits in one cohort takes the exact
+    same single-call path as before (`plan_review` returns one cohort
+    covering every hunk in its original order), so this changes nothing
+    for the rest of the corpus. `CaseReplay.staged` reports which cases
+    took the multi-call path, so the baseline says so rather than the
+    change being invisible.
+
+    A hunk too large for even a lone cohort cannot be reviewed at all (see
+    `ReviewCohort.oversized` / `plan_review`'s docstring: the planner
+    refuses to truncate it, unlike the cross-hunk budget above, because
+    truncation corrupts line anchors) - staging never fabricates a partial
+    answer for it, and neither does an ordinary parse failure on any one
+    cohort: the WHOLE case errors, mirroring `run_production_case`'s
+    refusal to score incomplete `review_diff` coverage. A partial staged
+    replay's misses would be amputation, not Elder, exactly like a partial
+    production cohort run - never a case ELDER SCORED WORSE ON, only ever
+    a case that did not finish running."""
     try:
         hunks, truncated = bounded_hunks(diff_text)
         if truncated:
@@ -316,21 +395,42 @@ def run_case(
         if not hunks:
             log.warning("eval_case_empty_diff case=%s", case.case_id)
             return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
-        messages = _build_messages(
-            hunks, _PROMPT_VARIANT, None, None, None,
-            team_practices=team_practices,
-            few_shot_examples=few_shot,
+
+        plan = _bench_plan(hunks)
+        oversized = next(
+            (c for c in plan.concerns if c.kind == "oversized-hunk"), None
         )
-        resp = _post(backend, messages)
-        findings, _model, err = _parse_response(resp)
+        if oversized is not None:
+            log.warning(
+                "eval_case_hunks_oversized case=%s count=%d paths=%s",
+                case.case_id, len(oversized.paths), ",".join(oversized.paths[:10]),
+            )
+            return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
+
+        review_map = render_review_map(plan) if plan.staged else ""
+        findings: list[Finding] = []
+        for cohort in plan.cohorts:
+            cohort_hunks = [hunks[index] for index in cohort.hunk_indexes]
+            messages = _build_messages(
+                cohort_hunks, _PROMPT_VARIANT, None, None, None,
+                team_practices=team_practices,
+                few_shot_examples=few_shot,
+                review_map=review_map,
+            )
+            resp = _post(backend, messages)
+            cohort_findings, _model, err = _parse_response(resp)
+            if err and not cohort_findings:
+                # ALL-OR-NOTHING (see docstring): one bad cohort must not
+                # silently shrink a staged case's findings into a fake
+                # complete-looking replay.
+                log.warning(
+                    "eval_case_parse_failed case=%s err=%s", case.case_id, err
+                )
+                return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
+            findings.extend(cohort_findings)
     except Exception as e:  # noqa: BLE001 - one case must not abort the sweep
         log.warning(
             "eval_case_errored case=%s kind=%s", case.case_id, type(e).__name__
-        )
-        return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
-    if err and not findings:
-        log.warning(
-            "eval_case_parse_failed case=%s err=%s", case.case_id, err
         )
         return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
     return CaseReplay(
@@ -339,6 +439,7 @@ def run_case(
         errored=False,
         truncated=truncated,
         anchored=anchored,
+        staged=plan.staged,
     )
 
 
