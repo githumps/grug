@@ -123,6 +123,12 @@ def _print_report(name: str, report: EvalReport) -> None:
             "  !! diff hunk-bounded (misses may be amputation, not Elder): "
             f"{', '.join(report.truncated_cases)}"
         )
+    if report.staged_cases:
+        print(
+            "  staged (too big for one cohort call - reviewed via several "
+            f"instead of a monolithic one, #859 follow-up): "
+            f"{', '.join(report.staged_cases)}"
+        )
     if report.out_of_taxonomy:
         oot = ", ".join(f"{c}x{n}" for c, n in sorted(report.out_of_taxonomy.items()))
         print(f"  out-of-taxonomy (excluded, not misses): {oot}")

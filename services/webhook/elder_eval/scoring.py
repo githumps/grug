@@ -45,6 +45,13 @@ class CaseReplay:
     # (base...anchor_sha) rather than the PR's final merged diff. Only
     # meaningful when errored=False - a non-run has no diff to speak of.
     anchored: bool = False
+    # #859 follow-up: True when the diff was too big for one bounded
+    # cohort and was reviewed via multiple staged `_post` calls (the real
+    # `plan_review` packer) instead of a single monolithic call. Rides
+    # into the report/baseline (`staged_cases`) so a reader can see that
+    # this case's number describes a different methodology than an
+    # unstaged replay - not silently the same measurement, just faster.
+    staged: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,13 @@ class EvalReport:
     # final merged diff. `cases_scored - len(anchored_cases)` scored on the
     # final diff instead - the KNOWN METHODOLOGY BIAS corpus slice.
     anchored_cases: tuple[str, ...] = ()
+    # #859 follow-up: scored cases whose diff was too big for one bounded
+    # cohort and was staged into multiple calls instead of one monolithic
+    # request. Named explicitly (not folded into `truncated_cases`, a
+    # different fact: staging still reviews every kept hunk, it just costs
+    # more than one call) so the comparability caveat is visible, not
+    # inferred.
+    staged_cases: tuple[str, ...] = ()
 
     @property
     def all_errored(self) -> bool:
@@ -83,6 +97,7 @@ def score(
     errored: list[str] = []
     truncated: list[str] = []
     anchored: list[str] = []
+    staged: list[str] = []
     out_of_taxonomy: Counter[str] = Counter()
     unknown_verdicts: Counter[str] = Counter()
     scored = 0
@@ -109,6 +124,8 @@ def score(
             truncated.append(case.case_id)
         if replay.anchored:
             anchored.append(case.case_id)
+        if replay.staged:
+            staged.append(case.case_id)
         scored += 1
         emitted_classes = {c for c, n in replay.emitted.items() if n > 0}
         for ledger_cls, elder_set in case.expected_classes.items():
@@ -136,6 +153,7 @@ def score(
         unknown_verdicts=dict(unknown_verdicts),
         cases_scored=scored,
         anchored_cases=tuple(anchored),
+        staged_cases=tuple(staged),
     )
 
 
@@ -158,6 +176,11 @@ def to_baseline_dict(report: EvalReport, *, prompt_sha: str, backend: str) -> di
                 # the PR's final merged diff - the anchored/unanchored split
                 # a mixed corpus must keep visible, not average away.
                 "anchored_cases": sorted(report.anchored_cases),
+                # #859 follow-up: which scored cases were staged into
+                # multiple bounded cohort calls instead of one monolithic
+                # request - the comparability caveat a reader needs before
+                # treating those cases' numbers as a like-for-like rerun.
+                "staged_cases": sorted(report.staged_cases),
             }
         },
     }

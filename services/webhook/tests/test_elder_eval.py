@@ -597,6 +597,188 @@ def test_score_threads_anchored_cases_into_report_and_baseline():
     assert baseline["backends"]["cave"]["anchored_cases"] == ["quadseven/grug#1"]
 
 
+def test_score_threads_staged_cases_into_report_and_baseline():
+    """#859 follow-up: a case reviewed via multiple staged cohort calls
+    (instead of one monolithic call) must say so in the report AND the
+    baseline - that case's number describes a different methodology than
+    an unstaged replay, and a reader must be able to see which cases it
+    is, not infer it."""
+    rows = [_row(1, "correctness")]
+    cases = build_cases(rows)
+    replays = {
+        "quadseven/grug#1": CaseReplay(
+            case_id="quadseven/grug#1", emitted={"correctness": 1},
+            errored=False, staged=True,
+        ),
+    }
+    report = score(cases, replays)
+    assert report.staged_cases == ("quadseven/grug#1",)
+    baseline = to_baseline_dict(report, prompt_sha="abc", backend="cave")
+    assert baseline["backends"]["cave"]["staged_cases"] == ["quadseven/grug#1"]
+
+
+# --- #859 follow-up: bench mode stages an oversized diff like production --
+
+
+def _diff_for(*paths: str) -> str:
+    """One trivial one-line-added hunk per path, unified-diff shaped."""
+    return "".join(
+        f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n"
+        "@@ -1 +1,2 @@\n a = 1\n+b = 2\n"
+        for p in paths
+    )
+
+
+def _bench_response(findings: list[dict]):
+    import httpx
+    import json as _json
+
+    body = _json.dumps({"findings": findings})
+    return httpx.Response(
+        200,
+        json={"model": "m", "choices": [{"message": {"content": body}}]},
+        request=httpx.Request("POST", "http://x"),
+    )
+
+
+def _finding(path: str) -> dict:
+    return {
+        "path": path, "line": 1, "rule": "correctness",
+        "severity": "high", "message": "m",
+    }
+
+
+def test_run_case_sends_one_call_for_a_diff_that_fits_one_cohort(monkeypatch):
+    """Pre-existing (small-diff) behavior must not change: exactly one
+    backend call, not staged. This is the regression guard for every
+    OTHER corpus case's comparability with the existing baseline."""
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    calls = []
+
+    def fake_post(backend, messages):
+        calls.append(messages)
+        return _bench_response([])
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(1, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    replay = runner.run_case(backend, case, _diff_for("x.py"))
+
+    assert len(calls) == 1
+    assert replay.staged is False
+    assert replay.errored is False
+
+
+def test_run_case_stages_an_oversized_diff_into_multiple_cohort_calls(monkeypatch):
+    """THE fix (#859 follow-up): bench mode used to send the WHOLE diff as
+    ONE monolithic call no matter its size - which is exactly what made
+    grug#494 (56 files, 5236 lines) time out and refuse to record even at
+    a 900s ceiling. A diff too big for one bounded cohort must now be
+    staged into multiple smaller calls via the real `plan_review` packer,
+    and every cohort's findings must reach the replay - not just the
+    first one."""
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    diff = _diff_for("a.py", "b.py")
+    hunks = runner.diff_to_hunks(diff)
+    assert len(hunks) == 2
+    one_hunk_chars = max(len(h.body) for h in hunks)
+    # Fits ONE hunk alone, not both together - forces the packer to split
+    # this into 2 cohorts instead of 1.
+    monkeypatch.setattr(runner, "review_cohort_char_budget", lambda: one_hunk_chars + 1)
+    monkeypatch.setattr(runner, "_review_cohort_paths", lambda: 10)
+
+    calls = []
+
+    def fake_post(backend, messages):
+        calls.append(messages)
+        # Each call's response is scoped to whichever path is actually in
+        # that call's prompt, so the assertion below can only pass if
+        # BOTH cohorts really ran (not just the first, would-be-only one).
+        content = messages[-1]["content"]
+        path = "a.py" if "a.py" in content else "b.py"
+        return _bench_response([_finding(path)])
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(2, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    replay = runner.run_case(backend, case, diff)
+
+    assert len(calls) == 2, (
+        "a diff too big for one cohort must cost multiple bounded calls, "
+        "not one monolithic call"
+    )
+    assert replay.staged is True
+    assert replay.errored is False
+    assert replay.emitted == {"correctness": 2}, "findings from BOTH cohorts must merge"
+
+
+def test_run_case_refuses_a_hunk_too_large_for_any_cohort(monkeypatch):
+    """A hunk bigger than a WHOLE cohort can never be reviewed - the
+    planner will not truncate it (truncation corrupts line anchors), same
+    as production's `split_oversized_hunks`. It must never fabricate a
+    partial answer: no model call happens at all, and the case errors."""
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    diff = _diff_for("big.py")
+    hunks = runner.diff_to_hunks(diff)
+    monkeypatch.setattr(
+        runner, "review_cohort_char_budget", lambda: len(hunks[0].body) - 1
+    )
+    monkeypatch.setattr(runner, "_review_cohort_paths", lambda: 10)
+
+    calls = []
+    monkeypatch.setattr(runner, "_post", lambda b, m: calls.append(m))
+    (case,) = build_cases([_row(3, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    replay = runner.run_case(backend, case, diff)
+
+    assert calls == [], "an unreviewable oversized hunk must never reach a model call"
+    assert replay.errored is True
+
+
+def test_run_case_staged_cohort_failure_errors_the_whole_case(monkeypatch):
+    """A staged replay is scored ALL-OR-NOTHING: one cohort's parse
+    failure must not silently shrink the case into a fake, apparently-
+    complete replay of only the cohorts that happened to succeed -
+    mirrors `run_production_case`'s refusal to score incomplete
+    `review_diff` coverage."""
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    diff = _diff_for("a.py", "b.py")
+    hunks = runner.diff_to_hunks(diff)
+    one_hunk_chars = max(len(h.body) for h in hunks)
+    monkeypatch.setattr(runner, "review_cohort_char_budget", lambda: one_hunk_chars + 1)
+    monkeypatch.setattr(runner, "_review_cohort_paths", lambda: 10)
+
+    calls = []
+
+    def fake_post(backend, messages):
+        import httpx
+
+        calls.append(messages)
+        if len(calls) == 1:
+            return _bench_response([_finding("a.py")])
+        return httpx.Response(
+            200, content=b"not json at all",
+            request=httpx.Request("POST", "http://x"),
+        )
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(4, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    replay = runner.run_case(backend, case, diff)
+
+    assert len(calls) == 2
+    assert replay.errored is True
+    assert replay.emitted == {}, "a partial staged replay must never publish partial findings"
+
+
 def test_run_case_parse_failure_is_errored(monkeypatch):
     """A broken/unparseable LLM response must be errored=True, never a
     fabricated 'Elder found nothing' - a fake zero recorded into the
