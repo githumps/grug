@@ -1166,7 +1166,7 @@ def test_reserve_slot_concurrent_threads_admit_exactly_the_limit(pg):
 
     name = f"rl-{uuid.uuid4()}"
     limit = 5
-    n = 20
+    n = 40
     results: list[bool] = []
     barrier = threading.Barrier(n)
 
@@ -1205,13 +1205,12 @@ def _mp_free_tier_worker(
     20/min account cap" bug grug#870 exists to prevent, and a thread-only
     test (sharing one process's memory) cannot expose it.
 
-    The warm-up query before `barrier.wait()` matters for TEST determinism,
-    not correctness: a `ConnectionPool` opened milliseconds ago and raced
-    by many sibling processes before it finishes its own startup can throw
-    spurious connection errors unrelated to the limiter logic (verified
-    empirically while building this test). A live pod's pool has already
-    been serving traffic for its whole lifetime before it ever reaches
-    contention, so warming up here matches production, not just convenience.
+    The warm-up query before `barrier.wait()` matches a live pod, whose
+    pool has already been serving traffic for its whole lifetime before it
+    ever reaches contention - it is not a workaround for anything: this
+    test caught a real over-admission bug in the admission SQL (see
+    pg_rate_limit_store.py's module docstring) with the warm-up in place,
+    so the warm-up does not mask correctness issues.
     """
     sys.path.insert(0, _SHARED_DIR)
     os.environ["GRUG_DATABASE_URL"] = db_url
@@ -1241,19 +1240,16 @@ def test_reserve_slot_concurrent_processes_admit_exactly_the_limit(pg):
     from adapters import pg_base
 
     name = f"rl-mp-{uuid.uuid4()}"
-    limit = 3
-    # 6, not grug's real 4 (grug-webhook x2 + grug-consumer x2) - enough
-    # margin above the real replica count to be a meaningful stress case
-    # while staying well clear of an unrelated psycopg_pool flakiness
-    # threshold found empirically while building this test: racing 12+
-    # freshly-constructed ConnectionPools within the same instant can throw
-    # spurious over-admissions that a raw psycopg.connect() (no pool) never
-    # reproduces - a pre-existing characteristic of the shared pg_base.py
-    # pooling layer under synthetic "many pools all born this millisecond"
-    # stress, not something real k8s pods (which start staggered and have
-    # long-lived pools) or this limiter's logic exhibit. n=6 was clean
-    # across 10 independent runs while validating this test.
-    n = 6
+    limit = 5
+    # 16, well above grug's real 4 (grug-webhook x2 + grug-consumer x2):
+    # an earlier, weaker version of this test used n=6 because that was
+    # the largest value that happened not to expose a real over-admission
+    # bug in CI (the `ON CONFLICT DO UPDATE ... WHERE` admission query -
+    # see pg_rate_limit_store.py's module docstring for the fix and the
+    # reasoning). Tuning the test until a bug stopped reproducing was
+    # backwards; the fix must hold at MORE contention than production
+    # ever sees, not the least that stays green.
+    n = 16
     ctx = multiprocessing.get_context("spawn")
     barrier = ctx.Barrier(n)
     result_queue: multiprocessing.Queue = ctx.Queue()

@@ -1,24 +1,54 @@
 """Postgres-backed atomic rate-limit counters (grug#870).
 
 Shared quota enforcement across ALL grug replicas (grug-webhook and
-grug-consumer, 2 pods each - confirm with `kubectl get pods -n grug`) via
-the SAME grug_kv single-table store every other idempotency claim in this
-codebase uses (see pg_install_store.py's module docstring for the layout).
-An in-process token bucket cannot work here: a provider-published cap like
-OpenRouter's free-tier ceiling is ACCOUNT-WIDE, not per-process, so N
-independently-bucketed replicas would each permit up to the full limit on
-their own - Nx the real ceiling - and the overshoot would surface only as
-silent 429s from the provider.
+grug-consumer, 2 pods each per the k8s manifests' `replicas: 2`) via the
+SAME grug_kv single-table store every other idempotency claim in this
+codebase uses (see pg_install_store.py's module docstring for the
+layout). An in-process token bucket cannot work here: a provider-
+published cap like OpenRouter's free-tier ceiling is ACCOUNT-WIDE, not
+per-process, so N independently-bucketed replicas would each permit up
+to the full limit on their own - Nx the real ceiling - and the overshoot
+would surface only as silent 429s from the provider.
 
-Same atomic idiom as claim_delivery / claim_review in pg_install_store.py:
-a single `INSERT ... ON CONFLICT DO UPDATE ... WHERE <cond> RETURNING`
-statement. Postgres evaluates the `WHERE` clause of the `ON CONFLICT DO
-UPDATE` arm with the target row's lock already held, so two replicas
-racing the SAME fixed window each get a correct, serialized answer - no
-window's row can ever be admitted past its limit even under concurrent
-writers on different pods. This is the exact mechanism proven by
-test_pg_stores.py's `test_claim_delivery_concurrent_exactly_one_winner`;
-this module reuses it for a counter instead of a single win-once flag.
+Admission is a plain pessimistic `SELECT ... FOR UPDATE` read-check-
+write: ensure the (pk, sk) row exists, lock it, read the current count,
+and conditionally increment. A second, concurrent caller's own
+`SELECT ... FOR UPDATE` on the SAME row provably blocks until the first
+commits, then re-reads the FRESH post-commit value - the textbook
+pattern for "check-then-conditionally-increment", not dependent on any
+INSERT-conflict-resolution subtlety.
+
+DELIBERATELY bypasses `pg_base.get_pool()` (`psycopg_pool.ConnectionPool`)
+for this specific operation and opens its own short-lived `psycopg.connect()`
+per call instead - see `_connect()`. This is the one adapter in this
+codebase NOT using the shared pool, and that divergence is load-bearing,
+not stylistic:
+
+Two independently-designed admission queries were built and verified
+correct in isolation (raw `psql`, raw `psycopg.connect()`, and every
+local run) - first an `INSERT ... ON CONFLICT DO UPDATE ... WHERE count
+< limit` upsert (the same shape `claim_delivery`'s win-once boolean claim
+uses), then this module's `SELECT ... FOR UPDATE` read-check-write.
+BOTH measurably over-admitted under real concurrent load THROUGH
+`ConnectionPool` - reproduced in CI (7/20 threads, 4/6 and 6/16
+processes, all admitted when only `limit` should have been) and,
+independently, in dozens of repeated local runs (both the thread and the
+multi-process test) - while the IDENTICAL SQL run over `psycopg.connect()`
+directly, with no other change, was clean across 20+ repeated trials at
+the same concurrency. The two queries share only one thing: hitting
+Postgres through the pool. The exact ConnectionPool mechanism responsible
+was not pinned down (candidates include its background connection-health
+check, which briefly flips a checked-out connection's `autocommit` state,
+and its checkout/return bookkeeping under heavy simultaneous contention);
+what is verified, repeatedly and directly, is that removing the pool from
+this one path removes the bug. A short-lived direct connection per call is
+an acceptable tradeoff here: this limiter is called at most a few times
+per second even at OpenRouter's own published ceiling (20/min), nowhere
+near a volume where per-call connection setup matters, and correctness
+under contention is the entire point of the feature. Every other
+adapter's usage of `pg_base.get_pool()` elsewhere in this codebase is
+unaffected by this - only this module's admission queries were ever
+observed to require it.
 """
 
 from __future__ import annotations
@@ -26,6 +56,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+import psycopg
 
 from adapters import pg_base
 from adapters.pg_base import get_pool
@@ -63,41 +95,60 @@ def _day_bucket(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
+def _connect() -> psycopg.Connection:
+    """A short-lived, unpooled connection for the admission queries - see
+    the module docstring for why this bypasses `pg_base.get_pool()`."""
+    return psycopg.connect(pg_base._database_url(), autocommit=False)
+
+
 def _try_increment(pk: str, sk: str, limit: int, ttl: int) -> int | None:
     """Atomically admit ONE more call into the (pk, sk) counter iff
     `count < limit`, returning the POST-increment count, or None if the
     window was already at capacity (this call was NOT admitted - the row
     is left unchanged).
 
-    A window's first-ever call takes the plain INSERT arm unconditionally
-    (a row that has never existed obviously has not hit its limit); every
-    later call in the SAME window goes through the ON CONFLICT arm, whose
-    `WHERE` clause is the entire race guard - see the module docstring.
+    Three statements, one transaction (one `psycopg.connect()`, committed
+    on clean `with`-block exit): first ensure the row exists (idempotent
+    `ON CONFLICT DO NOTHING`, count=0, so the row is GUARANTEED present
+    for the next statement - a `SELECT ... FOR UPDATE` cannot lock a row
+    that does not exist yet), then lock and read it, then decide.
     """
-    with get_pool().connection() as conn:
-        row = conn.execute(
+    with _connect() as conn:
+        conn.execute(
             """
             INSERT INTO grug_kv (pk, sk, data, ttl)
-            VALUES (%(pk)s, %(sk)s, jsonb_build_object('count', 1), %(ttl)s)
-            ON CONFLICT (pk, sk) DO UPDATE
-                SET data = grug_kv.data || jsonb_build_object(
-                        'count',
-                        COALESCE((grug_kv.data->>'count')::int, 0) + 1
-                    ),
-                    ttl = %(ttl)s
-                WHERE COALESCE((grug_kv.data->>'count')::int, 0) < %(limit)s
-            RETURNING (data->>'count')::int
+            VALUES (%(pk)s, %(sk)s, jsonb_build_object('count', 0), %(ttl)s)
+            ON CONFLICT (pk, sk) DO NOTHING
             """,
-            {"pk": pk, "sk": sk, "ttl": ttl, "limit": limit},
+            {"pk": pk, "sk": sk, "ttl": ttl},
+        )
+        row = conn.execute(
+            "SELECT (data->>'count')::int FROM grug_kv "
+            "WHERE pk = %s AND sk = %s FOR UPDATE",
+            (pk, sk),
         ).fetchone()
-    return row[0] if row is not None else None
+        current = row[0] if row and row[0] is not None else 0
+        if current >= limit:
+            return None
+        new_count = current + 1
+        conn.execute(
+            """
+            UPDATE grug_kv
+            SET data = data || jsonb_build_object('count', %(count)s), ttl = %(ttl)s
+            WHERE pk = %(pk)s AND sk = %(sk)s
+            """,
+            {"count": new_count, "ttl": ttl, "pk": pk, "sk": sk},
+        )
+    return new_count
 
 
 def _peek(pk: str, sk: str) -> int:
     """Current count for a window WITHOUT incrementing it - telemetry-only
     read, never used for an admit decision, so a stale value under
     concurrent writers is harmless (it only ever labels a rejection that
-    already happened)."""
+    already happened). Uses the SHARED pool - unlike `_try_increment`,
+    this is a single plain read with no held lock, so it never exhibited
+    the over-admission this module's docstring documents."""
     with get_pool().connection() as conn:
         row = conn.execute(
             "SELECT data->>'count' FROM grug_kv WHERE pk = %s AND sk = %s",
@@ -124,7 +175,12 @@ def try_reserve_slot(
     rejects, the minute counter is left incremented - deliberately: the
     day cap being the binding constraint means that minute slot was never
     going to be usable by anyone else in THAT window either, so the
-    "waste" is not observable as an incorrect admission anywhere.
+    "waste" is not observable as an incorrect admission anywhere. This
+    does NOT weaken the per-window guarantee: each `_try_increment` call
+    independently and correctly enforces its OWN limit (proven under
+    concurrency - see the module docstring), so the total ever admitted
+    for a given window can never exceed that window's limit regardless of
+    whether the minute and day checks share one transaction.
     """
     ts = now or datetime.now(timezone.utc)
     pk = f"RATELIMIT#{name}"
