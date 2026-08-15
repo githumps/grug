@@ -1766,6 +1766,81 @@ def test_parse_response_scalar_content_is_graceful_not_crash() -> None:
     assert err  # non-empty error string, no exception raised
 
 
+def test_parse_response_null_content_with_reasoning_is_clean_parse_error() -> None:
+    """grug#881: a THINKING model under `response_format=json_object` can
+    legally return `content: null` while its answer landed in a separate
+    `reasoning` field instead of raising. `json.loads(None)` raises
+    `TypeError`, not `JSONDecodeError` - `_parse_response`'s whole job is
+    safe parsing, so this must come back as a normal (findings, model,
+    error) triple, never an unhandled exception. The error must name the
+    offending field (content is null) AND finish_reason, so one run is
+    enough to diagnose - the whole point of grug#881."""
+    body = {
+        "model": "poolside/laguna-s-2.1:free",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning": "Here's a thinking process:\n\n1. **An",
+                },
+                "finish_reason": "length",
+            }
+        ],
+    }
+    findings, model, err = lc._parse_response(httpx.Response(200, json=body))
+    assert findings == ()
+    assert model == "poolside/laguna-s-2.1:free"
+    assert err  # non-empty, no exception raised
+    assert "null" in err
+    assert "finish_reason=length" in err
+    assert "reasoning field present" in err
+
+
+def test_parse_response_null_content_without_reasoning_still_diagnoses() -> None:
+    """grug#881: the ACTUAL production request shape
+    (`reasoning: {"exclude": True}`) verified live against
+    `poolside/laguna-s-2.1:free` - `reasoning` comes back None too, not
+    just `content`. Excluded means excluded; there is nothing to fall back
+    to. The error must still name the offending field and finish_reason
+    with no `reasoning` field present at all."""
+    body = {
+        "model": "poolside/laguna-s-2.1:free",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": None},
+                "finish_reason": "length",
+            }
+        ],
+    }
+    findings, _model, err = lc._parse_response(httpx.Response(200, json=body))
+    assert findings == ()
+    assert err
+    assert "null" in err
+    assert "finish_reason=length" in err
+    assert "reasoning field present" not in err
+
+
+def test_parse_response_non_string_content_diagnoses_type() -> None:
+    """A content value that is present but the WRONG type (e.g. a dict, if
+    a provider ever nests structured output there) must also return a
+    diagnosable error naming the actual type, never raise."""
+    body = {
+        "model": "some-model",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": {"nested": "oops"}},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    findings, _model, err = lc._parse_response(httpx.Response(200, json=body))
+    assert findings == ()
+    assert err
+    assert "dict" in err
+    assert "finish_reason=stop" in err
+
+
 # ---------------------------------------------------------------------------
 # DD LLM Obs tracing — every successful LLM call emits a trace span with
 # prompt/response/latency/tokens; failures emit a span with error metadata.

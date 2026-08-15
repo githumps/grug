@@ -151,6 +151,49 @@ def test_configured_backends_honors_env(monkeypatch):
     }
 
 
+def test_configured_backends_disables_reasoning_for_free_tier_override(monkeypatch):
+    """grug#881: a `:free` model override must NOT inherit the default
+    `reasoning: {"exclude": True}` config. Verified live against
+    `poolside/laguna-s-2.1:free`: that config let the model spend its
+    ENTIRE completion-token budget on reasoning OpenRouter was told to
+    exclude, returning `content: null` with no `reasoning` field to fall
+    back to - every case failed before a single usable token. OpenRouter's
+    own `reasoning: {"enabled": False}` toggle is the verified-working
+    fix (`chat_template_kwargs.enable_thinking: False`, grug#852's
+    mechanism, does NOT reach this model through OpenRouter)."""
+    from sast_benchmark import backends
+
+    for var in ("GRUG_BENCH_POOLSIDE_KEY", "GRUG_BENCH_CAVE_URL", "GRUG_BENCH_CAVE_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_KEY", "k")
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_MODEL", "poolside/laguna-s-2.1:free")
+
+    configured = backends.configured_backends()
+    openrouter = next(b for b in configured if b.name == "openrouter")
+    assert openrouter.model == "poolside/laguna-s-2.1:free"
+    assert openrouter.extra_body["reasoning"] == {"enabled": False}
+    # Only the reasoning knob changes - max_tokens is untouched.
+    assert openrouter.extra_body["max_tokens"] == 32_768
+
+
+def test_configured_backends_paid_override_keeps_default_reasoning(monkeypatch):
+    """A non-`:free` override (a different paid model) keeps the default
+    high-effort/exclude reasoning config - only a `:free` id is treated as
+    an unvetted free-tier probe. A paid frontier model is far more likely
+    to implement OpenRouter's unified reasoning API the way opus already
+    does in production."""
+    from sast_benchmark import backends
+
+    for var in ("GRUG_BENCH_POOLSIDE_KEY", "GRUG_BENCH_CAVE_URL", "GRUG_BENCH_CAVE_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_KEY", "k")
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_MODEL", "openai/gpt-5")
+
+    configured = backends.configured_backends()
+    openrouter = next(b for b in configured if b.name == "openrouter")
+    assert openrouter.extra_body["reasoning"] == {"effort": "high", "exclude": True}
+
+
 def test_cave_needs_both_url_and_model(monkeypatch):
     """sparkles only runs with BOTH a URL and a model (no partial/leaky default)."""
     from sast_benchmark import backends

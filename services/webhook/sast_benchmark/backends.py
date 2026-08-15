@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from openrouter_free_limiter import is_free_tier_model
+
 
 @dataclass(frozen=True, slots=True)
 class BenchBackend:
@@ -46,6 +48,30 @@ _OPENROUTER_EXTRA_BODY = {
     "max_tokens": 32_768,
     "reasoning": {"effort": "high", "exclude": True},
 }
+
+# grug#881: a `:free` model override is whatever an operator points
+# GRUG_BENCH_OPENROUTER_MODEL at to measure the free tier - unlike the
+# default (opus-4.7, chosen to mirror production's exact reasoning config
+# so the bench stays comparable), it is not guaranteed to implement
+# OpenRouter's unified `reasoning.exclude` the way a first-party frontier
+# model does. Verified LIVE against `poolside/laguna-s-2.1:free` with the
+# real request `_build_messages` + this module's default extra_body
+# produce: `reasoning: {"effort": "high", "exclude": True}` let the model
+# spend its ENTIRE completion-token budget on reasoning OpenRouter was
+# told to exclude from the response, so `finish_reason="length"` and BOTH
+# `message.content` AND `message.reasoning` came back `None` - excluded
+# means excluded, there was no `reasoning` field to fall back to, every
+# case failed before a single token of usable output was produced.
+#
+# grug#852 disabled the same class of runaway thinking on the Cave arm via
+# `chat_template_kwargs: {"enable_thinking": False}` - that mechanism does
+# NOT reach this model through OpenRouter (verified live: byte-identical
+# null-content result with or without it added to the request body).
+# OpenRouter's OWN `reasoning: {"enabled": False}` toggle DOES turn it off
+# (verified live: finish_reason="stop", non-null content). Applied only to
+# a `:free` override, never the default, so the bench still measures
+# production's actual opus-4.7 reasoning config faithfully.
+_FREE_TIER_OPENROUTER_REASONING = {"enabled": False}
 
 # Poolside's laguna-m.1 runs thinking ON by default (blew the read timeout +
 # broke JSON parse — see llm_client). Disable it for the benchmark too.
@@ -100,6 +126,15 @@ def configured_backends() -> list[BenchBackend]:
 
     openrouter_key = os.getenv("GRUG_BENCH_OPENROUTER_KEY", "")
     if openrouter_key:
+        openrouter_model = os.getenv(
+            "GRUG_BENCH_OPENROUTER_MODEL", _OPENROUTER_DEFAULT_MODEL,
+        )
+        openrouter_extra_body = dict(_OPENROUTER_EXTRA_BODY)
+        if is_free_tier_model(openrouter_model):
+            # See _FREE_TIER_OPENROUTER_REASONING's docstring (grug#881).
+            openrouter_extra_body["reasoning"] = dict(
+                _FREE_TIER_OPENROUTER_REASONING
+            )
         out.append(
             BenchBackend(
                 name="openrouter",
@@ -107,9 +142,9 @@ def configured_backends() -> list[BenchBackend]:
                     "GRUG_BENCH_OPENROUTER_URL",
                     "https://openrouter.ai/api/v1/chat/completions",
                 ),
-                model=os.getenv("GRUG_BENCH_OPENROUTER_MODEL", _OPENROUTER_DEFAULT_MODEL),
+                model=openrouter_model,
                 api_key=openrouter_key,
-                extra_body=dict(_OPENROUTER_EXTRA_BODY),
+                extra_body=openrouter_extra_body,
             )
         )
 

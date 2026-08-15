@@ -805,6 +805,82 @@ def test_run_case_parse_failure_is_errored(monkeypatch):
     assert replay.errored
 
 
+def test_run_case_thinking_model_null_content_is_diagnosed_not_a_bare_typeerror(
+    monkeypatch, caplog,
+):
+    """grug#881: a response shaped like the real failing run (`content:
+    null`, `finish_reason: "length"`) must take the dedicated
+    `eval_case_parse_failed` branch - diagnosable in one log line - never
+    fall through to the generic `eval_case_errored` catch-all as a bare
+    `kind=TypeError` (which is what cost 90 minutes of CI on run
+    31901049362, scoring zero cases)."""
+    import httpx
+
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    def fake_post(backend, messages):
+        body = {
+            "model": "poolside/laguna-s-2.1:free",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": None},
+                    "finish_reason": "length",
+                }
+            ],
+        }
+        return httpx.Response(
+            200, json=body, request=httpx.Request("POST", "http://invalid"),
+        )
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(5, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1 +1,2 @@\n a = 1\n+b = 2\n"
+    )
+    with caplog.at_level("WARNING"):
+        replay = runner.run_case(backend, case, diff)
+
+    assert replay.errored is True
+    messages = [r.message for r in caplog.records]
+    assert any("eval_case_parse_failed" in m for m in messages), (
+        "a null-content response must log via the dedicated parse-failed "
+        "branch, which carries the diagnosable err= detail"
+    )
+    assert not any("eval_case_errored" in m for m in messages), (
+        "it must NOT fall through to the generic catch-all - that is "
+        "exactly the grug#881 bug (a raised TypeError logged as one word)"
+    )
+
+
+def test_run_case_errored_logs_exception_message_not_just_kind(monkeypatch, caplog):
+    """grug#881 defect 2: `kind=TypeError` alone told an operator nothing
+    for 90 minutes of CI. Any exception that DOES reach the catch-all must
+    have its message logged too, not just its class name."""
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    def fake_post(backend, messages):
+        raise RuntimeError("boom-specific-detail-worth-logging")
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(6, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1 +1,2 @@\n a = 1\n+b = 2\n"
+    )
+    with caplog.at_level("WARNING"):
+        replay = runner.run_case(backend, case, diff)
+
+    assert replay.errored is True
+    assert any(
+        "boom-specific-detail-worth-logging" in r.message for r in caplog.records
+    ), "the exception MESSAGE must reach the log, not just kind=RuntimeError"
+
+
 def test_production_case_uses_full_diff_and_scores_complete_staged_result():
     from elder_eval.runner import run_production_case
 

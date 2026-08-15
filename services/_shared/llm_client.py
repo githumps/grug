@@ -1383,7 +1383,23 @@ def _parse_response(
     resp: httpx.Response,
 ) -> tuple[tuple[Finding, ...], str, str]:
     """Returns (findings, model_name, error). On parse failure returns
-    ((), model_name, error_message)."""
+    ((), model_name, error_message).
+
+    grug#881: a THINKING model under `response_format={"type":
+    "json_object"}` can legally return `content: null` (or some other
+    non-string value) instead of raising a shape error - `body["choices"]
+    [0]["message"]` still exists, it just has no usable `content`. Verified
+    live against `poolside/laguna-s-2.1:free` via OpenRouter with the exact
+    request shape `sast_benchmark`/`elder_eval` send
+    (`reasoning: {"effort": "high", "exclude": True}`): the model spent its
+    ENTIRE completion-token budget on reasoning OpenRouter was told to
+    exclude from the response, so `finish_reason="length"` and BOTH
+    `message.content` and `message.reasoning` came back `None` - excluded
+    reasoning means excluded, there is no `reasoning` field to fall back
+    to. `json.loads(None)` raises `TypeError`, not `JSONDecodeError` - this
+    function's entire job is to parse safely, so this shape gets a
+    RETURNED, diagnosable error (offending field + `finish_reason`) like
+    every other malformed shape here, never an unhandled raise."""
     if resp.status_code != 200:
         return (), "", f"http_{resp.status_code}"
     try:
@@ -1397,9 +1413,23 @@ def _parse_response(
         return (), "", "envelope_not_a_dict"
     model_name = body.get("model", "")
     try:
-        content = body["choices"][0]["message"]["content"]
+        choice = body["choices"][0]
+        message = choice["message"]
+        content = message["content"]
     except (KeyError, IndexError, TypeError):
         return (), model_name, "missing choices/message/content"
+    if not isinstance(content, str):
+        # `choice`/`message` are known-good dicts here (the access above
+        # succeeded) - safe to read finish_reason/reasoning for diagnosis.
+        finish_reason = (
+            choice.get("finish_reason") if isinstance(choice, dict) else None
+        ) or "unknown"
+        content_kind = "null" if content is None else type(content).__name__
+        detail = f"content is {content_kind}, not str; finish_reason={finish_reason}"
+        reasoning = message.get("reasoning") if isinstance(message, dict) else None
+        if isinstance(reasoning, str) and reasoning:
+            detail += f"; reasoning field present ({len(reasoning)} chars, excluded from parse)"
+        return (), model_name, detail
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
