@@ -534,9 +534,13 @@ def test_scan_opengrep_logs_files_it_could_not_parse(monkeypatch, caplog):
     r.returncode = 0
     r.stdout = json.dumps({
         "results": [],
+        # S108 silenced deliberately: these are STRINGS inside a fake engine
+        # payload, echoing the paths the real engine reports back. Nothing here
+        # opens, creates or writes a file - the runner only string-replaces the
+        # tmp prefix out of them for the log line.
         "errors": [
-            {"message": "Invalid YAML", "path": "/tmp/x/k8s/templated.yaml"},
-            {"message": "Syntax error", "path": "/tmp/x/ansible/vars.yml"},
+            {"message": "Invalid YAML", "path": "/tmp/x/k8s/templated.yaml"},  # noqa: S108
+            {"message": "Syntax error", "path": "/tmp/x/ansible/vars.yml"},  # noqa: S108
         ],
     })
     r.stderr = ""
@@ -586,7 +590,9 @@ def test_scan_opengrep_reports_files_the_engine_never_scanned(monkeypatch, caplo
     r.stdout = json.dumps({
         "results": [],
         "errors": [],
-        "paths": {"scanned": ["/tmp/x/a.py"]},
+        # S108 as above: a string in a fake payload, not a temp file this test
+        # ever touches.
+        "paths": {"scanned": ["/tmp/x/a.py"]},  # noqa: S108
     })
     r.stderr = ""
     monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: r)

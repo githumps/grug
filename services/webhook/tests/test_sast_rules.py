@@ -141,7 +141,16 @@ def _scan(files: dict[str, str]) -> list[str]:
         )
         if proc.returncode != 0:
             pytest.fail(f"engine exited {proc.returncode}: {proc.stderr[-800:]}")
-        data = json.loads(proc.stdout)
+        # A zero exit does not promise parseable JSON. Without this, a truncated
+        # or non-JSON payload surfaces as a bare JSONDecodeError with no engine
+        # output attached, which is a slow thing to debug from CI alone.
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            pytest.fail(
+                f"engine exited 0 but emitted unparseable JSON ({exc}); "
+                f"stdout head: {proc.stdout[:400]!r} stderr: {proc.stderr[-400:]!r}"
+            )
 
         # COVERAGE ASSERTION, not politeness (#863). Without it,
         # test_clean_files_produce_no_findings passes VACUOUSLY when the
