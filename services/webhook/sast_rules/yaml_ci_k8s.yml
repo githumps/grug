@@ -27,19 +27,34 @@
 # deliberately NOT (3) for the reliability ones, for a reason worth stating:
 #
 #   sast.py sets `_SAST_SEVERITY = "high"` for EVERY finding this ruleset
-#   produces, whatever a rule's own `severity:` says - and judge.py's
-#   `_SUPPRESSIBLE_SEVERITIES` is {"low","medium"}, so a high finding can never
-#   be refuted. Anything added here is therefore published unconditionally and
-#   lands in the blocking partition if blocking is enabled.
+#   produces, whatever a rule's own `severity:` says. A rule set that cannot
+#   express its own severity is a blunt instrument; tracked separately.
 #
-# That is correct for command injection and privileged containers. It is wrong
-# for the reliability patterns #859 lists as candidates for option 3 - swallowed
-# `2>/dev/null`, `|| true` on a verification step, an exit code read through a
-# pipe. Those are real and they cost this fleet real time, but they are
-# judgement calls that need the judge, and routing them here would make them
-# unsuppressible high-severity noise on every PR. They belong in the lint
-# evidence layer (lint.py) or a class the judge can weigh; filed as follow-up
-# rather than forced in here.
+#   CORRECTION (2026-08-15). An earlier version of this paragraph said a
+#   finding here "can never be refuted" because judge.py's
+#   `_SUPPRESSIBLE_SEVERITIES` is {"low","medium"}, and concluded that
+#   anything added here publishes unconditionally. That was wrong, and it
+#   cited the wrong judge. `_SUPPRESSIBLE_SEVERITIES` (judge.py:54, read at
+#   judge.py:314) is ELDER's plausibility gate, and this ruleset never
+#   reaches Elder: `scan_opengrep` is called only from Guard
+#   (personas/guard/dispatch.py), which runs its OWN suppressor -
+#   `sast.judge_candidates`, the exploitability judge. That judge is
+#   severity-AGNOSTIC, drops any candidate judged unexploitable, and is
+#   FAIL-CLOSED on its own outage (candidates suppressed, not posted raw).
+#   Guard is also advisory by default (`guard_blocking` defaults False).
+#   So findings here are suppressible, on a different axis, by a different
+#   persona, onto a non-blocking check-run.
+#
+# This file is still (3) for the SECURITY classes and still deliberately NOT
+# (3) for the reliability ones - but for the OPPOSITE reason to the one
+# originally written here. The reliability patterns #859 lists as option-3
+# candidates - swallowed `2>/dev/null`, `|| true` on a verification step, an
+# exit code read through a pipe - are not exploitable in any source-to-sink
+# sense. Routed here they would meet an EXPLOITABILITY judge, be judged
+# not-exploitable, and be dropped. The risk was never that they would flood
+# every PR as unsuppressible noise; it is that they would vanish silently,
+# which is worse and much harder to notice. They belong in the lint evidence
+# layer (lint.py) or a class the judge can actually weigh.
 #
 # Options (1) and (2) were not taken: no pack is vendored and no new scanner is
 # added, so there is no third-party rule licence to record - every rule below is
