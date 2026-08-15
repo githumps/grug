@@ -126,8 +126,17 @@ def configured_backends() -> list[BenchBackend]:
 
     openrouter_key = os.getenv("GRUG_BENCH_OPENROUTER_KEY", "")
     if openrouter_key:
-        openrouter_model = os.getenv(
-            "GRUG_BENCH_OPENROUTER_MODEL", _OPENROUTER_DEFAULT_MODEL,
+        # `or`, not getenv's default: benchmark.elder-eval.yml always DEFINES
+        # this variable (`GRUG_BENCH_OPENROUTER_MODEL: ${{ inputs.
+        # openrouter_model }}`) and that input defaults to "". A defined-but-
+        # empty variable is not an absent one, so getenv's default never fired
+        # and a blank dispatch built `model=""` - POSTing an empty model id
+        # instead of the paid default the workflow's own comment promises
+        # ("Blank keeps the configured default"). The sibling Cave backend
+        # below guards the same shape with `if cave_url and cave_model`.
+        openrouter_model = (
+            os.getenv("GRUG_BENCH_OPENROUTER_MODEL", "").strip()
+            or _OPENROUTER_DEFAULT_MODEL
         )
         openrouter_extra_body = dict(_OPENROUTER_EXTRA_BODY)
         if is_free_tier_model(openrouter_model):

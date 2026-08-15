@@ -194,6 +194,56 @@ def test_configured_backends_paid_override_keeps_default_reasoning(monkeypatch):
     assert openrouter.extra_body["reasoning"] == {"effort": "high", "exclude": True}
 
 
+def test_configured_backends_blank_model_env_falls_back_to_default(monkeypatch):
+    """A DEFINED-but-empty `GRUG_BENCH_OPENROUTER_MODEL` must fall back to
+    the paid default, because that is the shape CI actually produces.
+
+    benchmark.elder-eval.yml sets `GRUG_BENCH_OPENROUTER_MODEL: ${{ inputs.
+    openrouter_model }}` unconditionally and that input's default is `""`, so
+    a dispatch that leaves the model blank exports the variable as an empty
+    string rather than leaving it unset. `os.getenv(k, default)` returns the
+    default only when the key is ABSENT, so the fallback never fired and the
+    backend was built with `model=""` - an empty model id POSTed to
+    OpenRouter, not the default the workflow comment promises ("Blank keeps
+    the configured default").
+
+    The pre-existing `test_configured_backends_honors_env` covers the UNSET
+    case via `delenv`, which is why this survived: the test and the
+    deployment disagreed about what "blank" means. Assert the empty-string
+    case explicitly."""
+    from sast_benchmark import backends
+
+    for var in ("GRUG_BENCH_POOLSIDE_KEY", "GRUG_BENCH_CAVE_URL", "GRUG_BENCH_CAVE_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_KEY", "k")
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_MODEL", "")  # what a blank input exports
+
+    configured = backends.configured_backends()
+    openrouter = next(b for b in configured if b.name == "openrouter")
+    assert openrouter.model == "anthropic/claude-opus-4.7", (
+        "a blank model input must fall back to the configured default, "
+        "never POST an empty model id"
+    )
+    # A blank input is NOT a free-tier probe, so it keeps production's config.
+    assert openrouter.extra_body["reasoning"] == {"effort": "high", "exclude": True}
+
+
+def test_configured_backends_whitespace_model_env_falls_back_to_default(monkeypatch):
+    """Same fallback for a whitespace-only value. `is_free_tier_model`
+    already strips before matching `:free`, so the model resolution on the
+    line above it must strip too or the two disagree about the same input."""
+    from sast_benchmark import backends
+
+    for var in ("GRUG_BENCH_POOLSIDE_KEY", "GRUG_BENCH_CAVE_URL", "GRUG_BENCH_CAVE_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_KEY", "k")
+    monkeypatch.setenv("GRUG_BENCH_OPENROUTER_MODEL", "   ")
+
+    configured = backends.configured_backends()
+    openrouter = next(b for b in configured if b.name == "openrouter")
+    assert openrouter.model == "anthropic/claude-opus-4.7"
+
+
 def test_cave_needs_both_url_and_model(monkeypatch):
     """sparkles only runs with BOTH a URL and a model (no partial/leaky default)."""
     from sast_benchmark import backends
