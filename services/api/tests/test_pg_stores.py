@@ -356,19 +356,35 @@ def test_claim_delivery_concurrent_exactly_one_winner(pg):
 
     did = str(uuid.uuid4())
     results: list[bool] = []
-    barrier = threading.Barrier(8)
+    # n=40, not 8. grug#870 found that a structurally identical
+    # `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING` through the
+    # SHARED ConnectionPool over-admitted under contention (7 of 20 threads,
+    # 4 of 6 processes) while the same SQL over an unpooled
+    # `psycopg.connect()` was clean across 20+ trials. claim_delivery uses
+    # that idiom, through that pool, and was only ever raced at n=8 - below
+    # the level where the defect surfaced. If this guard is susceptible the
+    # failure is not an overshoot, it is the same delivery processed twice.
+    n = 40
+    barrier = threading.Barrier(n)
+    lock = threading.Lock()
 
     def claim():
         barrier.wait()
-        results.append(store.claim_delivery(did))
+        won = store.claim_delivery(did)
+        with lock:
+            results.append(won)
 
-    threads = [threading.Thread(target=claim) for _ in range(8)]
+    threads = [threading.Thread(target=claim) for _ in range(n)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert results.count(True) == 1
-    assert results.count(False) == 7
+    assert results.count(True) == 1, (
+        f"expected exactly ONE winner of {n} racing claimants, got "
+        f"{results.count(True)} - a second True means one webhook delivery "
+        "is processed twice"
+    )
+    assert results.count(False) == n - 1
 
 
 def test_claim_delivery_concurrent_expired_takeover_exactly_one_winner(pg):
