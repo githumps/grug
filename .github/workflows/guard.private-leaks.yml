@@ -1,0 +1,70 @@
+name: Guard · Private leaks
+
+# PURPOSE: this repo is PUBLIC. Stop private-infrastructure identifiers -
+#   hostnames, cluster/node names, private-range IPs, cross-repo issue refs -
+#   from reaching it.
+#
+# WHY IT EXISTS. On 2026-08-15 a working session spanning this repo and a
+#   private infrastructure repo leaked cluster node names, private repo names
+#   and cross-repo ticket numbers into public commits, issues and PR bodies.
+#   None of it was secret-SHAPED - no key, no token - so the existing secret
+#   scanning had no opinion, and neither did review. What leaked was topology,
+#   which is what makes infrastructure enumerable.
+#
+# WHY BOTH A HOOK AND THIS. .githooks/pre-commit is faster and blocks before
+#   the commit exists, but it only works in a clone where someone ran
+#   `git config core.hooksPath .githooks`. This is the backstop for a fresh
+#   clone, another machine, a worktree, or an agent that never ran it - which is
+#   exactly the situation that produced the leak.
+#
+# WHAT IT SCANS. The PR diff AND the PR body/title. That second part is not
+#   incidental: most of the 2026-08-15 leaks were in prose, not code, and no
+#   code scanner would have looked at them.
+#
+# The pattern list lives in scripts/check_private_leaks.py and contains only
+# generic SHAPES, never specific host names - a deny-list naming the real hosts
+# could not live in a public repo without being the leak it prevents.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: guard-private-leaks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Scan diff and PR text for private identifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "1. Checkout with enough history to diff the PR"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: "2. Scan the PR diff"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_private_leaks.py --diff "${BASE_SHA}..${HEAD_SHA}"
+
+      - name: "3. Scan the PR title and body"
+        # Through a FILE via env, never interpolated into the script: a PR body
+        # is attacker-controlled text and `${{ }}` inside run: is a command
+        # injection. Writing it out and scanning the file keeps it inert.
+        if: always()
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > /tmp/pr-text.md
+          python3 scripts/check_private_leaks.py --text-file /tmp/pr-text.md
