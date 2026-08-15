@@ -49,6 +49,36 @@ under contention is the entire point of the feature. Every other
 adapter's usage of `pg_base.get_pool()` elsewhere in this codebase is
 unaffected by this - only this module's admission queries were ever
 observed to require it.
+
+grug#877: moving off the pool reduced, but did not eliminate, the
+over-admission - it kept reproducing on main after #875 merged (7/16
+processes admitted instead of 5). The remaining cause was NOT the
+admission SQL: isolated from everything else (30 consecutive trials,
+40-way thread concurrency, `pg_base.maybe_purge_expired` stubbed out),
+the exact `SELECT ... FOR UPDATE` pattern above was airtight. The
+culprit was this module's TTL. `maybe_purge_expired` runs unconditionally
+on a fresh process's first call (no cross-process cooldown - `_last_purge`
+is a plain module global) and deletes any `grug_kv` row whose `ttl` is at
+or before Postgres's REAL `now()`. `try_reserve_slot`'s TTL used to be
+computed from the CALLER-supplied `now` (via `_minute_bucket`/`ts`), not
+the real clock. Every caller that matters in production passes no `now`
+(`openrouter_free_limiter.acquire_free_tier_slot` never does), so `ts`
+IS real time there and the TTL was always safely ahead of it - but the
+concurrency test pins `now` to a fixed constant for determinism, and that
+constant goes stale with the passage of real time. Once the fixed value
+is far enough in the past, the row this function creates is already
+"expired" by `maybe_purge_expired`'s real-clock standard from the moment
+it exists: a purge racing in from a DIFFERENT one of the N contending
+processes can delete it mid-window, and the next `_try_increment`'s
+`INSERT ... ON CONFLICT DO NOTHING` then recreates it at count=0 -
+silently resetting the limiter and admitting more than `limit` overall.
+Reproduced directly: forcing `maybe_purge_expired` to run repeatedly
+during a 5-slot/40-caller race pushed admits from 5 to 15. The fix
+anchors the TTL to the real wall clock instead of `ts` - the bucket keys
+(`minute_sk`/`day_sk`) still use `ts`, so a replayed historical `now`
+still lands in the right logical window; only the "when may this row be
+reclaimed" deadline no longer depends on how far `ts` has drifted from
+the actual clock.
 """
 
 from __future__ import annotations
@@ -186,8 +216,15 @@ def try_reserve_slot(
     pk = f"RATELIMIT#{name}"
     minute_sk = f"MIN#{_minute_bucket(ts)}"
     day_sk = f"DAY#{_day_bucket(ts)}"
-    minute_ttl = _minute_bucket(ts) * 60 + 60 + _WINDOW_TTL_SLACK_SECONDS
-    day_ttl = int(ts.timestamp()) + 2 * 86400
+    # TTL is a REAL-wall-clock purge deadline, deliberately NOT derived from
+    # `ts` - see the module docstring's grug#877 paragraph for why anchoring
+    # it to a caller-supplied `now` let `pg_base.maybe_purge_expired` treat
+    # an actively-contended row as already reclaimable and delete it out
+    # from under this function. The bucket keys just above still use `ts`,
+    # so a replayed/simulated `now` still lands in the right logical window.
+    real_now = datetime.now(timezone.utc).timestamp()
+    minute_ttl = int(real_now) + 60 + _WINDOW_TTL_SLACK_SECONDS
+    day_ttl = int(real_now) + 2 * 86400
 
     pg_base.maybe_purge_expired()
 
