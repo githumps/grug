@@ -142,6 +142,28 @@ def _scan(files: dict[str, str]) -> list[str]:
         if proc.returncode != 0:
             pytest.fail(f"engine exited {proc.returncode}: {proc.stderr[-800:]}")
         data = json.loads(proc.stdout)
+
+        # COVERAGE ASSERTION, not politeness (#863). Without it,
+        # test_clean_files_produce_no_findings passes VACUOUSLY when the
+        # engine scans nothing at all - the precision guard is strongest
+        # exactly when coverage is zero, which is the same shape as the
+        # ruleset that matched nothing that started #859.
+        #
+        # Measured 2026-08-15: the engine drops files it has no language for
+        # (a .swift, an unknown extension) with `errors: []` and no mention
+        # anywhere except their absence from paths.scanned. Exit code 0.
+        scanned = {str(f).replace(f"{tmp}/", "", 1)
+                   for f in (data.get("paths") or {}).get("scanned") or []}
+        missed = sorted(set(files) - scanned)
+        if missed:
+            pytest.fail(
+                f"engine never scanned {missed} - the assertions below would "
+                f"pass without looking at them (scanned: {sorted(scanned)})"
+            )
+        # The engine's own named failures. Distinct from the above: these are
+        # files it tried and could not handle, which it does report.
+        if data.get("errors"):
+            pytest.fail(f"engine reported errors: {data['errors']}")
     return [r["check_id"].rsplit(".", 1)[-1] for r in data.get("results", [])]
 
 
