@@ -199,6 +199,34 @@ def _write_scan_files(tmp: str, kept_files: dict[str, str]) -> None:
             f.write(content)
 
 
+def _opengrep_home_env(scan_tmp: str) -> dict[str, str]:
+    """HOME/XDG_CACHE_HOME for the opengrep subprocess (#865).
+
+    Prefers `GRUG_SAST_CACHE_DIR` - a stable, writable, per-pod path on its
+    own volume - so opengrep's 242M runtime extraction happens ONCE per pod
+    instead of once per scan, outside both the scanned tree and the
+    size-capped `tmp` volume.
+
+    Returns the scan dir instead when that path is unset or not writable.
+    That is the pre-#865 behaviour: correct but wasteful, and it keeps a
+    self-hosted deploy that has not added the volume working rather than
+    crashing on an unwritable HOME (the 2026-07-13 zero-findings regression).
+    """
+    cache = os.getenv("GRUG_SAST_CACHE_DIR", "").strip()
+    if cache:
+        try:
+            os.makedirs(cache, exist_ok=True)
+            if os.access(cache, os.W_OK):
+                return {"HOME": cache,
+                        "XDG_CACHE_HOME": os.path.join(cache, ".cache")}
+            log.warning("sast_cache_dir_not_writable", extra={"dir": cache})
+        except OSError:
+            log.warning("sast_cache_dir_unusable", extra={"dir": cache},
+                        exc_info=True)
+    return {"HOME": scan_tmp,
+            "XDG_CACHE_HOME": os.path.join(scan_tmp, ".cache")}
+
+
 def scan_opengrep(
     hunks: tuple[DiffHunk, ...], file_contents: dict[str, str]
 ) -> tuple[Candidate, ...]:
@@ -237,14 +265,25 @@ def scan_opengrep(
             # startup. The pods run as uid 10001 created with --no-create-home
             # on a readOnlyRootFilesystem, so that mkdir crashed semgrep with
             # exit 1 before it scanned anything - every production scan
-            # silently degraded to zero findings (found live 2026-07-13, the
-            # infra#1776 sweep). Point HOME (+ XDG cache) at the scan's own
-            # temp dir, the one path we know is writable and gets cleaned up.
-            scan_env = {
-                **os.environ,
-                "HOME": tmp,
-                "XDG_CACHE_HOME": os.path.join(tmp, ".cache"),
-            }
+            # silently degraded to zero findings (found live 2026-07-13
+            # during an infrastructure sweep). HOME must therefore point
+            # somewhere WRITABLE.
+            #
+            # It must also point somewhere STABLE and OUTSIDE `tmp` (#865).
+            # Pointing it at the scan dir cost three things at once:
+            #   1. opengrep scanned its own cache (the original #865 report);
+            #   2. a cold HOME makes opengrep extract 242M of runtime EVERY
+            #      scan, because a fresh temp dir is never a warm cache;
+            #   3. that 242M landed in the `tmp` emptyDir, whose sizeLimit is
+            #      64Mi - measured evicting a live webhook pod on 2026-08-15
+            #      ("Usage of EmptyDir volume tmp exceeds the limit 64Mi").
+            # A dedicated cache volume fixes all three: extract once per pod,
+            # never inside the scanned tree, never against the tmp cap.
+            #
+            # Falls back to the old scan-dir behaviour when the cache dir is
+            # unset or not writable, so a self-hosted deploy without the extra
+            # volume still scans (degraded to re-extracting, never broken).
+            scan_env = {**os.environ, **_opengrep_home_env(tmp)}
             proc = subprocess.run(
                 ["opengrep", "scan", "--config", _RULES_DIR, "--json", "--quiet",
                  "--disable-version-check", "--no-rewrite-rule-ids", tmp],
