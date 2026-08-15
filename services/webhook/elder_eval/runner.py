@@ -429,8 +429,14 @@ def run_case(
                 return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
             findings.extend(cohort_findings)
     except Exception as e:  # noqa: BLE001 - one case must not abort the sweep
+        # grug#881: a run that logged only `kind=TypeError` (no message, no
+        # offending field) cost 90 minutes of CI to diagnose by inference.
+        # `str(e)` is bounded (some exceptions embed large payloads) and
+        # kept on the SAME line as `kind` so a log search on either still
+        # finds the real cause, not just the exception class.
         log.warning(
-            "eval_case_errored case=%s kind=%s", case.case_id, type(e).__name__
+            "eval_case_errored case=%s kind=%s err=%s",
+            case.case_id, type(e).__name__, str(e)[:300],
         )
         return CaseReplay(case_id=case.case_id, emitted={}, errored=True)
     return CaseReplay(
