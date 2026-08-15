@@ -36,6 +36,11 @@ on:
         type: choice
         options: [record, check, report]
         default: record
+      openrouter_model:
+        description: "OpenRouter model id. A ':free' suffix uses the free pool (20/min, 1000/day) and costs nothing. Blank = the configured default, which is a PAID model."
+        type: string
+        required: false
+        default: ""
       ab_practices:
         description: "also measure the #527 practices ON-vs-OFF delta"
         type: boolean
@@ -94,6 +99,12 @@ jobs:
           AWS_SECRET_ACCESS_KEY: testing
           PYTHONPATH: ${{ github.workspace }}/services/_shared
           GRUG_BENCH_OPENROUTER_KEY: ${{ secrets.GRUG_BENCH_OPENROUTER_KEY }}
+          # Model override for this run. The code default is a PAID model, and
+          # this workflow's only-ever run before today died on HTTP 402 for
+          # exactly that reason. A ':free'-suffixed id draws on OpenRouter's
+          # free pool instead - no spend, but capped at 20 requests/minute and
+          # 1000/day ACCOUNT-WIDE. Blank keeps the configured default.
+          GRUG_BENCH_OPENROUTER_MODEL: ${{ inputs.openrouter_model }}
           GRUG_BENCH_POOLSIDE_KEY: ${{ secrets.GRUG_BENCH_POOLSIDE_KEY }}
           GRUG_BENCH_CAVE_URL: ${{ secrets.GRUG_BENCH_CAVE_URL }}
           # The Cave is a LOCAL model: a large diff takes minutes, and a
