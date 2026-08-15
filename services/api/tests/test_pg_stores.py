@@ -1186,6 +1186,41 @@ def test_reserve_slot_concurrent_threads_admit_exactly_the_limit(pg):
     assert results.count(False) == n - limit
 
 
+def test_reserve_slot_concurrent_day_limit_binds_even_with_minute_headroom(pg):
+    """The minute and day checks are two SEPARATE atomic statements, not
+    one joint transaction (see try_reserve_slot's docstring for why that
+    is still safe): each `_try_increment` call independently enforces its
+    OWN limit, so the total ever admitted for a window can never exceed
+    that window's limit no matter how the two checks interleave. Proves
+    that invariant under real concurrency for the case where the DAY cap
+    (not the minute cap) is what actually binds - the minute window has
+    ample room, so an interleaving bug that let a day-rejected call slip
+    through as an incorrectly-admitted "minute succeeded" would show up
+    here as more than `day_limit` admits."""
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-daybind-{uuid.uuid4()}"
+    day_limit = 5
+    n = 40
+    results: list[bool] = []
+    barrier = threading.Barrier(n)
+
+    def attempt():
+        barrier.wait()
+        result = store.try_reserve_slot(
+            name=name, minute_limit=1000, day_limit=day_limit, now=_RL_FIXED_NOW,
+        )
+        results.append(result.admitted)
+
+    threads = [threading.Thread(target=attempt) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count(True) == day_limit
+    assert results.count(False) == n - day_limit
+
+
 def _mp_free_tier_worker(
     db_url: str, name: str, limit: int, barrier, result_queue, worker_index: int,
 ) -> None:
