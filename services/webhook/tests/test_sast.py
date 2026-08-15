@@ -604,3 +604,68 @@ def test_scan_opengrep_reports_files_the_engine_never_scanned(monkeypatch, caplo
     recs = [r for r in caplog.records if r.msg == "sast_opengrep_files_not_scanned"]
     assert recs, "the engine skipped a staged file and said nothing"
     assert "b.swift" in " ".join(recs[0].files)
+
+
+# --- #865: the engine cache must live off the scan dir, on its own volume ---
+#
+# Pointing HOME at the per-scan temp dir cost three things at once: opengrep
+# scanned its own cache, a cold HOME re-extracted 242M EVERY scan, and that
+# 242M landed in the `tmp` emptyDir whose sizeLimit is 64Mi - measured
+# evicting a live webhook pod on 2026-08-15. These pin the fix AND the
+# fallback, because an unwritable HOME is what caused the 2026-07-13
+# every-scan-returns-zero-findings regression.
+
+def test_opengrep_home_uses_the_dedicated_cache_dir_when_writable(tmp_path, monkeypatch):
+    from personas.code_reviewer import sast
+
+    cache = tmp_path / "sast-cache"
+    scan = tmp_path / "grug-sast-scan"
+    scan.mkdir()
+    monkeypatch.setenv("GRUG_SAST_CACHE_DIR", str(cache))
+
+    env = sast._opengrep_home_env(str(scan))
+
+    assert env["HOME"] == str(cache), (
+        "HOME must point at the dedicated cache volume, not the scan dir - "
+        "a per-scan HOME re-extracts 242M every scan into a 64Mi volume"
+    )
+    assert str(scan) not in env["XDG_CACHE_HOME"], (
+        "the cache must not live inside the directory opengrep is about to "
+        "scan (#865's original report: it scanned its own cache)"
+    )
+    assert cache.is_dir(), "the cache dir should be created if absent"
+
+
+def test_opengrep_home_falls_back_to_scan_dir_when_cache_unset(tmp_path, monkeypatch):
+    """A self-hosted deploy without the extra volume must still scan.
+    HOME has to be SOMEWHERE writable - an unwritable HOME is what made
+    every production scan return zero findings on 2026-07-13."""
+    from personas.code_reviewer import sast
+
+    scan = tmp_path / "grug-sast-scan"
+    scan.mkdir()
+    monkeypatch.delenv("GRUG_SAST_CACHE_DIR", raising=False)
+
+    env = sast._opengrep_home_env(str(scan))
+
+    assert env["HOME"] == str(scan)
+    assert env["XDG_CACHE_HOME"].startswith(str(scan))
+
+
+def test_opengrep_home_falls_back_when_cache_dir_is_not_writable(tmp_path, monkeypatch):
+    """Configured-but-unusable must degrade to the working path, not crash.
+    'Configured' is not 'working' - that gap is why the ruff evidence layer
+    sat dead for weeks."""
+    from personas.code_reviewer import sast
+
+    scan = tmp_path / "grug-sast-scan"
+    scan.mkdir()
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    monkeypatch.setenv("GRUG_SAST_CACHE_DIR", str(blocked / "nested"))
+    try:
+        env = sast._opengrep_home_env(str(scan))
+        assert env["HOME"] == str(scan)
+    finally:
+        blocked.chmod(0o700)
