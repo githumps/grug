@@ -62,7 +62,17 @@ def derive_practices(
     labeled = [r for r in rows if r.accepted or r.false_positive]
     if not labeled:
         return []
-    newest_pr = max(r.pr for r in labeled)
+    # Rows can carry pr=None (hand-seeded corpus entries, and anything whose
+    # PR reference was never backfilled). max() over a mix of None and int
+    # raises TypeError and takes the whole A/B mode down BEFORE it runs a
+    # single case - which is why --ab-practices silently produced a plain
+    # baseline instead of a comparison, and nobody noticed the A/B was never
+    # happening. Unnumbered rows simply cannot participate in a recency
+    # cutoff, so drop them from the max rather than crash on them.
+    numbered = [r.pr for r in labeled if r.pr is not None]
+    if not numbered:
+        return []
+    newest_pr = max(numbered)
     cutoff = newest_pr - decay_prs
 
     grouped: dict[tuple[str, Literal["report", "avoid"]], list[LedgerRow]] = (
