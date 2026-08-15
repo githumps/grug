@@ -131,24 +131,24 @@ def scan_builtin(hunks: tuple[DiffHunk, ...]) -> tuple[Candidate, ...]:
     return tuple(candidates)
 
 
-# Engine selection (ADR-0006 vendor-neutral boundary). `semgrep` = the OSS
+# Engine selection (ADR-0006 vendor-neutral boundary). `opengrep` = the OSS
 # engine over the vendored offline rules (#401, full class coverage); `builtin`
 # = the #400 zero-dep detector. Config value, never an import — the vendor stays
 # swappable. Default `builtin` so a misconfig/absent-engine degrades to the
 # safe zero-dep path rather than failing the review.
 _ENGINE = os.getenv("GRUG_SAST_ENGINE", "builtin").strip().lower()
 # Rules are WEBHOOK-OWNED (vendored under services/webhook/sast_rules/; the
-# api never runs the semgrep engine). Post-extraction (#77) this shared module
+# api never runs the opengrep engine). Post-extraction (#77) this shared module
 # can't reach them via __file__, so resolve from the service's working dir
 # (pods run WORKDIR /app; tests run from the service dir), with an env escape
-# hatch. A missing dir degrades exactly like a missing semgrep binary: () + log.
+# hatch. A missing dir degrades exactly like a missing opengrep binary: () + log.
 _RULES_DIR = os.getenv(
     "GRUG_SAST_RULES_DIR", os.path.join(os.getcwd(), "sast_rules")
 )
-# AC5 cost bound: cap the bytes Semgrep scans per review so a huge PR can't blow
+# AC5 cost bound: cap the bytes opengrep scans per review so a huge PR can't blow
 # review latency. Files beyond the budget are skipped + logged (never silently).
 _MAX_SCAN_BYTES = 1_000_000
-_SEMGREP_TIMEOUT_S = 60
+_OPENGREP_TIMEOUT_S = 60
 
 
 def _added_lines_by_file(hunks: tuple[DiffHunk, ...]) -> dict[str, set[int]]:
@@ -181,7 +181,7 @@ def _budget_files(file_contents: dict[str, str]) -> tuple[dict[str, str], list[s
 
 def _write_scan_files(tmp: str, kept_files: dict[str, str]) -> None:
     """Materialize the budgeted head-SHA file contents under `tmp` for the
-    semgrep subprocess to scan."""
+    opengrep subprocess to scan."""
     tmp_real = os.path.realpath(tmp)
     for path, content in kept_files.items():
         dest = os.path.join(tmp, path)
@@ -192,23 +192,23 @@ def _write_scan_files(tmp: str, kept_files: dict[str, str]) -> None:
         # readOnlyRootFilesystem + non-root).
         dest_real = os.path.realpath(dest)
         if dest_real != tmp_real and not dest_real.startswith(tmp_real + os.sep):
-            log.warning("sast_semgrep_path_escape_skipped", extra={"path": path})
+            log.warning("sast_opengrep_path_escape_skipped", extra={"path": path})
             continue
         os.makedirs(os.path.dirname(dest) or tmp, exist_ok=True)
         with open(dest, "w", encoding="utf-8") as f:
             f.write(content)
 
 
-def scan_semgrep(
+def scan_opengrep(
     hunks: tuple[DiffHunk, ...], file_contents: dict[str, str]
 ) -> tuple[Candidate, ...]:
     """Semgrep OSS engine over the vendored offline rules (#401). Writes the
-    changed files to a temp dir, runs `semgrep scan --config <rules>` (NO
+    changed files to a temp dir, runs `opengrep scan --config <rules>` (NO
     network — registry refs are refused), maps each result to a Candidate via
     the rule's `metadata.vuln_class`, and keeps only findings on lines THIS PR
     added (so we flag what the PR introduces, not pre-existing code).
 
-    Best-effort: a missing semgrep binary, a non-zero exit, a timeout, or
+    Best-effort: a missing opengrep binary, a non-zero exit, a timeout, or
     unparseable output returns () + logs — SAST is additive and must never
     break the review (the dispatch caller also guards). file_contents is the
     head-SHA content of changed files (#336); without it Semgrep has nothing
@@ -218,50 +218,50 @@ def scan_semgrep(
         return ()
     kept_files, skipped = _budget_files(file_contents)
     if skipped:
-        log.info("sast_semgrep_files_skipped_over_budget", extra={"skipped": len(skipped)})
+        log.info("sast_opengrep_files_skipped_over_budget", extra={"skipped": len(skipped)})
     if not kept_files:
         return ()
     # The rules dir is resolved from the service cwd post-#77 (ADR-0014) -
     # a wrong working directory is a REAL misconfiguration class now, and
-    # semgrep without rules = the security scanner silently finding
+    # opengrep without rules = the security scanner silently finding
     # nothing. Fail loudly-and-degrade with a dedicated, monitorable line
     # (the missing-BINARY sibling below already has one).
     if not os.path.isdir(_RULES_DIR):
-        log.error("sast_semgrep_rules_dir_missing", extra={"rules_dir": _RULES_DIR})
+        log.error("sast_opengrep_rules_dir_missing", extra={"rules_dir": _RULES_DIR})
         return ()
     added = _added_lines_by_file(hunks)
     try:
         with tempfile.TemporaryDirectory(prefix="grug-sast-") as tmp:
             _write_scan_files(tmp, kept_files)
-            # Semgrep initializes settings/cache under $HOME (~/.semgrep) at
+            # Opengrep initializes settings/cache under $HOME at
             # startup. The pods run as uid 10001 created with --no-create-home
             # on a readOnlyRootFilesystem, so that mkdir crashed semgrep with
             # exit 1 before it scanned anything - every production scan
             # silently degraded to zero findings (found live 2026-07-13, the
             # infra#1776 sweep). Point HOME (+ XDG cache) at the scan's own
             # temp dir, the one path we know is writable and gets cleaned up.
-            sem_env = {
+            scan_env = {
                 **os.environ,
                 "HOME": tmp,
                 "XDG_CACHE_HOME": os.path.join(tmp, ".cache"),
             }
             proc = subprocess.run(
-                ["semgrep", "scan", "--config", _RULES_DIR, "--json", "--quiet",
+                ["opengrep", "scan", "--config", _RULES_DIR, "--json", "--quiet",
                  "--disable-version-check", "--no-rewrite-rule-ids", tmp],
-                capture_output=True, text=True, timeout=_SEMGREP_TIMEOUT_S,
-                env=sem_env,
+                capture_output=True, text=True, timeout=_OPENGREP_TIMEOUT_S,
+                env=scan_env,
                 # We inspect returncode ourselves below (a non-zero exit with
                 # parseable JSON is a real degrade path, #77), so never raise.
                 check=False,
             )
             if proc.returncode != 0:
-                # Version-dependent, semgrep can exit non-zero AND emit
+                # Version-dependent, opengrep can exit non-zero AND emit
                 # parseable-but-empty JSON - without this check that
                 # degrades to a silent zero-findings scan. Keep enough stderr
                 # to actually diagnose: the old 200-char cap hid the failing
                 # path of the exact home-dir crash this env fix addresses.
                 log.warning(
-                    "sast_semgrep_run_failed",
+                    "sast_opengrep_run_failed",
                     extra={
                         "kind": "NonZeroExit",
                         "returncode": proc.returncode,
@@ -273,16 +273,16 @@ def scan_semgrep(
             data = json.loads(proc.stdout)
             tmp_prefix = tmp.rstrip("/") + "/"
     except FileNotFoundError:
-        log.warning("sast_semgrep_binary_missing")
+        log.warning("sast_opengrep_binary_missing")
         return ()
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
-        log.warning("sast_semgrep_run_failed", extra={"kind": type(e).__name__})
+        log.warning("sast_opengrep_run_failed", extra={"kind": type(e).__name__})
         return ()
 
-    return _map_semgrep_results(data, added, tmp_prefix)
+    return _map_opengrep_results(data, added, tmp_prefix)
 
 
-def _map_semgrep_results(
+def _map_opengrep_results(
     data: dict, added: dict[str, set[int]], tmp_prefix: str
 ) -> tuple[Candidate, ...]:
     """Map raw semgrep JSON results to Candidates: strip the temp-dir prefix
@@ -316,8 +316,12 @@ def scan_candidates(
     merge + publish downstream are engine-agnostic, so swapping the engine here
     is the only change #401 makes."""
     eng = (engine or _ENGINE).strip().lower()
-    if eng == "semgrep" and file_contents:
-        return scan_semgrep(hunks, file_contents)
+    # "semgrep" kept as an accepted alias (#858): the engine was renamed, and a
+    # manifest that still says semgrep must keep scanning rather than silently
+    # degrade to the builtin engine - a quiet downgrade of a security control is
+    # exactly the failure mode this file already warns about elsewhere.
+    if eng in ("opengrep", "semgrep") and file_contents:
+        return scan_opengrep(hunks, file_contents)
     return scan_builtin(hunks)
 
 

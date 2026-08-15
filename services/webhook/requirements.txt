@@ -19,7 +19,11 @@ psycopg[binary,pool]>=3.2,<4.0
 # Lambda-cold-start objection is moot post-#354). Only the webhook image needs
 # it (the api never runs reviews); the mirrored sast.py shells out rather than
 # importing it, so the api copy is unaffected.
-semgrep>=1.166,<2.0
+# semgrep REMOVED 2026-08-15 (#858). Its surrounding product is proprietary and
+# the operator's antivirus quarantines semgrep-core; grug may only depend on
+# software that is open source and deliberately free. Replaced by the Opengrep
+# binary, installed in the Dockerfile rather than pip - upstream ships signed
+# release binaries and the PyPI package lags far behind them.
 # Ruff - the lint-evidence detection engine (#681, epic #707). Invoked as a
 # CLI subprocess (lint.py), same shape as semgrep above: NOT imported, just
 # needs to be on PATH. Was measured missing from the runtime image on

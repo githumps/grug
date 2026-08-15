@@ -4,7 +4,7 @@
 # (the pod's egress is restricted; the semgrep registry is a runtime dependency
 # we refuse). High-signal patterns for the PRD's canonical vuln classes; recall
 # is the engine's job, the LLM exploitability judge (#400) prunes false
-# positives. Each rule carries `metadata.vuln_class` — the runner maps that to
+# positives. Each rule carries `metadata.vuln_class` - the runner maps that to
 # the Candidate.vuln_class (the benchmark + finding grouping key). Keep this the
 # single source of class spellings shared with sast.py / the #399 corpus.
 rules:

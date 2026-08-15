@@ -56,7 +56,7 @@ def _proc(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.Com
 
 def test_exit_1_is_violations_not_failure():
     """THE trap this module exists to avoid: ruff exits 1 when it FINDS
-    violations. Treating non-zero as failure (as scan_semgrep correctly does
+    violations. Treating non-zero as failure (as scan_opengrep correctly does
     for semgrep) would discard every real result and degrade to a permanent
     silent zero."""
     with patch("subprocess.run", return_value=_proc(1, _RUFF_JSON)), \
