@@ -280,3 +280,53 @@ def _bench_backend():
     from sast_benchmark.backends import BenchBackend
 
     return BenchBackend(name="t", url="http://x/v1", model="m", api_key="")
+
+
+# --- bench request ceiling is operator-tunable (#863 follow-on) --------------
+#
+# These matter because the failure they guard is silent-shaped. A timeout read
+# as 0 makes every case fail instantly, and the report renders that as a model
+# that caught nothing rather than a harness that never asked.
+
+def test_timeout_env_override_is_used(monkeypatch):
+    from sast_benchmark import runner
+
+    monkeypatch.setenv("GRUG_BENCH_TIMEOUT_SECONDS", "600")
+    assert runner._positive_float_env("GRUG_BENCH_TIMEOUT_SECONDS", 150.0) == 600.0
+
+
+def test_timeout_env_unset_keeps_the_default(monkeypatch):
+    from sast_benchmark import runner
+
+    monkeypatch.delenv("GRUG_BENCH_TIMEOUT_SECONDS", raising=False)
+    assert runner._positive_float_env("GRUG_BENCH_TIMEOUT_SECONDS", 150.0) == 150.0
+
+
+def test_unparseable_timeout_falls_back_and_warns(monkeypatch, caplog):
+    """A typo must not silently become a 0-second ceiling."""
+    import logging
+
+    from sast_benchmark import runner
+
+    monkeypatch.setenv("GRUG_BENCH_TIMEOUT_SECONDS", "ten minutes")
+    with caplog.at_level(logging.WARNING):
+        got = runner._positive_float_env("GRUG_BENCH_TIMEOUT_SECONDS", 150.0)
+    assert got == 150.0
+    assert [r for r in caplog.records if r.msg == "bench_env_not_a_number"], (
+        "an unparseable ceiling must say so - silently defaulting hides a "
+        "misconfigured run behind plausible numbers"
+    )
+
+
+def test_non_positive_timeout_falls_back_and_warns(monkeypatch, caplog):
+    """0 or negative would fail every case instantly and score as zero recall."""
+    import logging
+
+    from sast_benchmark import runner
+
+    for bad in ("0", "-30"):
+        monkeypatch.setenv("GRUG_BENCH_TIMEOUT_SECONDS", bad)
+        with caplog.at_level(logging.WARNING):
+            got = runner._positive_float_env("GRUG_BENCH_TIMEOUT_SECONDS", 150.0)
+        assert got == 150.0, f"{bad} must not become the ceiling"
+        assert [r for r in caplog.records if r.msg == "bench_env_not_positive"]

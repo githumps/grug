@@ -47,7 +47,12 @@ jobs:
     environment: benchmark
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    # Sized to the per-request ceiling, not guessed: a case can cost
+    # GRUG_BENCH_TIMEOUT_SECONDS x 2 attempts before it is given up on, so a
+    # 600s ceiling means one stubborn case can eat 20 minutes on its own. A
+    # job budget below that kills the run before the raised ceiling can help,
+    # and a killed run records nothing at all.
+    timeout-minutes: 60
     # `secrets` isn't available in step `if:` — surface presence as a job env
     # the steps can gate on.
     env:
@@ -86,6 +91,11 @@ jobs:
           GRUG_BENCH_OPENROUTER_KEY: ${{ secrets.GRUG_BENCH_OPENROUTER_KEY }}
           GRUG_BENCH_POOLSIDE_KEY: ${{ secrets.GRUG_BENCH_POOLSIDE_KEY }}
           GRUG_BENCH_CAVE_URL: ${{ secrets.GRUG_BENCH_CAVE_URL }}
+          # The Cave is a LOCAL model: a large diff takes minutes, and a
+          # single ReadTimeout makes --record refuse the whole baseline.
+          # Measured 2026-08-15: 2 of 18 cases timed out at the 150s
+          # default, one of them a 5236-line diff.
+          GRUG_BENCH_TIMEOUT_SECONDS: ${{ vars.GRUG_BENCH_TIMEOUT_SECONDS || '600' }}
           GRUG_BENCH_CAVE_MODEL: ${{ secrets.GRUG_BENCH_CAVE_MODEL }}
           GRUG_BENCH_CAVE_KEY: ${{ secrets.GRUG_BENCH_CAVE_KEY }}
           BENCH_MODE: ${{ inputs.mode }}
