@@ -53,6 +53,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8
+      # Without this, every opengrep-backed rule test in test_sast_rules.py
+      # (and test_sast.py's real-engine test) skips silently in CI - the
+      # rules are asserted well-formed but never asserted to MATCH anything,
+      # which is the exact "component runs, exits 0, covers nothing" shape
+      # #859/#866 exist to fix, one layer up the stack. Pinned to the same
+      # OPENGREP_VERSION as services/Dockerfile's opengrep-fetch stage - bump
+      # both together. amd64/x86 asset: hosted ubuntu-latest runners are
+      # x86_64 (the Dockerfile's arm64 asset is for the arm64 k8s nodes, a
+      # different target).
+      - name: install opengrep (pinned to match services/Dockerfile)
+        run: |
+          curl -fsSL -o /usr/local/bin/opengrep \
+            "https://github.com/opengrep/opengrep/releases/download/v1.27.1/opengrep_manylinux_x86"
+          chmod 0755 /usr/local/bin/opengrep
+          opengrep --version
       - name: webhook tests
         run: make webhook-test
       - name: scripts tests (promotion decision + migration)

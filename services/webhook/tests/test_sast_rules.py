@@ -93,6 +93,19 @@ def test_ruleset_covers_more_than_python():
     )
 
 
+def test_swift_has_rule_coverage():
+    """The other half of #859's title: "macchina's Swift have none".
+
+    #862 closed the YAML side; this is the Swift side. Before swift.yml
+    existed, every Swift file staged for a scan was dropped before opengrep
+    ever looked at it (confirmed live and logged as
+    `sast_opengrep_files_not_scanned`, #866) - not "scanned, found nothing",
+    a file that was never scanned at all.
+    """
+    langs = {lang for r in _rules() for lang in r.get("languages", [])}
+    assert "swift" in langs, "no rule targets Swift - a Swift PR gets zero SAST coverage"
+
+
 # --- engine-backed: the checks that would have caught the real gap --------
 
 PLANTED = {
@@ -117,6 +130,46 @@ PLANTED = {
         "ansible/roles/x/tasks/run.yml",
         "- name: run\n"
         "  ansible.builtin.shell: rm -rf {{ target_dir }}\n",
+    ),
+    "swift-hardcoded-credential": (
+        "Sources/AuthService.swift",
+        "struct AuthService {\n"
+        '    let apiKey = "sk_live_abcdef1234567890"\n'
+        "}\n",
+    ),
+    "swift-weak-crypto": (
+        "Sources/Hasher.swift",
+        "import CryptoKit\n"
+        "func hashPassword(_ password: String) -> Insecure.MD5Digest {\n"
+        "    return Insecure.MD5.hash(data: Data(password.utf8))\n"
+        "}\n",
+    ),
+    "swift-cleartext-secret-log": (
+        "Sources/Session.swift",
+        "func debugLog(sessionToken: String) {\n"
+        '    print("session token is \\(sessionToken)")\n'
+        "}\n",
+    ),
+    "swift-unsafe-deserialization": (
+        "Sources/Cache.swift",
+        "func loadCache(data: Data) -> Any? {\n"
+        "    return NSKeyedUnarchiver.unarchiveObject(with: data)\n"
+        "}\n",
+    ),
+    "swift-command-injection": (
+        "Sources/Runner.swift",
+        "func run(userInput: String) {\n"
+        "    let task = Process()\n"
+        '    task.launchPath = "/bin/sh"\n'
+        '    task.arguments = ["-c", "echo " + userInput]\n'
+        "    task.launch()\n"
+        "}\n",
+    ),
+    "swift-path-traversal": (
+        "Sources/Files.swift",
+        "func readFile(name: String) -> Data? {\n"
+        '    return FileManager.default.contents(atPath: "/var/data/" + name)\n'
+        "}\n",
     ),
 }
 
@@ -202,5 +255,26 @@ def test_clean_files_produce_no_findings():
             "- name: fetch\n  ansible.builtin.uri:\n"
             "    url: https://example.invalid\n    validate_certs: yes\n"
             "- name: run\n  ansible.builtin.command:\n    argv: [rm, -rf, /tmp/x]\n",
+        # Swift negative control: a variable name that avoids the
+        # hardcoded-credential keyword regex, SHA256 (not MD5/SHA1), a fixed
+        # executable path (not a shell), a path built from an allowlisted
+        # value rather than concatenation, and the SECURE unarchiver API.
+        "Sources/OkService.swift":
+            "import Foundation\nimport CryptoKit\n\n"
+            "struct OkService {\n"
+            '    let configPathRef = "ssm:/app/config-path"\n\n'
+            "    func hashData(_ data: Data) -> String {\n"
+            "        let digest = SHA256.hash(data: data)\n"
+            '        return digest.map { String(format: "%02hhx", $0) }.joined()\n'
+            "    }\n\n"
+            "    func run() {\n"
+            "        let task = Process()\n"
+            '        task.executableURL = URL(fileURLWithPath: "/usr/bin/true")\n'
+            "        try? task.run()\n"
+            "    }\n\n"
+            "    func loadCache(data: Data) -> Any? {\n"
+            "        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSString.self, from: data)\n"
+            "    }\n"
+            "}\n",
     }
     assert _scan(clean) == []
