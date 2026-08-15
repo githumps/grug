@@ -18,6 +18,7 @@ Two layers here:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -62,6 +63,23 @@ def test_every_rule_declares_languages():
     assert missing == [], f"rules with no languages: {missing}"
 
 
+def test_every_language_the_fleet_uses_has_at_least_one_rule():
+    """Ansible was named in the ticket and silently missing from the first draft.
+
+    Asserting "not python-only" was too weak - it passed the moment ONE yaml
+    rule existed, which is exactly how Ansible got dropped while the file's own
+    header still claimed to cover it.
+    """
+    langs = {lang for r in _rules() for lang in r.get("languages", [])}
+    assert "yaml" in langs, "the YAML-heavy repos have no coverage"
+    ids = " ".join(r["id"] for r in _rules())
+    # k8s deliberately absent: iac_scan.py owns those and dispatch.py
+    # concatenates both scanners without dedup, so a rule here would
+    # double-report. See the header of yaml_ci_k8s.yml.
+    for shape in ("gha", "ansible"):
+        assert shape in ids, f"no rule targets {shape}-shaped YAML"
+
+
 def test_ruleset_covers_more_than_python():
     """The gap that started #859.
 
@@ -88,27 +106,17 @@ PLANTED = {
         "    steps:\n"
         "      - run: echo \"${{ github.event.issue.title }}\"\n",
     ),
-    "k8s-privileged": (
-        "k8s/x.yaml",
-        "apiVersion: v1\n"
-        "kind: Pod\n"
-        "spec:\n"
-        "  containers:\n"
-        "    - name: c\n"
-        "      image: nginx\n"
-        "      securityContext:\n"
-        "        privileged: true\n",
+    "ansible-tls-disabled": (
+        "ansible/roles/x/tasks/main.yml",
+        "- name: fetch\n"
+        "  ansible.builtin.uri:\n"
+        "    url: https://example.invalid\n"
+        "    validate_certs: no\n",
     ),
-    "k8s-privilege-escalation": (
-        "k8s/y.yaml",
-        "apiVersion: v1\n"
-        "kind: Pod\n"
-        "spec:\n"
-        "  containers:\n"
-        "    - name: c\n"
-        "      image: nginx\n"
-        "      securityContext:\n"
-        "        allowPrivilegeEscalation: true\n",
+    "ansible-shell-interpolation": (
+        "ansible/roles/x/tasks/run.yml",
+        "- name: run\n"
+        "  ansible.builtin.shell: rm -rf {{ target_dir }}\n",
     ),
 }
 
@@ -124,7 +132,11 @@ def _scan(files: dict[str, str]) -> list[str]:
             [ENGINE, "scan", "--config", str(RULES_DIR), "--json", "--quiet",
              "--disable-version-check", "--no-rewrite-rule-ids", tmp],
             capture_output=True, text=True, check=False,
-            env={"HOME": tmp, "XDG_CACHE_HOME": f"{tmp}/.cache", "PATH": "/usr/bin:/bin:/usr/local/bin",
+            # LAYER onto os.environ rather than replacing it, matching
+            # sast.scan_opengrep. A hardcoded PATH here would fail to find an
+            # engine installed anywhere else - and the failure mode would be
+            # "tests skip", i.e. silently green.
+            env={**os.environ, "HOME": tmp, "XDG_CACHE_HOME": f"{tmp}/.cache",
                  "PYTHONUTF8": "1", "LANG": "C.UTF-8"},
         )
         if proc.returncode != 0:
@@ -143,15 +155,21 @@ def test_planted_vulnerability_is_caught(name: str):
 
 @pytest.mark.skipif(ENGINE is None, reason="no opengrep/semgrep on PATH")
 def test_clean_files_produce_no_findings():
-    """Precision guard. A ruleset that flags everything gets switched off."""
+    """Precision guard. A ruleset that flags everything gets switched off.
+
+    The safe form of each rule, which must NOT fire: a workflow that routes the
+    untrusted value through env: and references it as a quoted shell variable,
+    and an Ansible task that leaves TLS verification on and uses an argv list
+    rather than interpolating into a shell string.
+    """
     clean = {
         ".github/workflows/ok.yml":
             "name: ok\non: [push]\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
             "    steps:\n      - env:\n          T: ${{ github.event.issue.title }}\n"
             "        run: echo \"$T\"\n",
-        "k8s/ok.yaml":
-            "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: c\n"
-            "      image: nginx\n      securityContext:\n"
-            "        privileged: false\n        allowPrivilegeEscalation: false\n",
+        "ansible/roles/x/tasks/ok.yml":
+            "- name: fetch\n  ansible.builtin.uri:\n"
+            "    url: https://example.invalid\n    validate_certs: yes\n"
+            "- name: run\n  ansible.builtin.command:\n    argv: [rm, -rf, /tmp/x]\n",
     }
     assert _scan(clean) == []

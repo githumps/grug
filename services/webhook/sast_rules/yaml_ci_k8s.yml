@@ -1,5 +1,5 @@
 # Curated offline rules for the YAML this fleet is actually made of: CI
-# workflows and Kubernetes manifests (#859).
+# workflows and Ansible (#859).
 #
 # WHY THIS FILE EXISTS. Until 2026-08-15 the entire vendored ruleset was ten
 # Python rules. The engine ran correctly and found nothing outside Python,
@@ -11,6 +11,43 @@
 # Same conventions as python.yml: vendored so the review path needs NO network,
 # `metadata.vuln_class` on every rule (the runner DROPS findings without one),
 # high-signal over exhaustive - the LLM exploitability judge prunes the rest.
+#
+# NOT DUPLICATING iac_scan.py. That module already regexes `privileged`,
+# `hostNetwork/PID/IPC`, `allowPrivilegeEscalation`, `runAsNonRoot: false` and
+# more, emitting the SAME iac-misconfig class - and guard/dispatch.py
+# concatenates `scan_candidates(...) + scan_iac(...)` with no dedup, so a rule
+# here that repeats one there double-reports on every PR. The first draft of
+# this file added three k8s rules that did exactly that; they are removed.
+# Check iac_scan.py's _RULES before adding anything IaC-shaped here.
+#
+# DIRECTION CHOSEN (#859 asks for this to be recorded, not just done).
+# #859 offered three: (1) adopt a free redistributable rule pack, (2) add a
+# purpose-built IaC scanner, (3) write fleet-specific rules for the bugs this
+# fleet actually gets bitten by. This file is (3) for the SECURITY classes and
+# deliberately NOT (3) for the reliability ones, for a reason worth stating:
+#
+#   sast.py sets `_SAST_SEVERITY = "high"` for EVERY finding this ruleset
+#   produces, whatever a rule's own `severity:` says - and judge.py's
+#   `_SUPPRESSIBLE_SEVERITIES` is {"low","medium"}, so a high finding can never
+#   be refuted. Anything added here is therefore published unconditionally and
+#   lands in the blocking partition if blocking is enabled.
+#
+# That is correct for command injection and privileged containers. It is wrong
+# for the reliability patterns #859 lists as candidates for option 3 - swallowed
+# `2>/dev/null`, `|| true` on a verification step, an exit code read through a
+# pipe. Those are real and they cost this fleet real time, but they are
+# judgement calls that need the judge, and routing them here would make them
+# unsuppressible high-severity noise on every PR. They belong in the lint
+# evidence layer (lint.py) or a class the judge can weigh; filed as follow-up
+# rather than forced in here.
+#
+# Options (1) and (2) were not taken: no pack is vendored and no new scanner is
+# added, so there is no third-party rule licence to record - every rule below is
+# hand-authored in this repo. If a pack is ever adopted, its licence must be
+# checked against the free/open-source-only constraint first.
+#
+# NOTE ON `severity:` BELOW. It is currently decorative - sast.py overrides it.
+# It is set honestly anyway so the intent survives if that ever changes.
 rules:
   # --- CI workflows ------------------------------------------------------
   #
@@ -36,7 +73,7 @@ rules:
       # first draft of this rule was well-formed, passed every structural
       # test, and caught zero of its own planted vulnerabilities.
       - pattern-regex: >-
-          (?m)^[ \t]*(?:-[ \t]+)?run:.*\$\{\{[^}]*\bgithub\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)[^}]*\}\}
+          (?m)^[ \t]*(?:-[ \t]+)?run:.*\$\{\{[^}]*(?:github\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)|inputs\.[A-Za-z_][A-Za-z0-9_-]*)[^}]*\}\}
 
   # The same substitution inside a block scalar. Separate rule rather than one
   # clever regex: `run: |` puts the dangerous line anywhere in the following
@@ -53,38 +90,33 @@ rules:
     metadata: {vuln_class: command-injection}
     patterns:
       - pattern-regex: >-
-          (?ms)^[ \t]*(?:-[ \t]+)?run:[ \t]*[|>][^\n]*\n(?:[ \t]+[^\n]*\n){0,40}?[ \t]+[^\n]*\$\{\{[^}]*\bgithub\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)[^}]*\}\}
+          (?ms)^[ \t]*(?:-[ \t]+)?run:[ \t]*[|>][^\n]*\n(?:[ \t]+[^\n]*\n){0,400}?[ \t]+[^\n]*\$\{\{[^}]*(?:github\.(?:event\.[A-Za-z_.\[\]'"-]+|head_ref)|inputs\.[A-Za-z_][A-Za-z0-9_-]*)[^}]*\}\}
 
-  # --- Kubernetes --------------------------------------------------------
-  - id: grug-k8s-privileged-container
+  # --- Ansible ------------------------------------------------------------
+  #
+  # Named explicitly in #859's acceptance criteria and initially missed here -
+  # the first draft's own header said "CI workflows and Kubernetes manifests"
+  # and quietly dropped it.
+  - id: grug-ansible-tls-verification-disabled
     languages: [yaml]
     severity: ERROR
     message: >-
-      Container runs privileged. This disables container isolation almost
-      entirely - the process gets the host's devices and effectively root on the
-      node. Drop it, or narrow to the specific capabilities actually needed.
+      TLS certificate verification is disabled (validate_certs/verify off). The
+      connection is then trivially machine-in-the-middle'able, and this is
+      usually pasted in to get past a self-signed cert and never removed. Trust
+      the CA properly instead.
     metadata: {vuln_class: iac-misconfig}
     patterns:
-      - pattern-regex: '(?m)^\s*privileged:\s*true\s*$'
+      - pattern-regex: '(?mi)^\s*(?:-\s+)?validate_certs:\s*(?:no|false)\s*$'
 
-  - id: grug-k8s-allow-privilege-escalation
-    languages: [yaml]
-    severity: WARNING
-    message: >-
-      allowPrivilegeEscalation: true lets a process gain more privileges than
-      its parent (setuid binaries, file capabilities). Set it false unless the
-      workload genuinely needs it.
-    metadata: {vuln_class: iac-misconfig}
-    patterns:
-      - pattern-regex: '(?m)^\s*allowPrivilegeEscalation:\s*true\s*$'
-
-  - id: grug-k8s-host-namespace
+  - id: grug-ansible-shell-interpolates-variable
     languages: [yaml]
     severity: ERROR
     message: >-
-      Pod shares a host namespace (hostNetwork/hostPID/hostIPC). This removes
-      the isolation boundary from the node - host PIDs, host network interfaces
-      or host IPC become visible and reachable from the container.
-    metadata: {vuln_class: iac-misconfig}
+      Ansible shell/command interpolates a Jinja variable straight into the
+      command line. If that value is attacker-influenced (inventory, a fact, a
+      lookup, an extra-var) it is command injection. Prefer the `command`
+      module with an argv list, or quote the value explicitly.
+    metadata: {vuln_class: command-injection}
     patterns:
-      - pattern-regex: '(?m)^\s*host(?:Network|PID|IPC):\s*true\s*$'
+      - pattern-regex: '(?m)^\s*(?:-\s+)?(?:ansible\.builtin\.)?shell:\s*.*\{\{.*\}\}'
