@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
@@ -1450,6 +1451,129 @@ def test_saas_overload_fallback_skipped_when_cave_returns_parse_failed(monkeypat
     assert len(call_log) == 2  # both Cave arms only, no SaaS fallback
     assert lc._POOLSIDE_MODEL not in call_log
     assert lc._OPENROUTER_MODEL not in call_log
+
+
+# --- OpenRouter free-tier rate limiter gate (grug#870, epic #869) ----------
+
+
+def _with_openrouter_model(monkeypatch, model: str) -> None:
+    """Point the shared OpenRouter BackendConfig at `model` (the review
+    override, the SaaS-overload fallback, Teller, ask, and the judge all
+    derive from this ONE dict entry via `replace()`), same trick
+    `test_openrouter_review_uses_opus_with_high_adaptive_reasoning`
+    inspects the read side of."""
+    monkeypatch.setattr(
+        lc,
+        "_BACKEND_CONFIGS",
+        {
+            **lc._BACKEND_CONFIGS,
+            Backend.OPENROUTER: replace(lc._BACKEND_CONFIGS[Backend.OPENROUTER], model=model),
+        },
+    )
+
+
+def test_call_backend_gates_free_tier_openrouter_model_only() -> None:
+    """`is_free_tier_model`/`acquire_free_tier_slot` must be consulted ONLY
+    for OpenRouter `:free` models - Cave and Poolside (and a non-free
+    OpenRouter model) must never pay for a limiter round-trip."""
+    from adapters.pg_rate_limit_store import ReservationResult
+
+    called: list[str] = []
+
+    def fake_reserve(*, name, minute_limit, day_limit, now=None):
+        called.append(name)
+        return ReservationResult(admitted=True, minute_count=1, day_count=1)
+
+    with patch("adapters.pg_rate_limit_store.try_reserve_slot", side_effect=fake_reserve), \
+         patch.object(httpx, "post", return_value=httpx.Response(200, json={"choices": []})):
+        lc._call_backend(lc._BACKEND_CONFIGS[Backend.POOLSIDE], [])
+        lc._call_backend(lc._BACKEND_CONFIGS[Backend.OPENROUTER], [])  # not :free today
+        assert called == []
+
+        free_config = replace(
+            lc._BACKEND_CONFIGS[Backend.OPENROUTER], model="meta-llama/x:free",
+        )
+        lc._call_backend(free_config, [])
+        assert called == ["openrouter_free"]
+
+
+def test_call_backend_raises_ratelimit_timeout_before_any_http_call(monkeypatch) -> None:
+    """A limiter rejection must short-circuit BEFORE the network call - the
+    call site never gets a fabricated/empty HTTP response to misread as a
+    clean answer, and `RateLimitTimeoutError` is an `httpx.RequestError`
+    subclass so it lands in every caller's existing transport-failure
+    `except` clause with no call-site change."""
+    def fake_acquire(model, *, cancel_event=None):
+        from openrouter_free_limiter import RateLimitOutcome
+        return RateLimitOutcome(
+            admitted=False, waited_seconds=30.0, queued=True,
+            minute_count=20, day_count=5, minute_limit=20, day_limit=1000,
+        )
+
+    monkeypatch.setattr(lc, "acquire_free_tier_slot", fake_acquire)
+    free_config = replace(lc._BACKEND_CONFIGS[Backend.OPENROUTER], model="meta-llama/x:free")
+
+    with patch.object(httpx, "post") as mock_post:
+        with pytest.raises(lc.RateLimitTimeoutError) as exc_info:
+            lc._call_backend(free_config, [])
+    mock_post.assert_not_called()
+    assert isinstance(exc_info.value, httpx.RequestError)
+
+
+def test_openrouter_free_tier_limiter_exhaustion_never_reads_as_clean_review(monkeypatch) -> None:
+    """grug#870: the load-bearing regression test. Both Cave arms down AND
+    Poolside down force the SaaS-overload fallback to OpenRouter; OpenRouter
+    is configured to a `:free` model whose limiter is exhausted. The result
+    MUST be indistinguishable, at the vocabulary level, from any other
+    total backend outage - `all_failed`, `degraded_reason` set, conclusion
+    never `success` - the SAME seam PR #844/#852 built
+    (`_partial_review_reason` / `_derive_conclusion`), not a new one.
+
+    MUST fail before the `_call_backend` gate exists (OpenRouter would
+    receive a normal HTTP request and, per this test's `respond()`, get a
+    clean empty-findings 200 - `out.kind == "reviewed"`, conclusion
+    `"success"`) and pass after it (the limiter rejects before dispatch,
+    OpenRouter never gets a request, `out.kind == "all_failed"`).
+    """
+    monkeypatch.setattr(lc, "_RETRY_SLEEP", lambda s: None)
+    free_model = "mistralai/mistral-small:free"
+    _with_openrouter_model(monkeypatch, free_model)
+
+    def fake_acquire(model, *, cancel_event=None):
+        from openrouter_free_limiter import RateLimitOutcome
+        assert model == free_model
+        return RateLimitOutcome(
+            admitted=False, waited_seconds=30.0, queued=True,
+            minute_count=20, day_count=5, minute_limit=20, day_limit=1000,
+        )
+
+    monkeypatch.setattr(lc, "acquire_free_tier_slot", fake_acquire)
+
+    def respond(url, **kwargs):
+        model = (kwargs.get("json") or {}).get("model", "")
+        # Both Cave arms (same models test_saas_overload_fallback_rescues_
+        # review_when_cave_fully_down fails) and Poolside - forces the SaaS
+        # loop all the way to OpenRouter, the model under test here.
+        if model in ("qwen3-coder-next:q8_0", "poolside/Laguna-S-2.1-NVFP4", lc._POOLSIDE_MODEL):
+            raise httpx.ConnectTimeout("down")
+        raise AssertionError(
+            f"httpx.post must never be reached for the rate-limited model "
+            f"(the limiter gate runs before dispatch) - got model={model!r}"
+        )
+
+    with patch.object(httpx, "post", side_effect=respond):
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "all_failed", (
+        f"kind={out.kind!r} - a limiter timeout must read as a backend "
+        "failure, never as a reviewed/clean pass"
+    )
+    evaluation = evaluate_diff((), out)
+    assert evaluation.degraded_reason is not None
+    assert evaluation.conclusion != "success", (
+        f"conclusion={evaluation.conclusion!r} - exhausting the OpenRouter "
+        'free-tier queue must never surface as "Elder clear - no markings"'
+    )
 
 
 def test_parse_failed_attributes_secondary_backend(monkeypatch) -> None:

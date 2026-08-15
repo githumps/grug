@@ -48,6 +48,11 @@ from typing import Any, Callable, Literal, Optional, Sequence, TypedDict, cast, 
 import httpx
 
 from code_review_prompt import PromptVariant, build_system_prompt
+from openrouter_free_limiter import (
+    RateLimitTimeoutError,
+    acquire_free_tier_slot,
+    is_free_tier_model,
+)
 from voice_pack import VoiceSelection, apply_voice
 from review_types import EFFORTS, SEVERITIES, Effort, Severity
 from review_pipeline import (
@@ -1177,9 +1182,30 @@ def _call_backend(
 
     Every other caller (the judge, the walkthrough summary, the SaaS
     overload fallback) passes no `cancel_event` and takes the direct,
-    unmodified path below - no extra thread, no behavior change."""
+    unmodified path below - no extra thread, no behavior change.
+
+    OpenRouter free-tier gate (grug#870, epic #869): a `:free`-suffixed
+    OpenRouter model first acquires a slot from the shared, cross-process
+    limiter in `openrouter_free_limiter.py` before any network call is
+    made. See that module's docstring for why an in-process limiter
+    cannot enforce OpenRouter's account-wide caps against grug's 4
+    replicas. Exhausting the bounded queue wait raises
+    `RateLimitTimeoutError`, an `httpx.RequestError` subclass every
+    caller below already catches - it falls back / degrades exactly like
+    a transport failure, never like a call that quietly succeeded. Cave
+    and Poolside never carry the `:free` suffix, so `is_free_tier_model`
+    is the entire cost this gate adds to their calls."""
     if cancel_event is not None and cancel_event.is_set():
         raise httpx.RequestError("cancelled before dispatch")
+    if config.backend == Backend.OPENROUTER and is_free_tier_model(config.model):
+        outcome = acquire_free_tier_slot(config.model, cancel_event=cancel_event)
+        if not outcome.admitted:
+            raise RateLimitTimeoutError(
+                "openrouter free-tier limiter exhausted its queue wait "
+                f"({outcome.waited_seconds:.1f}s; minute={outcome.minute_count}/"
+                f"{outcome.minute_limit}, day={outcome.day_count}/{outcome.day_limit}) "
+                f"for model {config.model!r}"
+            )
     try:
         key = config.key_loader()
     except Exception as e:

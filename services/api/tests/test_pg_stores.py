@@ -12,16 +12,19 @@ a database cannot silently pass as coverage.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+_SHARED_DIR = str(Path(__file__).parent.parent.parent / "_shared")
 
 _TEST_DB = os.environ.get("GRUG_TEST_DATABASE_URL", "")
 
@@ -1085,3 +1088,234 @@ def test_get_learning_by_source_comment(pg):
     assert hit is not None and hit["text"] == "taught rule"
     assert store.get_learning_by_source_comment("o/r2", 999) is None
     assert store.get_learning_by_source_comment("o/r2", 0) is None
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter free-tier rate limiter (grug#870, epic #869)
+# ---------------------------------------------------------------------------
+
+_RL_FIXED_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_reserve_slot_admits_up_to_minute_limit_then_rejects(pg):
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-{uuid.uuid4()}"
+    admitted = [
+        store.try_reserve_slot(
+            name=name, minute_limit=3, day_limit=1000, now=_RL_FIXED_NOW,
+        )
+        for _ in range(5)
+    ]
+    assert [r.admitted for r in admitted] == [True, True, True, False, False]
+    assert [r.minute_count for r in admitted] == [1, 2, 3, 3, 3]
+
+
+def test_reserve_slot_day_limit_independent_of_minute_limit(pg):
+    """A day cap tighter than the minute cap rejects even though the
+    minute window still has room - the two windows are separate gates,
+    not one derived from the other."""
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-{uuid.uuid4()}"
+    first = store.try_reserve_slot(
+        name=name, minute_limit=20, day_limit=1, now=_RL_FIXED_NOW,
+    )
+    second = store.try_reserve_slot(
+        name=name, minute_limit=20, day_limit=1, now=_RL_FIXED_NOW,
+    )
+    assert first.admitted is True
+    assert second.admitted is False
+    # The minute window still had room (2 < 20) - only the day cap rejected.
+    assert second.minute_count == 2
+    assert second.day_count == 1
+
+
+def test_reserve_slot_new_minute_window_resets_independently(pg):
+    """A later minute bucket starts its OWN counter - the per-minute
+    ceiling governs one 60s window, not a running total."""
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-{uuid.uuid4()}"
+    for _ in range(3):
+        result = store.try_reserve_slot(
+            name=name, minute_limit=3, day_limit=1000, now=_RL_FIXED_NOW,
+        )
+        assert result.admitted is True
+    rejected = store.try_reserve_slot(
+        name=name, minute_limit=3, day_limit=1000, now=_RL_FIXED_NOW,
+    )
+    assert rejected.admitted is False
+
+    later = _RL_FIXED_NOW.replace(minute=_RL_FIXED_NOW.minute + 1)
+    next_window = store.try_reserve_slot(
+        name=name, minute_limit=3, day_limit=1000, now=later,
+    )
+    assert next_window.admitted is True
+    assert next_window.minute_count == 1
+    # The day counter is UNAFFECTED by the minute rollover - same day.
+    assert next_window.day_count == 4
+
+
+def test_reserve_slot_concurrent_threads_admit_exactly_the_limit(pg):
+    """The reason this suite needs REAL Postgres: N racing claimants,
+    exactly `limit` winners - same proof shape as
+    test_claim_delivery_concurrent_exactly_one_winner, generalized from a
+    win-once flag to a bounded counter."""
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-{uuid.uuid4()}"
+    limit = 5
+    n = 40
+    results: list[bool] = []
+    barrier = threading.Barrier(n)
+
+    def attempt():
+        barrier.wait()
+        result = store.try_reserve_slot(
+            name=name, minute_limit=limit, day_limit=1000, now=_RL_FIXED_NOW,
+        )
+        results.append(result.admitted)
+
+    threads = [threading.Thread(target=attempt) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count(True) == limit
+    assert results.count(False) == n - limit
+
+
+def test_reserve_slot_concurrent_day_limit_binds_even_with_minute_headroom(pg):
+    """The minute and day checks are two SEPARATE atomic statements, not
+    one joint transaction (see try_reserve_slot's docstring for why that
+    is still safe): each `_try_increment` call independently enforces its
+    OWN limit, so the total ever admitted for a window can never exceed
+    that window's limit no matter how the two checks interleave. Proves
+    that invariant under real concurrency for the case where the DAY cap
+    (not the minute cap) is what actually binds - the minute window has
+    ample room, so an interleaving bug that let a day-rejected call slip
+    through as an incorrectly-admitted "minute succeeded" would show up
+    here as more than `day_limit` admits."""
+    from adapters import pg_rate_limit_store as store
+
+    name = f"rl-daybind-{uuid.uuid4()}"
+    day_limit = 5
+    n = 40
+    results: list[bool] = []
+    barrier = threading.Barrier(n)
+
+    def attempt():
+        barrier.wait()
+        result = store.try_reserve_slot(
+            name=name, minute_limit=1000, day_limit=day_limit, now=_RL_FIXED_NOW,
+        )
+        results.append(result.admitted)
+
+    threads = [threading.Thread(target=attempt) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count(True) == day_limit
+    assert results.count(False) == n - day_limit
+
+
+def _mp_free_tier_worker(
+    db_url: str, name: str, limit: int, barrier, result_queue, worker_index: int,
+) -> None:
+    """Module-level (spawn-picklable) multiprocessing worker.
+
+    Grug's real replicas (grug-webhook x2, grug-consumer x2) are SEPARATE
+    OS processes with NO shared Python memory - each imports
+    `adapters.pg_rate_limit_store` fresh and builds its OWN
+    `psycopg_pool.ConnectionPool`. `multiprocessing.get_context("spawn")`
+    reproduces exactly that: every worker below starts a brand new
+    interpreter (spawn never forks/shares the parent's already-imported
+    modules or pool) and constructs its own pool. If the limiter were (or
+    regressed to) an in-process token bucket - state living in a Python
+    module global - each of these N independent processes would keep its
+    OWN bucket and admit up to `limit` on its OWN: N x limit total wins
+    instead of `limit`. That is the exact "4 replicas x 20/min against a
+    20/min account cap" bug grug#870 exists to prevent, and a thread-only
+    test (sharing one process's memory) cannot expose it.
+
+    The warm-up query before `barrier.wait()` matches a live pod, whose
+    pool has already been serving traffic for its whole lifetime before it
+    ever reaches contention - it is not a workaround for anything: this
+    test caught a real over-admission bug in the admission SQL (see
+    pg_rate_limit_store.py's module docstring) with the warm-up in place,
+    so the warm-up does not mask correctness issues.
+    """
+    sys.path.insert(0, _SHARED_DIR)
+    os.environ["GRUG_DATABASE_URL"] = db_url
+    from adapters import pg_base
+    from adapters import pg_rate_limit_store as store
+
+    pool = pg_base.get_pool()
+    pool.wait(timeout=30.0)
+    with pool.connection() as conn:
+        conn.execute("SELECT 1")
+
+    barrier.wait()
+    result = store.try_reserve_slot(
+        name=name, minute_limit=limit, day_limit=1_000_000, now=_RL_FIXED_NOW,
+    )
+    result_queue.put((worker_index, result.admitted))
+
+
+def test_reserve_slot_concurrent_processes_admit_exactly_the_limit(pg):
+    """MULTI-PROCESS proof (grug#870): N SEPARATE OS processes (not
+    threads - see `_mp_free_tier_worker`'s docstring for why that
+    distinction is load-bearing) race the same account-wide limiter.
+    Exactly `limit` are admitted regardless of how many independent
+    processes contend for it - the coordination lives in Postgres, not
+    in any one process's memory, so it holds across grug's real
+    grug-webhook/grug-consumer replica topology."""
+    from adapters import pg_base
+
+    name = f"rl-mp-{uuid.uuid4()}"
+    limit = 5
+    # 16, well above grug's real 4 (grug-webhook x2 + grug-consumer x2):
+    # an earlier, weaker version of this test used n=6 because that was
+    # the largest value that happened not to expose a real over-admission
+    # bug in CI (the `ON CONFLICT DO UPDATE ... WHERE` admission query -
+    # see pg_rate_limit_store.py's module docstring for the fix and the
+    # reasoning). Tuning the test until a bug stopped reproducing was
+    # backwards; the fix must hold at MORE contention than production
+    # ever sees, not the least that stays green.
+    n = 16
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(n)
+    result_queue: multiprocessing.Queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_free_tier_worker,
+            args=(_TEST_DB, name, limit, barrier, result_queue, i),
+        )
+        for i in range(n)
+    ]
+    for p in procs:
+        p.start()
+    results = [result_queue.get(timeout=30) for _ in range(n)]
+    for p in procs:
+        p.join(timeout=30)
+    for p in procs:
+        assert p.exitcode == 0, f"worker process {p.pid} exited {p.exitcode}"
+
+    admitted = [ok for _, ok in results]
+    assert admitted.count(True) == limit, (
+        f"expected exactly {limit} of {n} SEPARATE PROCESSES to be admitted, "
+        f"got {admitted.count(True)} - {results!r}"
+    )
+    assert admitted.count(False) == n - limit
+
+    # Ground truth: the persisted row agrees with what the processes saw -
+    # not just "each worker got a plausible-looking answer" but "the
+    # counter Postgres actually holds is exactly `limit`".
+    with pg_base.get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT data->>'count' FROM grug_kv WHERE pk = %s AND sk LIKE 'MIN#%%'",
+            (f"RATELIMIT#{name}",),
+        ).fetchone()
+    assert row is not None and int(row[0]) == limit
