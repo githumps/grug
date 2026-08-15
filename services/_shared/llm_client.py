@@ -1379,6 +1379,26 @@ def _coerce_finding(raw: Any) -> tuple[Optional[Finding], str]:
     ), ""
 
 
+def _diagnose_non_string_content(choice: object, message: object, content: object) -> str:
+    """Describe a `message.content` that is not a str, well enough to fix it
+    from ONE log line: the offending type, the `finish_reason` that explains
+    it, and whether a `reasoning` field was there to fall back to.
+
+    A module-level sibling rather than a nested helper deliberately: Elder
+    scores the whole subtree, so a closure would not lift `_parse_response`
+    back under the complexity cap - and this is genuinely a separate job
+    (describing a bad shape) from the parser's own control flow."""
+    finish_reason = (
+        choice.get("finish_reason") if isinstance(choice, dict) else None
+    ) or "unknown"
+    content_kind = "null" if content is None else type(content).__name__
+    detail = f"content is {content_kind}, not str; finish_reason={finish_reason}"
+    reasoning = message.get("reasoning") if isinstance(message, dict) else None
+    if isinstance(reasoning, str) and reasoning:
+        detail += f"; reasoning field present ({len(reasoning)} chars, excluded from parse)"
+    return detail
+
+
 def _parse_response(
     resp: httpx.Response,
 ) -> tuple[tuple[Finding, ...], str, str]:
@@ -1419,17 +1439,7 @@ def _parse_response(
     except (KeyError, IndexError, TypeError):
         return (), model_name, "missing choices/message/content"
     if not isinstance(content, str):
-        # `choice`/`message` are known-good dicts here (the access above
-        # succeeded) - safe to read finish_reason/reasoning for diagnosis.
-        finish_reason = (
-            choice.get("finish_reason") if isinstance(choice, dict) else None
-        ) or "unknown"
-        content_kind = "null" if content is None else type(content).__name__
-        detail = f"content is {content_kind}, not str; finish_reason={finish_reason}"
-        reasoning = message.get("reasoning") if isinstance(message, dict) else None
-        if isinstance(reasoning, str) and reasoning:
-            detail += f"; reasoning field present ({len(reasoning)} chars, excluded from parse)"
-        return (), model_name, detail
+        return (), model_name, _diagnose_non_string_content(choice, message, content)
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
