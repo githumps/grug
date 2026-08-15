@@ -272,6 +272,17 @@ def scan_opengrep(
                 return ()
             data = json.loads(proc.stdout)
             tmp_prefix = tmp.rstrip("/") + "/"
+            # A per-file parse failure lands in `errors` while the process
+            # still exits 0 with a well-formed `results` array. Reading only
+            # `results` turns "could not scan this file" into "scanned it and
+            # it was clean" - opposite facts that look identical, and the
+            # failure lands on exactly the files the YAML rules target
+            # (Helm-templated manifests, Jinja-templated Ansible: `{{ }}` is
+            # not valid YAML). Report it rather than fail the review - those
+            # files are legitimately unparseable and blocking on them would
+            # make the scanner unusable - but never stay silent about reduced
+            # coverage.
+            _log_unscanned_files(data, tmp_prefix, set(kept_files))
     except FileNotFoundError:
         log.warning("sast_opengrep_binary_missing")
         return ()
@@ -280,6 +291,56 @@ def scan_opengrep(
         return ()
 
     return _map_opengrep_results(data, added, tmp_prefix)
+
+
+
+def _log_unscanned_files(data: dict, tmp_prefix: str, staged: set[str]) -> None:
+    """Report coverage the engine did not deliver. Two different silences.
+
+    1. `errors` - rule/IO failures the engine does name. Cheap to surface and
+       previously dropped on the floor.
+
+    2. Files the engine NEVER SCANNED. This is the serious one, and it is
+       invisible without comparing against what we staged. Measured against the
+       real engine on 2026-08-15: four files staged, `paths.scanned` came back
+       with ONE, `errors` came back EMPTY. A Swift file, an unknown extension
+       and an oversized file were all dropped without a word.
+
+       That silence hits whole LANGUAGES, not stray files - a Swift repo gets a
+       green review having been scanned not at all - which is the same shape as
+       the ruleset that matched nothing, one level further down. "Scanned and
+       clean" and "never looked at" are opposite facts and the JSON renders
+       them identically unless you do this comparison.
+
+    Neither case fails the review: files legitimately fall outside an engine's
+    languages, and blocking on that would make the scanner unusable. But a
+    review that covered less than it claims must say so.
+    """
+    errors = data.get("errors") or []
+    if errors:
+        detail = []
+        for e in errors:
+            path = (e.get("path") or "").replace(tmp_prefix, "", 1)
+            detail.append(
+                f"{path or '<no path>'}: {e.get('message') or e.get('type') or 'unknown'}"
+            )
+        log.warning(
+            "sast_opengrep_files_unscanned",
+            extra={"count": len(detail), "files": detail[:20]},
+        )
+
+    scanned_raw = (data.get("paths") or {}).get("scanned") or []
+    scanned = {str(p).replace(tmp_prefix, "", 1) for p in scanned_raw}
+    missed = sorted(staged - scanned)
+    if missed:
+        log.warning(
+            "sast_opengrep_files_not_scanned",
+            extra={
+                "count": len(missed),
+                "staged": len(staged),
+                "files": missed[:20],
+            },
+        )
 
 
 def _map_opengrep_results(

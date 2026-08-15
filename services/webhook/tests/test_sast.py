@@ -133,7 +133,8 @@ def _semgrep_json(results):
     return r
 
 
-import json  # noqa: E402
+import json
+import logging  # noqa: E402
 
 
 def _hunk(path, new_lines):
@@ -517,3 +518,89 @@ def test_legacy_semgrep_engine_name_still_scans(monkeypatch):
         (_hunk("a.py", {1}),), {"a.py": "code\n"}, engine="opengrep"
     )
     assert calls == ["opengrep"], "current engine name must route to the opengrep scanner"
+
+
+def test_scan_opengrep_logs_files_it_could_not_parse(monkeypatch, caplog):
+    """A file the engine could not parse must be REPORTED, not silently skipped.
+
+    The engine puts per-file parse failures in `errors` and still exits 0 with a
+    well-formed `results` array. Reading only `results` therefore turns "could
+    not scan this file" into "scanned this file and it was clean" - the same
+    class of failure as a ruleset that matches nothing, one level down, and it
+    lands on exactly the file types the YAML rules target: Helm-templated
+    manifests and Jinja-templated Ansible, whose `{{ }}` is not valid YAML.
+    """
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = json.dumps({
+        "results": [],
+        # S108 silenced deliberately: these are STRINGS inside a fake engine
+        # payload, echoing the paths the real engine reports back. Nothing here
+        # opens, creates or writes a file - the runner only string-replaces the
+        # tmp prefix out of them for the log line.
+        "errors": [
+            {"message": "Invalid YAML", "path": "/tmp/x/k8s/templated.yaml"},  # noqa: S108
+            {"message": "Syntax error", "path": "/tmp/x/ansible/vars.yml"},  # noqa: S108
+        ],
+    })
+    r.stderr = ""
+    monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: r)
+    with caplog.at_level(logging.WARNING):
+        out = scan_opengrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
+    assert out == ()
+    recs = [r for r in caplog.records if r.msg == "sast_opengrep_files_unscanned"]
+    assert recs, "an unparseable file was skipped without a word - green review, no coverage"
+    # Assert on the RECORD, not caplog.text: structured extras never render
+    # into the formatted message, so a text assertion would pass on a log that
+    # names no file at all - which is most of the value here.
+    assert recs[0].count == 2
+    files = " ".join(recs[0].files)
+    assert "templated.yaml" in files, "the log must name the file that was skipped"
+    assert "Invalid YAML" in files, "the log must give the reason, not just the path"
+
+
+def test_scan_opengrep_no_errors_key_does_not_warn(monkeypatch, caplog):
+    """A clean scan must stay quiet - a warning on every run trains people to ignore it."""
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = json.dumps({"results": []})
+    r.stderr = ""
+    monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: r)
+    with caplog.at_level(logging.WARNING):
+        scan_opengrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
+    assert not [r for r in caplog.records if r.msg == "sast_opengrep_files_unscanned"]
+
+
+def test_scan_opengrep_reports_files_the_engine_never_scanned(monkeypatch, caplog):
+    """Files the engine silently EXCLUDED must be reported.
+
+    Measured against the real engine 2026-08-15: staging four files and asking
+    for a scan returned `paths.scanned` containing only ONE of them. The Swift
+    file, an unknown extension and an oversized file were all dropped with
+    `errors: []` - no error, no warning, no mention. The engine simply does not
+    tell you what it declined to look at.
+
+    That is worse than the parse-failure case #863 was filed for, because it
+    hits whole LANGUAGES: a repo of Swift gets a green review having been
+    scanned not at all. `paths.scanned` is the only signal, so compare it
+    against what we staged.
+    """
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = json.dumps({
+        "results": [],
+        "errors": [],
+        # S108 as above: a string in a fake payload, not a temp file this test
+        # ever touches.
+        "paths": {"scanned": ["/tmp/x/a.py"]},  # noqa: S108
+    })
+    r.stderr = ""
+    monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: r)
+    with caplog.at_level(logging.WARNING):
+        scan_opengrep(
+            (_hunk("a.py", {1}), _hunk("b.swift", {1})),
+            {"a.py": "code\n", "b.swift": "func f() {}\n"},
+        )
+    recs = [r for r in caplog.records if r.msg == "sast_opengrep_files_not_scanned"]
+    assert recs, "the engine skipped a staged file and said nothing"
+    assert "b.swift" in " ".join(recs[0].files)
