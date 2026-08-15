@@ -23,7 +23,7 @@ from personas.code_reviewer.sast import (
     Candidate,
     judge_candidates,
     scan_candidates,
-    scan_semgrep,
+    scan_opengrep,
 )
 
 
@@ -141,7 +141,7 @@ def _hunk(path, new_lines):
     return DiffHunk(file_path=path, new_start=min(new_lines), new_lines=frozenset(new_lines), body=body)
 
 
-def test_scan_semgrep_maps_class_and_filters_to_added_lines(monkeypatch):
+def test_scan_opengrep_maps_class_and_filters_to_added_lines(monkeypatch):
     """Maps metadata.vuln_class -> Candidate; keeps only findings on lines the
     PR added (a hit on an untouched line is dropped)."""
     results = [
@@ -150,23 +150,23 @@ def test_scan_semgrep_maps_class_and_filters_to_added_lines(monkeypatch):
     ]
     monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: _semgrep_json(results))
     hunks = (_hunk("auth.py", {1, 2}),)
-    out = scan_semgrep(hunks, {"auth.py": "code\n"})
+    out = scan_opengrep(hunks, {"auth.py": "code\n"})
     assert len(out) == 1
     assert out[0].vuln_class == "sql-injection" and out[0].line == 2  # line 99 filtered (not added)
 
 
-def test_scan_semgrep_no_file_contents_returns_empty():
-    assert scan_semgrep((_hunk("a.py", {1}),), {}) == ()
+def test_scan_opengrep_no_file_contents_returns_empty():
+    assert scan_opengrep((_hunk("a.py", {1}),), {}) == ()
 
 
-def test_scan_semgrep_missing_binary_fails_safe(monkeypatch):
+def test_scan_opengrep_missing_binary_fails_safe(monkeypatch):
     def _missing(*a, **kw):
         raise FileNotFoundError("semgrep not installed")
     monkeypatch.setattr(sast.subprocess, "run", _missing)
-    assert scan_semgrep((_hunk("a.py", {1}),), {"a.py": "x"}) == ()
+    assert scan_opengrep((_hunk("a.py", {1}),), {"a.py": "x"}) == ()
 
 
-def test_scan_semgrep_nonzero_exit_fails_safe(monkeypatch):
+def test_scan_opengrep_nonzero_exit_fails_safe(monkeypatch):
     """Version-dependent, semgrep can exit non-zero AND emit parseable
     JSON - that must degrade to () + log, never a silent zero-findings
     scan (#77 audit stage 2)."""
@@ -175,27 +175,27 @@ def test_scan_semgrep_nonzero_exit_fails_safe(monkeypatch):
     r.stdout = json.dumps({"results": [], "errors": [{"message": "invalid rules"}]})
     r.stderr = "invalid configuration"
     monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: r)
-    out = scan_semgrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
+    out = scan_opengrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
     assert out == ()
 
 
-def test_scan_semgrep_missing_rules_dir_fails_safe(monkeypatch):
+def test_scan_opengrep_missing_rules_dir_fails_safe(monkeypatch):
     """Post-#77 the rules dir resolves from the service cwd - a wrong
     working directory must degrade loudly to (), not scan without rules."""
     monkeypatch.setattr(sast, "_RULES_DIR", "/nonexistent/sast_rules")
     called = []
     monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: called.append(a) or _semgrep_json([]))
-    out = scan_semgrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
+    out = scan_opengrep((_hunk("a.py", {1}),), {"a.py": "code\n"})
     assert out == ()
     assert not called, "semgrep must not run without its rules dir"
 
 
-def test_scan_semgrep_run_failure_fails_safe(monkeypatch):
-    monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(sast.subprocess.TimeoutExpired("semgrep", 60)))
-    assert scan_semgrep((_hunk("a.py", {1}),), {"a.py": "x"}) == ()
+def test_scan_opengrep_run_failure_fails_safe(monkeypatch):
+    monkeypatch.setattr(sast.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(sast.subprocess.TimeoutExpired("opengrep", 60)))
+    assert scan_opengrep((_hunk("a.py", {1}),), {"a.py": "x"}) == ()
 
 
-def test_scan_semgrep_points_home_at_writable_scan_dir(monkeypatch):
+def test_scan_opengrep_points_home_at_writable_scan_dir(monkeypatch):
     """Semgrep initializes ~/.semgrep at startup. The pods run as uid 10001
     with --no-create-home on a readOnlyRootFilesystem, so inheriting the pod
     HOME crashed semgrep with a mkdir PermissionError (exit 1) before it
@@ -210,7 +210,7 @@ def test_scan_semgrep_points_home_at_writable_scan_dir(monkeypatch):
         seen["env"] = kw.get("env")
         return _semgrep_json([])
     monkeypatch.setattr(sast.subprocess, "run", _capture)
-    scan_semgrep((_hunk("a.py", {1}),), {"a.py": "x = 1\n"})
+    scan_opengrep((_hunk("a.py", {1}),), {"a.py": "x = 1\n"})
     import os as _os
     assert seen["env"] is not None, "semgrep must run with an explicit env"
     assert seen["env"]["HOME"] == seen["tmp"]
@@ -221,7 +221,7 @@ def test_scan_semgrep_points_home_at_writable_scan_dir(monkeypatch):
     assert seen["env"]["XDG_CACHE_HOME"].startswith(seen["tmp"] + _os.sep)
 
 
-def test_scan_semgrep_skips_files_over_byte_budget(monkeypatch):
+def test_scan_opengrep_skips_files_over_byte_budget(monkeypatch):
     """AC5: a file beyond the byte budget is not scanned (cost bound)."""
     monkeypatch.setattr(sast, "_MAX_SCAN_BYTES", 50)
     seen_files = {}
@@ -232,11 +232,11 @@ def test_scan_semgrep_skips_files_over_byte_budget(monkeypatch):
         return _semgrep_json([])
     monkeypatch.setattr(sast.subprocess, "run", _capture)
     contents = {"small.py": "x" * 10, "huge.py": "y" * 1000}
-    scan_semgrep((_hunk("small.py", {1}),), contents)
+    scan_opengrep((_hunk("small.py", {1}),), contents)
     assert seen_files["count"] == 1  # only small.py fit the budget
 
 
-def test_scan_semgrep_rejects_path_traversal_in_file_path(monkeypatch):
+def test_scan_opengrep_rejects_path_traversal_in_file_path(monkeypatch):
     """A PR-controlled path that escapes the temp dir (../../etc/...) is NOT
     written (arbitrary-write guard); the safe file is still scanned."""
     import os as _os
@@ -248,13 +248,13 @@ def test_scan_semgrep_rejects_path_traversal_in_file_path(monkeypatch):
                 written.append(_os.path.relpath(_os.path.join(root, fn), tmp))
         return _semgrep_json([])
     monkeypatch.setattr(sast.subprocess, "run", _capture)
-    scan_semgrep((_hunk("ok.py", {1}),), {"ok.py": "x = 1\n", "../../etc/evil.py": "pwned"})
+    scan_opengrep((_hunk("ok.py", {1}),), {"ok.py": "x = 1\n", "../../etc/evil.py": "pwned"})
     assert "ok.py" in written
     assert all(".." not in w for w in written)  # the escaping path never landed
 
 
-@pytest.mark.skipif(shutil.which("semgrep") is None, reason="semgrep not installed")
-def test_scan_semgrep_real_engine_detects_multiple_classes():
+@pytest.mark.skipif(shutil.which("opengrep") is None, reason="semgrep not installed")
+def test_scan_opengrep_real_engine_detects_multiple_classes():
     """End-to-end with the REAL semgrep over the vendored rules: a multi-class
     diff yields candidates of the right classes on the added lines."""
     diff = (
@@ -274,7 +274,7 @@ def test_scan_semgrep_real_engine_detects_multiple_classes():
             "    import pickle; pickle.loads(host)\n"
         )
     }
-    classes = {c.vuln_class for c in scan_semgrep(hunks, file_contents)}
+    classes = {c.vuln_class for c in scan_opengrep(hunks, file_contents)}
     assert {"sql-injection", "command-injection", "unsafe-deserialization"} <= classes
 
 
@@ -487,3 +487,33 @@ def test_dispatch_suppressed_sast_finding_not_published(monkeypatch):
     if posted_review:
         assert all(not (c.path == "auth.py" and c.line == 2) for c in posted_review[0].comments)
     assert posted_check[0].conclusion != "failure"
+
+
+def test_legacy_semgrep_engine_name_still_scans(monkeypatch):
+    """A manifest that still says GRUG_SAST_ENGINE=semgrep must keep SCANNING.
+
+    The engine was renamed semgrep -> opengrep (#858). If the alias were dropped,
+    an un-updated manifest would fall through to `scan_builtin` and quietly lose
+    the whole rule-based layer while every check still reported success - the
+    exact silent-downgrade-of-a-security-control failure this module warns about
+    elsewhere. Pin it.
+    """
+    calls: list[str] = []
+
+    def fake_scan(hunks, file_contents):
+        calls.append("opengrep")
+        return ()
+
+    monkeypatch.setattr(
+        "personas.code_reviewer.sast.scan_opengrep", fake_scan, raising=True
+    )
+    sast.scan_candidates(
+        (_hunk("a.py", {1}),), {"a.py": "code\n"}, engine="semgrep"
+    )
+    assert calls == ["opengrep"], "legacy engine name must route to the opengrep scanner"
+
+    calls.clear()
+    sast.scan_candidates(
+        (_hunk("a.py", {1}),), {"a.py": "code\n"}, engine="opengrep"
+    )
+    assert calls == ["opengrep"], "current engine name must route to the opengrep scanner"
