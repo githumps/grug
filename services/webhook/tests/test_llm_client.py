@@ -3266,3 +3266,112 @@ def test_terminal_backend_failure_emits_its_own_log_token():
     assert "llm_backend_http_failed" in records, (
         "ordinary overload keeps the existing token"
     )
+
+
+# --- grug#883: a fence-wrapped review is a REAL review ----------------------
+
+
+def _fenced_response(content: str) -> "httpx.Response":
+    """A 200 whose message.content is `content` verbatim."""
+    return httpx.Response(200, json={
+        "model": "poolside/laguna-s-2.1:free",
+        "choices": [{"message": {"role": "assistant", "content": content},
+                     "finish_reason": "stop"}],
+    })
+
+
+_ENVELOPE = (
+    '{"findings": [{"path": "a.py", "line": 1, "rule": "null-deref", '
+    '"severity": "high", "message": "Grug see null in the dark."}]}'
+)
+
+
+def test_parse_response_recovers_json_from_a_language_tagged_fence() -> None:
+    """grug#883: ```json ... ``` is the shape observed LIVE from
+    `poolside/laguna-s-2.1:free` under `response_format={"type":
+    "json_object"}` - the flag is a request, not a guarantee. Discarding it
+    published a real review as zero findings, which renders green."""
+    findings, _model, err = lc._parse_response(
+        _fenced_response(f"```json\n{_ENVELOPE}\n```")
+    )
+    assert err == ""
+    assert len(findings) == 1
+    assert findings[0].rule == "null-deref"
+
+
+def test_parse_response_recovers_json_from_a_bare_fence() -> None:
+    """A fence with no language tag must recover too - the model chooses the
+    tag, and it is not part of the contract."""
+    findings, _model, err = lc._parse_response(
+        _fenced_response(f"```\n{_ENVELOPE}\n```")
+    )
+    assert err == ""
+    assert len(findings) == 1
+
+
+def test_parse_response_recovers_json_after_a_prose_preamble() -> None:
+    """The EXACT live shape: caveman preamble, blank line, then the fence.
+    Reproduced from a real response captured 2026-08-15."""
+    content = (
+        "Grug squint at the new stone. Many changes, all carved for #553. "
+        "Grug read every tablet. Here what Grug finds.\n\n"
+        f"```json\n{_ENVELOPE}\n```"
+    )
+    findings, _model, err = lc._parse_response(_fenced_response(content))
+    assert err == ""
+    assert len(findings) == 1
+    assert findings[0].path == "a.py"
+
+
+def test_parse_response_bare_json_fast_path_is_unchanged() -> None:
+    """Well-formed bare JSON must still parse with no behavior change - the
+    recovery path is only reached on JSONDecodeError."""
+    findings, _model, err = lc._parse_response(_fenced_response(_ENVELOPE))
+    assert err == ""
+    assert len(findings) == 1
+
+
+def test_parse_response_rejects_a_fenced_scalar_rather_than_coercing() -> None:
+    """A fence holding a JSON scalar is not a findings envelope. Accepting it
+    would manufacture an empty review from a malformed answer - the exact
+    silent-failure this issue exists to remove."""
+    findings, _model, err = lc._parse_response(_fenced_response('```json\n"just a string"\n```'))
+    assert findings == ()
+    assert err  # rejected, with a reason
+
+
+def test_parse_response_unparseable_content_names_what_arrived() -> None:
+    """grug#883 second half: the old fixed string gave a category and no
+    evidence - the grug#881 defect one layer up. The error must carry the
+    content length and a bounded prefix so ONE log line is enough."""
+    findings, _model, err = lc._parse_response(
+        _fenced_response("Grug think hard but Grug write only words, no tablets.")
+    )
+    assert findings == ()
+    assert "len=54" in err, f"error must carry the content length, got: {err}"
+    assert "Grug think hard" in err, f"error must quote what arrived, got: {err}"
+
+
+def test_parse_response_error_preview_is_bounded_on_a_degenerate_response() -> None:
+    """3 of 5 live responses degenerated into ~220,000 chars of repeated
+    backticks after exhausting max_tokens. The diagnostic must stay short
+    enough to log, and recovery must not scan the whole payload."""
+    degenerate = "Suggested fix: " + ("`" * 220_000)
+    findings, _model, err = lc._parse_response(_fenced_response(degenerate))
+    assert findings == ()
+    assert "len=220015" in err
+    assert len(err) < 500, f"diagnostic must stay loggable, got {len(err)} chars"
+
+
+def test_parse_response_recovers_the_fence_even_when_backtick_soup_follows() -> None:
+    """The real degenerate payload held a VALID fenced finding in its first
+    18KB and then degenerated. That review must still be recovered."""
+    content = (
+        "Grug stare at many tablets.\n\n"
+        f"```json\n{_ENVELOPE}\n```\n\n"
+        "Actually, let Grug compute more carefully.\n\n"
+        "Suggested fix: " + ("`" * 220_000)
+    )
+    findings, _model, err = lc._parse_response(_fenced_response(content))
+    assert err == ""
+    assert len(findings) == 1
