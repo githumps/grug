@@ -1379,6 +1379,60 @@ def _coerce_finding(raw: Any) -> tuple[Optional[Finding], str]:
     ), ""
 
 
+# grug#883: models answer the json_object request with a short preamble and a
+# markdown fence. `response_format={"type": "json_object"}` is a REQUEST, not a
+# guarantee - verified live against `poolside/laguna-s-2.1:free`, which honored
+# the flag and still wrapped its findings in ```json. The old code called that a
+# parse failure, so a real review with real findings published as zero findings,
+# which renders as a clean green check. Same silent-failure shape as grug#881
+# (a crash reading as an empty review) and grug#416 (a list-shaped response
+# dropping a live review).
+#
+# Bounded on purpose: 3 of 5 live responses degenerated into a single 220,000-
+# character run of backticks after exhausting max_tokens, so scanning is capped
+# at a window and a block count rather than run over the whole payload. The real
+# fence sat in the first 18KB of the worst observed case.
+_FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", re.DOTALL)
+_FENCE_SCAN_CHARS = 64_000
+_FENCE_MAX_BLOCKS = 50
+_UNPARSEABLE_PREVIEW_CHARS = 200
+
+
+def _recover_fenced_json(content: str) -> object | None:
+    """Return the first fenced block that parses as a findings envelope, or None.
+
+    Only a dict or list is accepted - the same two shapes the bare-JSON path
+    already allows (#416) - so a fenced scalar or a quoted example in prose is
+    rejected rather than coerced into a fake empty review."""
+    for index, match in enumerate(_FENCED_BLOCK_RE.finditer(content[:_FENCE_SCAN_CHARS])):
+        if index >= _FENCE_MAX_BLOCKS:
+            break
+        block = match.group(1).strip()
+        if not block:
+            continue
+        try:
+            parsed = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return None
+
+
+def _describe_unparseable(content: str) -> str:
+    """Name what actually arrived when no JSON could be recovered.
+
+    The old fixed string ("llm returned non-json") said a category and no
+    evidence, which is the grug#881 defect one layer up: an operator could not
+    tell a fenced answer from prose from a degenerate token-budget blowout
+    without going back to the provider to reproduce it."""
+    preview = content[:_UNPARSEABLE_PREVIEW_CHARS].replace("\n", "\\n")
+    return (
+        f"llm returned non-json — parse failed "
+        f"(len={len(content)}, no recoverable fenced json, starts: {preview!r})"
+    )
+
+
 def _diagnose_non_string_content(choice: object, message: object, content: object) -> str:
     """Describe a `message.content` that is not a str, well enough to fix it
     from ONE log line: the offending type, the `finish_reason` that explains
@@ -1443,7 +1497,11 @@ def _parse_response(
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        return (), model_name, "llm returned non-json — parse failed"
+        # grug#883: a fenced answer is a REAL review, not a failure. Recover it
+        # before giving up, and if there is nothing to recover say what arrived.
+        parsed = _recover_fenced_json(content)
+        if parsed is None:
+            return (), model_name, _describe_unparseable(content)
     # Models sometimes return a bare JSON array of findings instead of the
     # documented {"findings": [...]} object (#416 — Poolside did this and the
     # old `parsed.get(...)` crashed with `'list' object has no attribute 'get'`,
