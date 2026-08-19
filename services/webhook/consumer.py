@@ -28,6 +28,7 @@ message and FIFO group ordering is preserved within each queue.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -610,15 +611,28 @@ def _poll_once(spec: QueueSpec, queue_url: str, arn: str) -> int:
         spec.handler(_esm_event(arn, message))
     except Exception as e:  # noqa: BLE001 — the rerun contract REQUIRES surviving a raise
         delete = spec.delete_on_error
+        receive_count = _receive_count(message)
+        final_attempt = _is_final_attempt(queue_url, receive_count)
         log.warning(
             "consumer_handler_raised",
             extra={
                 "queue": spec.kind,
                 "kind": type(e).__name__,
+                # grug#891: the class alone left a GitHub 403 undiagnosable
+                # for two days. The message is the diagnosis.
+                "err": str(e)[:300],
                 "message_id": message.get("MessageId", ""),
                 "redrive": not delete,
+                "receive_count": receive_count,
+                "final_attempt": final_attempt,
             },
         )
+        if final_attempt and not delete:
+            # LAST delivery before SQS dead-letters this job. After this the
+            # message leaves the queue silently and the PR is left with no
+            # Elder verdict at all - indistinguishable from a clean review.
+            # This is the only moment the job is still addressable.
+            _announce_terminal_failure(spec, message, e)
     finally:
         _stop_review_visibility_heartbeat(heartbeat)
         if active_review is not None:
@@ -632,6 +646,91 @@ def _poll_once(spec: QueueSpec, queue_url: str, arn: str) -> int:
                 extra={"queue": spec.kind, "kind": type(e).__name__},
             )
     return 1
+
+
+def _receive_count(message: dict) -> int:
+    """SQS delivery attempt number for this message, or 0 if absent."""
+    try:
+        return int(message.get("Attributes", {}).get("ApproximateReceiveCount", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+@functools.lru_cache(maxsize=8)
+def _max_receive_count(queue_url: str) -> int | None:
+    """`maxReceiveCount` from the queue's OWN RedrivePolicy, cached per queue.
+
+    grug#891: read from the deployed queue rather than duplicated as a
+    constant here. A local copy silently drifts from the value SQS actually
+    enforces, and the whole point of this path is to fire on the LAST attempt
+    - one off by one and it either never fires or fires every time.
+
+    None means "no redrive policy" (nothing will dead-letter), which callers
+    must treat as "never the final attempt".
+
+    Bounded cache per Elder on grug#893. The key space is already bounded by
+    configuration - one URL per QueueSpec, from a fixed env var, two today -
+    so this cannot actually grow without limit. `lru_cache` is adopted because
+    it is simpler than the hand-rolled dict-plus-lock it replaces, not because
+    the leak was reachable."""
+    try:
+        attrs = _sqs.get_queue_attributes(
+            QueueUrl=queue_url, AttributeNames=["RedrivePolicy"],
+        )["Attributes"]
+        return int(json.loads(attrs["RedrivePolicy"])["maxReceiveCount"])
+    except Exception as e:  # noqa: BLE001 - absent policy or transient API error
+        log.info(
+            "consumer_redrive_policy_unavailable",
+            extra={"kind": type(e).__name__, "err": str(e)[:200]},
+        )
+        return None
+
+
+def _is_final_attempt(queue_url: str, receive_count: int) -> bool:
+    """True when SQS will dead-letter this message after the current failure."""
+    limit = _max_receive_count(queue_url)
+    return bool(limit) and receive_count >= int(limit or 0)
+
+
+def _announce_terminal_failure(spec: QueueSpec, message: dict, error: Exception) -> None:
+    """Mark the PR when a review job is about to dead-letter.
+
+    grug#891: without this the job leaves the queue silently and the PR keeps
+    whatever check state it had - usually none. An absent Elder check and an
+    Elder that reviewed and found nothing are the same pixel, so #2511 merged
+    with no verdict on the commit that landed and nothing surfaced it.
+
+    Deliberately NOT a new merge gate. `_complete_elder_check_open` completes
+    fail-open as `neutral` on purpose, so a GitHub brownout does not start
+    blocking every merge; the title carries the honesty. Changing that is an
+    operator policy decision, not a logging fix."""
+    try:
+        body = json.loads(message.get("Body", "") or "{}")
+        if body.get("kind") != "review" or body.get("persona") != "elder":
+            return
+        owner, _, repo_name = str(body.get("repo", "")).partition("/")
+        from rerun import _complete_elder_check_open  # local: avoids import cycle
+
+        _complete_elder_check_open(
+            install_id=int(body.get("install_id", 0)),
+            owner=owner,
+            repo_name=repo_name,
+            pr_number=int(body.get("pr_number", 0)),
+            head_sha=str(body.get("requested_head_sha", "")),
+            title="Elder could not review this diff",
+            summary=(
+                "Grug tried and failed. The review job exhausted its retries "
+                f"and was dead-lettered, so **no Elder verdict exists for this "
+                f"commit** - this check is not a pass.\n\n"
+                f"Last error: `{type(error).__name__}: {str(error)[:200]}`\n\n"
+                "Re-run Elder once the underlying cause is cleared."
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 - a failed announcement must not mask the original
+        log.warning(
+            "consumer_terminal_announce_failed",
+            extra={"queue": spec.kind, "kind": type(e).__name__, "err": str(e)[:200]},
+        )
 
 
 def _consume(spec: QueueSpec) -> None:

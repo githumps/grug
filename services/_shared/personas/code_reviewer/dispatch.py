@@ -1802,6 +1802,62 @@ def _capture_comment_records(
     return persisted
 
 
+def _safe_attr(obj: object, name: str) -> object | None:
+    """Read an attribute that may be a property raising instead of returning.
+
+    grug#891: `httpx.RequestError.request` raises RuntimeError when unset, so
+    `getattr(err, "request", None)` re-raises rather than yielding the default.
+    Caught by a test that fed a bare ConnectError through this path."""
+    try:
+        return getattr(obj, name, None)
+    except Exception:  # noqa: BLE001 - a property that throws is exactly the case
+        return None
+
+
+_ERROR_BODY_PREVIEW_CHARS = 300
+
+
+def _http_error_detail(error: Exception) -> dict[str, object]:
+    """Extra log fields that name WHY an HTTP call failed, not just its class.
+
+    grug#891: three Elder jobs dead-lettered on a GitHub 403 and the only
+    record was `kind=HTTPStatusError`. Diagnosing it took two days and
+    succeeded only because an unrelated `httpx` INFO line happened to carry
+    the URL and status. A 403 on `/compare` while `/pulls` returns 200 on the
+    same token is a SECONDARY RATE LIMIT, and that is legible from one line
+    only if the status, the URL and the body are recorded.
+
+    Bounded: a GitHub error body is small, but an upstream HTML interstitial
+    is not, so the preview is truncated. Same defect class as grug#881
+    (`kind=TypeError`, no message) and grug#883 (non-json, no payload)."""
+    detail: dict[str, object] = {"err": str(error)[:_ERROR_BODY_PREVIEW_CHARS]}
+    # httpx exposes `.request`/`.response` as PROPERTIES that RAISE
+    # RuntimeError when unset (a ConnectError built without a request has no
+    # `.request`), so `getattr(..., None)` does NOT protect this - it re-raises.
+    # A diagnostic helper that can throw inside a log call is worse than none.
+    response = _safe_attr(error, "response")
+    if response is not None:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            detail["status"] = status
+        # GitHub signals a secondary rate limit in headers, not the status
+        # alone - a plain 403 and a throttle are the same code.
+        headers = getattr(response, "headers", None) or {}
+        for header in ("retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"):
+            value = headers.get(header) if hasattr(headers, "get") else None
+            if value is not None:
+                detail[header.replace("-", "_")] = value
+        try:
+            detail["body"] = response.text[:_ERROR_BODY_PREVIEW_CHARS]
+        except Exception:  # noqa: BLE001 - a body we cannot read must not mask the error
+            detail["body"] = "<unreadable>"
+    request = _safe_attr(error, "request")
+    url = _safe_attr(request, "url") if request is not None else None
+    if url is not None:
+        detail["url"] = str(url)[:200]
+    return detail
+
+
 def dispatch_code_review(
     payload: dict[str, Any], *, blocking: bool,
     cancel_event: threading.Event | None = None,
@@ -2005,6 +2061,7 @@ def dispatch_code_review(
                 "installation_id": installation_id,
                 "pr": f"{owner}/{repo_name}#{pull_number}",
                 "kind": type(e).__name__,
+                **_http_error_detail(e),
             },
         )
         # Do not publish even a degraded check for an input that changed while

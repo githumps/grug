@@ -2850,3 +2850,58 @@ def test_stack_detail_without_a_head_sha_still_renders():
     out = cr_dispatch._stack_detail_lines("deep", "", 0)
     assert "Looked at" not in out
     assert "None" not in out
+
+
+# --- grug#891: name WHY an HTTP call failed, not just its class -------------
+
+
+def test_http_error_detail_names_status_url_and_body():
+    """grug#891: the real incident logged only `kind=HTTPStatusError`. This is
+    the exact GitHub secondary-rate-limit shape that cost two days to find -
+    a 403 on /compare while /pulls returned 200 on the same token."""
+    import httpx
+    from personas.code_reviewer.dispatch import _http_error_detail
+
+    request = httpx.Request(
+        "GET",
+        "https://api.github.com/repos/quadseven/infra/compare/c7bc534a...d853fe16",
+    )
+    response = httpx.Response(
+        403, request=request,
+        headers={"retry-after": "60", "x-ratelimit-remaining": "0"},
+        text='{"message":"You have exceeded a secondary rate limit"}',
+    )
+    detail = _http_error_detail(
+        httpx.HTTPStatusError("403", request=request, response=response)
+    )
+    assert detail["status"] == 403
+    assert "secondary rate limit" in str(detail["body"])
+    assert "/compare/" in str(detail["url"])
+    assert detail["retry_after"] == "60"
+    assert detail["x_ratelimit_remaining"] == "0"
+
+
+def test_http_error_detail_bounds_a_large_body():
+    """An upstream HTML interstitial must not flood the log."""
+    import httpx
+    from personas.code_reviewer.dispatch import _http_error_detail
+
+    request = httpx.Request("GET", "https://api.github.com/x")
+    response = httpx.Response(502, request=request, text="x" * 50_000)
+    detail = _http_error_detail(
+        httpx.HTTPStatusError("502", request=request, response=response)
+    )
+    assert len(str(detail["body"])) <= 300
+
+
+def test_http_error_detail_handles_an_error_with_no_response():
+    """A RequestError (DNS, connect reset) carries no response - the helper
+    must still return the message rather than raise inside a log call."""
+    import httpx
+    from personas.code_reviewer.dispatch import _http_error_detail
+
+    detail = _http_error_detail(
+        httpx.ConnectError("nodename nor servname provided")
+    )
+    assert "nodename" in str(detail["err"])
+    assert "status" not in detail
