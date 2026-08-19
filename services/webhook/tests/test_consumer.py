@@ -1196,7 +1196,7 @@ def test_final_attempt_uses_the_queues_own_redrive_policy(monkeypatch):
     """grug#891: the threshold must come from the DEPLOYED RedrivePolicy, not
     a constant here. A local copy drifts and this fires never or always."""
     import consumer
-    consumer._max_receive_cache.clear()
+    consumer._max_receive_count.cache_clear()
     calls = []
 
     class FakeSqs:
@@ -1210,13 +1210,17 @@ def test_final_attempt_uses_the_queues_own_redrive_policy(monkeypatch):
     assert consumer._is_final_attempt("q", 5) is True
     assert consumer._is_final_attempt("q", 6) is True
     assert len(calls) == 1, "the policy must be cached, not fetched per message"
+    assert consumer._max_receive_count.cache_info().maxsize == 8, (
+        "the cache must stay BOUNDED (Elder, grug#893) - an unbounded module "
+        "dict is a leak the moment someone keys it by something dynamic"
+    )
 
 
 def test_no_redrive_policy_is_never_a_final_attempt(monkeypatch):
     """A queue with no DLQ never dead-letters, so nothing is ever terminal -
     announcing a failure there would be a lie."""
     import consumer
-    consumer._max_receive_cache.clear()
+    consumer._max_receive_count.cache_clear()
 
     class FakeSqs:
         def get_queue_attributes(self, QueueUrl, AttributeNames):
@@ -1283,7 +1287,7 @@ def test_handler_raised_log_carries_the_message_not_just_the_class(monkeypatch, 
     """grug#891: `kind=HTTPStatusError` alone cost two days. The message is
     the diagnosis."""
     import consumer
-    consumer._max_receive_cache.clear()
+    consumer._max_receive_count.cache_clear()
 
     class FakeSqs:
         def receive_message(self, **kw):

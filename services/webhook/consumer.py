@@ -28,6 +28,7 @@ message and FIFO group ordering is preserved within each queue.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -647,10 +648,6 @@ def _poll_once(spec: QueueSpec, queue_url: str, arn: str) -> int:
     return 1
 
 
-_max_receive_cache: dict[str, int | None] = {}
-_max_receive_lock = threading.Lock()
-
-
 def _receive_count(message: dict) -> int:
     """SQS delivery attempt number for this message, or 0 if absent."""
     try:
@@ -659,6 +656,7 @@ def _receive_count(message: dict) -> int:
         return 0
 
 
+@functools.lru_cache(maxsize=8)
 def _max_receive_count(queue_url: str) -> int | None:
     """`maxReceiveCount` from the queue's OWN RedrivePolicy, cached per queue.
 
@@ -668,24 +666,24 @@ def _max_receive_count(queue_url: str) -> int | None:
     - one off by one and it either never fires or fires every time.
 
     None means "no redrive policy" (nothing will dead-letter), which callers
-    must treat as "never the final attempt"."""
-    with _max_receive_lock:
-        if queue_url in _max_receive_cache:
-            return _max_receive_cache[queue_url]
-    value: int | None = None
+    must treat as "never the final attempt".
+
+    Bounded cache per Elder on grug#893. The key space is already bounded by
+    configuration - one URL per QueueSpec, from a fixed env var, two today -
+    so this cannot actually grow without limit. `lru_cache` is adopted because
+    it is simpler than the hand-rolled dict-plus-lock it replaces, not because
+    the leak was reachable."""
     try:
         attrs = _sqs.get_queue_attributes(
             QueueUrl=queue_url, AttributeNames=["RedrivePolicy"],
         )["Attributes"]
-        value = int(json.loads(attrs["RedrivePolicy"])["maxReceiveCount"])
+        return int(json.loads(attrs["RedrivePolicy"])["maxReceiveCount"])
     except Exception as e:  # noqa: BLE001 - absent policy or transient API error
         log.info(
             "consumer_redrive_policy_unavailable",
             extra={"kind": type(e).__name__, "err": str(e)[:200]},
         )
-    with _max_receive_lock:
-        _max_receive_cache[queue_url] = value
-    return value
+        return None
 
 
 def _is_final_attempt(queue_url: str, receive_count: int) -> bool:
