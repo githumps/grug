@@ -15,6 +15,9 @@ in test_rerun.py / test_cave_fallback.py):
 from __future__ import annotations
 
 import json
+import types
+
+import httpx
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -1163,3 +1166,148 @@ def test_main_starts_daemon_telemetry_thread_outside_watchdog(monkeypatch):
                  and getattr(k.get("target"), "__name__", "") == "<lambda>"
                  and k.get("name") == "queue-telemetry"]
     assert telemetry and telemetry[0].get("daemon") is True
+
+
+# --- grug#891: a dead-lettered review job must not vanish silently ----------
+
+
+def _dlq_message(receive_count: int, **overrides):
+    body = {
+        "kind": "review", "persona": "elder", "install_id": 129256114,
+        "repo": "quadseven/infra", "pr_number": 2511,
+        "requested_head_sha": "d853fe166d6a7f838dd7e676ed930a28a461a2e1",
+        "schema_version": 1, "settle_seconds": 5,
+    }
+    body.update(overrides)
+    return {
+        "MessageId": "m-1", "ReceiptHandle": "r-1", "Body": json.dumps(body),
+        "Attributes": {"ApproximateReceiveCount": str(receive_count)},
+    }
+
+
+def test_receive_count_reads_the_sqs_attribute():
+    from consumer import _receive_count
+    assert _receive_count(_dlq_message(4)) == 4
+    assert _receive_count({"Attributes": {}}) == 0
+    assert _receive_count({"Attributes": {"ApproximateReceiveCount": "junk"}}) == 0
+
+
+def test_final_attempt_uses_the_queues_own_redrive_policy(monkeypatch):
+    """grug#891: the threshold must come from the DEPLOYED RedrivePolicy, not
+    a constant here. A local copy drifts and this fires never or always."""
+    import consumer
+    consumer._max_receive_cache.clear()
+    calls = []
+
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            calls.append(QueueUrl)
+            return {"Attributes": {"RedrivePolicy": json.dumps(
+                {"deadLetterTargetArn": "arn:x", "maxReceiveCount": 5})}}
+
+    monkeypatch.setattr(consumer, "_sqs", FakeSqs())
+    assert consumer._is_final_attempt("q", 4) is False
+    assert consumer._is_final_attempt("q", 5) is True
+    assert consumer._is_final_attempt("q", 6) is True
+    assert len(calls) == 1, "the policy must be cached, not fetched per message"
+
+
+def test_no_redrive_policy_is_never_a_final_attempt(monkeypatch):
+    """A queue with no DLQ never dead-letters, so nothing is ever terminal -
+    announcing a failure there would be a lie."""
+    import consumer
+    consumer._max_receive_cache.clear()
+
+    class FakeSqs:
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            return {"Attributes": {}}
+
+    monkeypatch.setattr(consumer, "_sqs", FakeSqs())
+    assert consumer._is_final_attempt("q", 99) is False
+
+
+def test_terminal_failure_completes_the_elder_check(monkeypatch):
+    """grug#891 core: on the LAST attempt the PR must be marked. #2511 merged
+    with no Elder verdict on the commit that landed because nothing was."""
+    import consumer, rerun
+    seen = {}
+
+    def fake_complete(**kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(rerun, "_complete_elder_check_open", fake_complete)
+    spec = types.SimpleNamespace(kind="rerun")
+    consumer._announce_terminal_failure(
+        spec, _dlq_message(5), httpx.HTTPStatusError(
+            "403", request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(403)),
+    )
+    assert seen, "the terminal failure must reach the PR"
+    assert seen["pr_number"] == 2511
+    assert seen["head_sha"] == "d853fe166d6a7f838dd7e676ed930a28a461a2e1"
+    assert "could not review" in seen["title"].lower()
+    assert "not a pass" in seen["summary"].lower(), (
+        "the summary must say plainly that this is NOT a clean review"
+    )
+    assert "HTTPStatusError" in seen["summary"], "the cause must be named"
+
+
+def test_terminal_failure_ignores_non_elder_jobs(monkeypatch):
+    """Only elder review jobs own an Elder check; announcing for an ask/learn
+    job would post a verdict for work that has none."""
+    import consumer, rerun
+    called = []
+    monkeypatch.setattr(rerun, "_complete_elder_check_open",
+                        lambda **k: called.append(k) or True)
+    spec = types.SimpleNamespace(kind="rerun")
+    consumer._announce_terminal_failure(spec, _dlq_message(5, kind="ask"), RuntimeError("x"))
+    consumer._announce_terminal_failure(spec, _dlq_message(5, persona="guard"), RuntimeError("x"))
+    assert called == []
+
+
+def test_terminal_announce_never_masks_the_original_error(monkeypatch):
+    """A failure to announce must not raise - the handler already failed and
+    the message still needs to dead-letter normally."""
+    import consumer, rerun
+
+    def boom(**kwargs):
+        raise RuntimeError("check post exploded")
+
+    monkeypatch.setattr(rerun, "_complete_elder_check_open", boom)
+    spec = types.SimpleNamespace(kind="rerun")
+    consumer._announce_terminal_failure(spec, _dlq_message(5), RuntimeError("orig"))
+
+
+def test_handler_raised_log_carries_the_message_not_just_the_class(monkeypatch, caplog):
+    """grug#891: `kind=HTTPStatusError` alone cost two days. The message is
+    the diagnosis."""
+    import consumer
+    consumer._max_receive_cache.clear()
+
+    class FakeSqs:
+        def receive_message(self, **kw):
+            return {"Messages": [_dlq_message(1)]}
+
+        def get_queue_attributes(self, QueueUrl, AttributeNames):
+            return {"Attributes": {}}
+
+        def delete_message(self, **kw):
+            return {}
+
+    monkeypatch.setattr(consumer, "_sqs", FakeSqs())
+    monkeypatch.setattr(consumer, "_is_durable_review", lambda *a, **k: False)
+
+    def boom(event):
+        raise RuntimeError("403 Forbidden on /compare")
+
+    spec = types.SimpleNamespace(
+        kind="rerun", handler=boom, delete_on_error=False, url_env="X",
+    )
+    with caplog.at_level("WARNING"):
+        consumer._poll_once(spec, "q", "arn")
+    joined = " ".join(r.message + json.dumps(getattr(r, "__dict__", {}), default=str)
+                      for r in caplog.records)
+    assert "403 Forbidden on /compare" in joined, (
+        f"the exception MESSAGE must reach the log, got: {joined[:300]}"
+    )
