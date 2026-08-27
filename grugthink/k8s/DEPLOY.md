@@ -5,7 +5,7 @@
 > image, pushes it, seeds the namespace + `grugthink-secrets` +
 > `grugthink-llm-fallback` (the chat fallback keys, below) + the registry pull
 > secret, and applies the manifests. The steps below are the manual equivalent
-> / reference. The tailnet host `grug.ts.ehumps.me` is served by the Caddy
+> / reference. The tailnet host `<tailnet-host>` is served by the Caddy
 > front in the private `infra` repo (reverse-proxy to
 > `grugthink.grugthink.svc:8080`), never committed here.
 

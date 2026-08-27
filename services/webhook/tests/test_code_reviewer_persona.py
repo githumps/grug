@@ -90,7 +90,7 @@ def test_static_manifest_scalar_is_not_external_input() -> None:
 +++ b/values.yaml
 @@ -1,1 +1,2 @@
  clusterChecksRunner:
-+  node.ehumps.me/location: oci
++  node.internal.example/location: oci
 """
     llm = LlmReviewResponse(
         kind="reviewed",
