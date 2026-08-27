@@ -8,7 +8,7 @@ name: Deploy · grugthink (Discord bot manager)
 # bounded chat fallback (Poolside/OpenRouter). Bot-specific secrets still come
 # from SSM /quadseven/grugthink/* (seeded manually per k8s/DEPLOY.md, not by
 # this workflow); NO personal host is committed - the tailnet ingress
-# (grug.ts.ehumps.me) lives in the private infra repo's Caddy configmap,
+# (<tailnet-host>) lives in the private infra repo's Caddy configmap,
 # reverse-proxying grugthink.grugthink.svc:8080.
 
 on:

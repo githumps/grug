@@ -21,7 +21,7 @@ ADR-0005 mandated the SQS airlock (Cave reachable only via `grug-cave-jobs` /
 That premise is now FALSE. Grug's pods run on the operator's OKE cluster, and
 the **spark-gateway** — an OpenAI/Anthropic-compatible gateway fronting the two
 NVIDIA Sparks — is deployed **on the same cluster** (namespace `spark-gateway`,
-`Service :8080`, verified live 2026-07-03; `https://sparks.ts.ehumps.me/v1/*`
+`Service :8080`, verified live 2026-07-03; `https://<tailnet-host>/v1/*`
 over the tailnet). A cluster-internal Service call from the `grug` namespace to
 the gateway is the "third topology" ADR-0005 said could not exist: it is
 neither public exposure (the gateway has no public ingress) nor reach-in
