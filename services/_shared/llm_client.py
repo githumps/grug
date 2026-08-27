@@ -3216,7 +3216,160 @@ def decide_deep_escalation(
     )
 
 
+_REVIEW_BACKEND_PRIORITY_VALUES = ("cave", "cloud")
+
+
+def _review_backend_priority() -> str:
+    """Which backend family `review_diff` tries FIRST. grug#906: a
+    self-hosted deployment's hardware/budget/reliability needs are not
+    this deployment's - Evan, live, 2026-08-27: "I would like it to try
+    to use cloud, and if that fails then I can use my local sparks...
+    let it be agnostic, let users tweak it to however they would like."
+
+    Default "cave" preserves EVERY existing deployment's behavior
+    byte-for-byte - this must never silently change what an operator who
+    has not touched this env var gets. An unrecognized value falls back
+    to "cave" too (toward the well-tested default, not toward an
+    unvalidated cloud spend), logged so a typo is visible rather than
+    silently eaten."""
+    raw = os.getenv("GRUG_REVIEW_BACKEND_PRIORITY", "cave").strip().lower()
+    if raw not in _REVIEW_BACKEND_PRIORITY_VALUES:
+        log.warning(
+            "grug_review_backend_priority_invalid",
+            extra={"value": raw, "using": "cave"},
+        )
+        return "cave"
+    return raw
+
+
+def _try_cloud_primary(
+    hunks: list[Hunk],
+    messages: list[dict[str, str]],
+    variant: PromptVariant,
+    pr_tags: dict[str, str],
+    installation_id: int,
+    pr_context: Optional[PrContext],
+    cancel_event: threading.Event | None,
+) -> "LlmReviewResponse | None":
+    """Try cloud - Poolside, then OpenRouter, the SAME pair and order the
+    existing overload-fallback already uses - as the PRIMARY review
+    attempt (grug#906).
+
+    Reuses `_run_review_arm`, the SAME abstraction the Cave arms use, so
+    each attempt gets a FULL review-length timeout via
+    `_review_backend_config` (`_review_llm_timeout_s()`) - NOT the short
+    bounded-fallback timeout `_saas_overload_fallback_config` gives the
+    last-resort path below. A primary attempt deserves a primary budget.
+
+    Returns None only on TOTAL failure (both cloud backends errored or
+    timed out) - the caller's signal to fall through to the Cave path
+    unconditionally. A parse_failed cloud response is a real (if
+    degraded) answer from a backend that DID respond; it is returned
+    as-is rather than masked by a Cave retry that would silently double
+    the cost of an already-answered review."""
+    first_parse_fail: tuple[Backend, str | None, str] | None = None
+    last_error = ""
+    for backend in (Backend.POOLSIDE, Backend.OPENROUTER):
+        outcome = _run_review_arm(backend, messages, variant, pr_tags, cancel_event)
+        if outcome.kind == "success":
+            assert outcome.model is not None
+            origin = _finding_origin(
+                backend=backend, model=outcome.model,
+                review_span_context=outcome.span_context,
+                pr_context=pr_context, hunks=hunks,
+            )
+            return LlmReviewResponse(
+                kind="reviewed",
+                findings=tuple(
+                    replace(finding, origins=(origin,)) for finding in outcome.findings
+                ),
+                backend_used=backend,
+                model_name=outcome.model,
+                review_span_context=outcome.span_context,
+                backends_used=(backend,),
+                models_used=(outcome.model,),
+                error=_truncation_error((backend,) if outcome.truncated else ()),
+            )
+        if outcome.kind == "parse_failed":
+            if first_parse_fail is None:
+                first_parse_fail = (backend, outcome.model, outcome.parse_err)
+            last_error = outcome.error_text
+            continue
+        # config_error / transport_error / http_failed
+        last_error = outcome.error_text
+
+    if first_parse_fail is not None:
+        pf_backend, pf_model, pf_err = first_parse_fail
+        return LlmReviewResponse(
+            kind="parse_failed", backend_used=pf_backend, model_name=pf_model, error=pf_err,
+        )
+    log.info(
+        "llm_cloud_primary_exhausted",
+        extra={
+            "installation_id": installation_id,
+            "repo": (pr_context or {}).get("repo"),
+            "pr_number": (pr_context or {}).get("pr_number"),
+            "last_error": last_error,
+        },
+    )
+    return None  # signal: fall through to the unmodified Cave path
+
+
 def _review_diff_dispatch(
+    hunks: list[Hunk],
+    installation_id: int,
+    pr_context: Optional[PrContext],
+    file_contents: dict[str, str] | None,
+    cross_file_contents: dict[str, str] | None,
+    runtime_context: str | None,
+    voice: VoiceSelection,
+    cancel_event: threading.Event | None,
+    review_map: str = "",
+) -> "LlmReviewResponse":
+    """Dispatch one (unstaged or single-cohort) review, per
+    `GRUG_REVIEW_BACKEND_PRIORITY` (grug#906).
+
+    "cave" (default): delegates straight to
+    `_review_diff_dispatch_cave_primary`, UNCHANGED - every deployment
+    that has not opted in gets byte-identical behavior.
+
+    "cloud": try cloud FIRST via `_try_cloud_primary`. Only on TOTAL
+    cloud failure does control reach the cave-primary function - which is
+    completely unmodified, so the fallback IS today's whole well-tested
+    review pipeline, not a reimplementation of it. `messages`/`variant`
+    get rebuilt a second time inside the cave-primary call on that
+    (hopefully rare) fallback path - a deliberate, small cost accepted so
+    that function's body never has to know this caller exists."""
+    if _review_backend_priority() == "cloud":
+        depth = _review_depth()
+        variant: PromptVariant = (
+            "v2" if depth != "fast" else select_prompt_variant(installation_id)
+        )
+        messages = _build_messages(
+            hunks, variant, file_contents, cross_file_contents, runtime_context,
+            team_practices=_team_practices_block(pr_context),
+            few_shot_examples=_few_shot_block(pr_context),
+            learnings=_repo_learnings_block(pr_context),
+            pr_context=pr_context,
+            voice=voice,
+            review_map=review_map,
+        )
+        pr_tags = _llmobs_tags(pr_context)
+        cloud_result = _try_cloud_primary(
+            hunks, messages, variant, pr_tags, installation_id, pr_context, cancel_event,
+        )
+        if cloud_result is not None:
+            return cloud_result
+        # Total cloud failure: fall through, unconditionally, to the exact
+        # path every "cave" deployment runs - "if that fails, use my local
+        # sparks" (Evan, 2026-08-27) is not itself configurable away.
+    return _review_diff_dispatch_cave_primary(
+        hunks, installation_id, pr_context, file_contents, cross_file_contents,
+        runtime_context, voice, cancel_event, review_map,
+    )
+
+
+def _review_diff_dispatch_cave_primary(
     hunks: list[Hunk],
     installation_id: int,
     pr_context: Optional[PrContext],
