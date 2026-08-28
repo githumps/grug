@@ -69,8 +69,17 @@ def is_free_tier_model(model: str) -> bool:
     OpenRouter models (`anthropic/claude-haiku-4.5`,
     `anthropic/claude-opus-4.7`) are not `:free` variants, so this gate is
     a no-op for them today; `GRUG_OPENROUTER_REVIEW_MODEL` is already
-    env-overridable, so a `:free` model is one config change away."""
-    return model.strip().endswith(":free")
+    env-overridable, so a `:free` model is one config change away.
+
+    `openrouter/free` (OpenRouter's "Free Models Router", $0/$0 pricing per
+    its own `/models` listing) is a NAMED exception: it does not carry the
+    `:free` suffix, but it IS the free pool - it randomly selects among
+    `:free` models on every call, grug#916. Rate-limiting it here matters
+    MORE than a single pinned `:free` model, not less: every call can land
+    on a different upstream, so there is no way to reason about ONE
+    provider's shared-pool exhaustion the way a pinned model allows."""
+    m = model.strip()
+    return m.endswith(":free") or m == "openrouter/free"
 
 
 def _parse_positive_int(env_var: str, default: int, lo: int, hi: int) -> int:

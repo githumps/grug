@@ -3553,6 +3553,16 @@ def test_free_tier_chain_config_rejects_non_free_model(monkeypatch, caplog) -> N
     assert any("grug_cloud_free_tier_model_invalid" in r.message for r in caplog.records)
 
 
+def test_free_tier_chain_config_accepts_openrouter_free_router(monkeypatch) -> None:
+    """grug#916: openrouter/free (the random `:free`-model router) is a
+    named exception to the `:free`-suffix rule - accepted via
+    is_free_tier_model, not a separate ad hoc check."""
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "openrouter/free")
+    cfg = lc._free_tier_chain_config()
+    assert cfg is not None
+    assert cfg.model == "openrouter/free"
+
+
 def test_free_tier_chain_config_uses_short_timeout_and_bounded_tokens(monkeypatch) -> None:
     """grug#910: the demonstrated failure mode (grug#883) is runaway
     generation burning the FULL token budget - this tier's config must
