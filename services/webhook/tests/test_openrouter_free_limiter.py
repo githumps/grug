@@ -36,6 +36,13 @@ from adapters.pg_rate_limit_store import ReservationResult
         # Trailing whitespace from a fat-fingered env var must not defeat
         # detection.
         ("meta-llama/llama-3.3-70b-instruct:free  ", True),
+        # grug#916: openrouter/free ($0/$0 pricing) is a named exception -
+        # no `:free` suffix, but it IS the free pool.
+        ("openrouter/free", True),
+        ("openrouter/free  ", True),
+        # openrouter/auto is a DIFFERENT, paid meta-router (pricing "-1" -
+        # bills at whatever it routes to) - must NOT be treated as free.
+        ("openrouter/auto", False),
     ],
 )
 def test_is_free_tier_model(model: str, expected: bool) -> None:

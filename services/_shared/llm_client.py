@@ -644,11 +644,19 @@ def _free_tier_chain_config() -> "BackendConfig | None":
     model produced 5 distinct outputs, 3 of 5 degenerating into runaway
     garbage generation. That risk does not shrink by moving this tier to
     position 2 - the short timeout + bounded max_tokens above exist
-    BECAUSE of this finding, not despite it."""
+    BECAUSE of this finding, not despite it.
+
+    grug#916: `openrouter/free` (accepted here via `is_free_tier_model`,
+    the SAME predicate `_call_backend` uses to gate the rate limiter - one
+    definition of "is this the free pool") is a random router across
+    `:free` models, confirmed live to include `poolside/laguna-s-2.1:free`
+    - the exact model #883 found degenerates 3-of-5 - with no way to pin
+    it out. Chosen anyway (Evan, 2026-08-28): accepted deliberately, not
+    an oversight."""
     model = os.getenv("GRUG_CLOUD_FREE_TIER_MODEL", "").strip()
     if not model:
         return None  # not configured - no silent default onto an unvetted :free model
-    if not model.endswith(":free"):
+    if not is_free_tier_model(model):
         log.warning("grug_cloud_free_tier_model_invalid", extra={"value": model})
         return None
     return BackendConfig(
