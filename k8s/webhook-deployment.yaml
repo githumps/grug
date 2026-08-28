@@ -149,6 +149,25 @@ spec:
             - {name: GRUG_CF_SHARED_SECRET_SSM, value: /grug/cf-shared-secret}
             - {name: GRUG_OPENROUTER_API_KEY_SSM, value: /infra/llm/openrouter_api_key}
             - {name: GRUG_POOLSIDE_API_KEY_SSM, value: /infra/llm/poolside_api_key}
+            # grug#906/#910: try cloud before owned Sparks hardware. Evan,
+            # 2026-08-27/28: "try opencode go first then openrouter free tier
+            # 1000 limit then sparks last case." Reverses the 2026-07-14 call
+            # this same file documents below (Cave primary, SaaS bounded
+            # fallback) - deliberate, not a regression. Falls through to the
+            # UNMODIFIED Cave path unconditionally on total cloud failure;
+            # "cave" priority elsewhere (self-hosted deployments, tests)
+            # is untouched by this flag existing.
+            - {name: GRUG_REVIEW_BACKEND_PRIORITY, value: cloud}
+            # opencode Go (deepseek-v4-flash): qualified live 2026-08-27,
+            # small/medium diffs fast (1-9s) and deterministic; occasional
+            # instability on large diffs (grug#910's own evidence) - bounded
+            # by the chain's 25s timeout, safe because Cave is the guaranteed
+            # fallback. GRUG_CLOUD_FREE_TIER_MODEL (OpenRouter :free, tier 2)
+            # deliberately NOT set yet - unset means that tier is skipped,
+            # never a silent default onto an unvetted model (see
+            # _free_tier_chain_config's docstring). Add it once a specific
+            # :free model has been live-qualified the same way.
+            - {name: GRUG_OPENCODE_GO_API_KEY_SSM, value: /infra/llm/opencode_go_api_key}
             - {name: GRUG_PROMPT_EXPERIMENT_SSM, value: /grug/elder-prompt-experiment}
             # In-cluster spark-gateway for the evidence-scoped judge. Keep the
             # role assignment identical on both Elder-capable workloads.
