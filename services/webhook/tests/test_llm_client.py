@@ -3375,3 +3375,117 @@ def test_parse_response_recovers_the_fence_even_when_backtick_soup_follows() -> 
     findings, _model, err = lc._parse_response(_fenced_response(content))
     assert err == ""
     assert len(findings) == 1
+
+
+# --- grug#906: configurable review backend priority (cloud-first option) ---
+
+
+def test_review_backend_priority_defaults_to_cave(monkeypatch) -> None:
+    """No env var set -> every existing deployment keeps today's behavior."""
+    monkeypatch.delenv("GRUG_REVIEW_BACKEND_PRIORITY", raising=False)
+    assert lc._review_backend_priority() == "cave"
+
+
+def test_review_backend_priority_invalid_value_falls_back_to_cave(monkeypatch, caplog) -> None:
+    """A typo must fail TOWARD the well-tested default, not toward an
+    unvalidated cloud spend - and it must be visible, not silently eaten."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "clowd")
+    with caplog.at_level("WARNING"):
+        assert lc._review_backend_priority() == "cave"
+    assert any("grug_review_backend_priority_invalid" in r.message for r in caplog.records)
+
+
+def test_cloud_priority_with_cloud_success_never_calls_cave(monkeypatch) -> None:
+    """grug#906 core: cloud priority + a healthy cloud backend must answer
+    the review WITHOUT ever reaching the Cave arms - the whole point of
+    "try cloud first"."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
+    findings_json = (
+        '{"findings": [{"path": "src/x.py", "line": 1, "rule": "cloud-found-it", '
+        '"severity": "medium", "message": "found via cloud"}]}'
+    )
+    response = httpx.Response(200, json=_openai_json_response(findings_json))
+
+    with patch.object(httpx, "post", return_value=response) as mock_post:
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "reviewed"
+    assert out.backend_used == Backend.POOLSIDE, (
+        "Poolside is tried FIRST in the cloud pair - a success there must "
+        "answer immediately, never falling through to OpenRouter or Cave"
+    )
+    assert len(out.findings) == 1
+    assert out.findings[0].rule == "cloud-found-it"
+    mock_post.assert_called_once()
+
+
+def test_cloud_priority_total_cloud_failure_falls_through_to_cave(monkeypatch) -> None:
+    """grug#906 core: "if that fails, use my local sparks" (Evan,
+    2026-08-27) is unconditional. Both cloud backends fail transport-level
+    -> Cave is reached and answers, via the EXACT unmodified cave-primary
+    path (fast mode, single coder arm, from the autouse fixture)."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
+    findings_json = '{"findings": []}'
+    cave_response = httpx.Response(200, json=_openai_json_response(findings_json))
+
+    with patch.object(
+        httpx, "post",
+        side_effect=[
+            httpx.ConnectError("poolside unreachable"),
+            httpx.ConnectError("openrouter unreachable"),
+            cave_response,
+        ],
+    ) as mock_post:
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "reviewed"
+    assert out.backend_used == Backend.CAVE, (
+        "total cloud failure must fall through to Cave, not surface as "
+        "all_failed - the local hardware is the guaranteed fallback"
+    )
+    assert mock_post.call_count == 3, (
+        "expected exactly Poolside, OpenRouter, then Cave - one call each, "
+        "no retries (transport_retry_attempts=1 for the review path)"
+    )
+
+
+def test_cloud_priority_parse_failed_is_not_masked_by_a_cave_retry(monkeypatch) -> None:
+    """A cloud backend that DID respond, just unparseably, is a real
+    (degraded) answer - falling through to Cave here would silently
+    double the cost of an already-answered review."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
+    bad_response = httpx.Response(
+        200, json=_openai_json_response("not json at all, no fence either"),
+    )
+
+    with patch.object(
+        httpx, "post",
+        side_effect=[bad_response, httpx.ConnectError("openrouter unreachable")],
+    ) as mock_post:
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "parse_failed"
+    assert out.backend_used == Backend.POOLSIDE
+    assert mock_post.call_count == 2, "Poolside (parse_failed) then OpenRouter - Cave never reached"
+
+
+def test_cave_priority_is_byte_identical_to_pre_906_behavior(monkeypatch) -> None:
+    """Regression pin: default priority must produce EXACTLY the same
+    result and the same single httpx.post call today's deployments get -
+    proving the grug#906 extraction changed nothing for them."""
+    monkeypatch.delenv("GRUG_REVIEW_BACKEND_PRIORITY", raising=False)
+    findings_json = (
+        '{"findings": [{"path": "src/x.py", "line": 1, "rule": "secret-in-log", '
+        '"severity": "high", "message": "API key in log"}]}'
+    )
+    response = httpx.Response(200, json=_openai_json_response(findings_json))
+
+    with patch.object(httpx, "post", return_value=response) as mock_post:
+        out = review_diff([_hunk()], installation_id=2)
+
+    assert out.kind == "reviewed"
+    assert out.backend_used == Backend.CAVE
+    assert out.model_name == "test-model-id"
+    assert len(out.findings) == 1
+    assert out.findings[0].rule == "secret-in-log"
+    mock_post.assert_called_once()
