@@ -65,6 +65,7 @@ from review_pipeline import (
     render_review_map,
 )
 from secrets_loader import (
+    get_opencode_go_api_key,
     get_openrouter_api_key,
     get_poolside_api_key,
     get_prompt_experiment_mode,
@@ -212,6 +213,18 @@ _POOLSIDE_URL = "https://inference.poolside.ai/v1/chat/completions"
 _POOLSIDE_MODEL = "poolside/laguna-m.1"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"
+# opencode Go (grug#910): a $10/mo subscription, OpenAI-compatible endpoint,
+# ~$0.22/$0.66 per M tokens for deepseek-v4-flash - qualified live 2026-08-27:
+# small/medium diffs fast (1-9s) and deterministic on repeat; large diffs
+# showed inconsistent behavior across repeats of the IDENTICAL prompt (one
+# attempt timed out at 200s where an earlier and later attempt on the same
+# exact content succeeded in under 3s) - looks like transient service-side
+# instability, not a clean size cliff (a cliff hypothesis was tested and
+# disproven). Model id has NO vendor prefix on this endpoint - verified via
+# GET /v1/models, not assumed from docs (the docs-implied "opencode-go/
+# deepseek-v4-flash" 404s).
+_OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1/chat/completions"
+_OPENCODE_GO_DEFAULT_MODEL = "deepseek-v4-flash"
 
 # Review-only OpenRouter configuration. Teller, /grug ask, and the judge keep
 # their low-latency shared backend config; exhaustive reasoning belongs only on
@@ -379,6 +392,11 @@ class Backend(str, Enum):
     # fallback only - see _saas_overload_fallback_config). The exposed-secret
     # judge (#439) also routes to CAVE.
     CAVE = "cave"
+    # A distinct vendor identity (grug#910), NOT a POOLSIDE/OPENROUTER alias -
+    # different endpoint, different key, different provenance for telemetry.
+    # Sits ahead of Cave in the grug#906/#910 "cloud" priority chain, never
+    # in the default ("cave") priority path.
+    OPENCODE_GO = "opencode-go"
     CAVE_REASONER = "cave-reasoner"
 
 
@@ -551,6 +569,10 @@ def _load_openrouter_key() -> str:
     return get_openrouter_api_key()
 
 
+def _load_opencode_go_key() -> str:
+    return get_opencode_go_api_key()
+
+
 # Single source of truth for per-backend dispatch data. Adding a third
 # backend = one new entry; review_diff's "try every backend" loop
 # generalizes without touching the type-design.
@@ -575,7 +597,84 @@ _BACKEND_CONFIGS: dict[Backend, BackendConfig] = {
         model=_OPENROUTER_MODEL,
         key_loader=lambda: _load_openrouter_key(),
     ),
+    Backend.OPENCODE_GO: BackendConfig(
+        backend=Backend.OPENCODE_GO,
+        url=os.getenv("GRUG_OPENCODE_GO_URL", _OPENCODE_GO_URL),
+        model=os.getenv("GRUG_OPENCODE_GO_MODEL", _OPENCODE_GO_DEFAULT_MODEL),
+        key_loader=lambda: _load_opencode_go_key(),
+    ),
 }
+
+# grug#910 chain-tier settings: short timeout + bounded budget, distinct from
+# _review_llm_timeout_s()'s FULL review-length budget. Every successful call
+# observed live (2026-08-27/28) returned in under 10s; a slow attempt is
+# itself the signal to move to the next tier, not something worth waiting
+# out. The bounded max_tokens matters most for the :free tier below - the
+# demonstrated failure mode (grug#883) is runaway generation burning the
+# FULL budget on garbage, so a low cap makes even that failure mode cheap.
+_CLOUD_CHAIN_TIMEOUT_SECONDS = 25.0
+_CLOUD_CHAIN_MAX_TOKENS = 8192
+
+
+def _opencode_go_chain_config() -> BackendConfig:
+    """opencode Go as the FIRST cloud chain tier (grug#910)."""
+    return replace(
+        _BACKEND_CONFIGS[Backend.OPENCODE_GO],
+        extra_body={"max_tokens": _CLOUD_CHAIN_MAX_TOKENS},
+        timeout_seconds=_CLOUD_CHAIN_TIMEOUT_SECONDS,
+        retry_attempts=1,
+        transport_retry_attempts=1,
+    )
+
+
+def _free_tier_chain_config() -> "BackendConfig | None":
+    """OpenRouter `:free` as the SECOND, best-effort chain tier (grug#910).
+
+    Returns None when unconfigured - the caller must SKIP this tier
+    entirely, never silently substitute a paid OpenRouter model. A cheap
+    fallback an operator did not explicitly opt into is a real, unplanned
+    spend the moment it substitutes for something else.
+
+    Reuses Backend.OPENROUTER (it genuinely is OpenRouter) rather than a
+    new identity, which means `_call_backend`'s existing free-tier rate
+    gate (`is_free_tier_model` + `acquire_free_tier_slot`, grug#875)
+    applies automatically - nothing new to wire for that part.
+
+    grug#883's live evidence: 5 byte-identical requests to one `:free`
+    model produced 5 distinct outputs, 3 of 5 degenerating into runaway
+    garbage generation. That risk does not shrink by moving this tier to
+    position 2 - the short timeout + bounded max_tokens above exist
+    BECAUSE of this finding, not despite it."""
+    model = os.getenv("GRUG_CLOUD_FREE_TIER_MODEL", "").strip()
+    if not model:
+        return None  # not configured - no silent default onto an unvetted :free model
+    if not model.endswith(":free"):
+        log.warning("grug_cloud_free_tier_model_invalid", extra={"value": model})
+        return None
+    return BackendConfig(
+        backend=Backend.OPENROUTER,
+        url=os.getenv("GRUG_BENCH_OPENROUTER_URL", _OPENROUTER_URL),
+        model=model,
+        key_loader=lambda: _load_openrouter_key(),
+        extra_body={"max_tokens": _CLOUD_CHAIN_MAX_TOKENS},
+        timeout_seconds=_CLOUD_CHAIN_TIMEOUT_SECONDS,
+        retry_attempts=1,
+        transport_retry_attempts=1,
+    )
+
+
+def _cloud_chain_tiers() -> list[BackendConfig]:
+    """The ordered grug#910 cloud chain: opencode Go first, OpenRouter
+    `:free` second (only if configured). Poolside is DROPPED - confirmed
+    unfunded (SSM key untouched since 2026-05-08, consistent with the
+    2026-06/07/08 http_402 "out of credits" failures), and Evan's own
+    2026-08-27 ordering omits it: "try opencode go first then openrouter
+    free tier 1000 limit then sparks last case." """
+    tiers = [_opencode_go_chain_config()]
+    free_tier = _free_tier_chain_config()
+    if free_tier is not None:
+        tiers.append(free_tier)
+    return tiers
 
 
 def _review_backend_config(backend: Backend) -> BackendConfig:
@@ -2862,6 +2961,7 @@ def _run_review_arm(
     variant: PromptVariant,
     pr_tags: dict[str, str],
     cancel_event: threading.Event | None = None,
+    config_override: "BackendConfig | None" = None,
 ) -> _ArmOutcome:
     """Run one review arm: resolve config, call the backend, parse, annotate
     the LLM-Obs span. Extracted verbatim from the original sequential loop
@@ -2872,9 +2972,18 @@ def _run_review_arm(
 
     `cancel_event` (#635 follow-up) is passed straight through to
     `_call_backend`, which aborts its in-flight request the moment the event
-    is set - see that function's docstring for how."""
+    is set - see that function's docstring for how.
+
+    `config_override` (grug#910): skip `_review_backend_config`'s normal
+    resolution and use the given config directly. Exists for chain tiers
+    that reuse an existing `Backend` identity (Backend.OPENROUTER, for a
+    `:free`-suffixed model at short-timeout/bounded-budget chain settings)
+    but must NOT get that backend's usual full-review-length config - a
+    `:free` fallback tier is a cheap best-effort attempt, not a primary
+    discovery arm. None (the default) preserves every existing call site's
+    behavior unchanged."""
     try:
-        config = _review_backend_config(backend)
+        config = config_override if config_override is not None else _review_backend_config(backend)
     except _BackendConfigError as e:
         # Still emit a span so DD sees config errors (gateway/secret missing),
         # not just transport errors - but do it here, BEFORE the main span,
@@ -3251,17 +3360,19 @@ def _try_cloud_primary(
     pr_context: Optional[PrContext],
     cancel_event: threading.Event | None,
 ) -> "LlmReviewResponse | None":
-    """Try cloud - Poolside, then OpenRouter, the SAME pair and order the
-    existing overload-fallback already uses - as the PRIMARY review
-    attempt (grug#906).
+    """Try the grug#910 cloud chain - opencode Go, then OpenRouter `:free`
+    if configured - as the PRIMARY review attempt (grug#906).
 
-    Reuses `_run_review_arm`, the SAME abstraction the Cave arms use, so
-    each attempt gets a FULL review-length timeout via
-    `_review_backend_config` (`_review_llm_timeout_s()`) - NOT the short
-    bounded-fallback timeout `_saas_overload_fallback_config` gives the
-    last-resort path below. A primary attempt deserves a primary budget.
+    Each tier is a `BackendConfig` from `_cloud_chain_tiers()` passed via
+    `_run_review_arm`'s `config_override`, so it gets THIS chain's short
+    timeout + bounded budget (`_CLOUD_CHAIN_TIMEOUT_SECONDS`/
+    `_CLOUD_CHAIN_MAX_TOKENS`), not the full review-length budget a
+    primary discovery arm gets. Every successful call observed live
+    (2026-08-27/28) returned in under 10s; a slow attempt is itself the
+    signal to move on, not something worth waiting out. Poolside is
+    DROPPED (confirmed unfunded - see `_cloud_chain_tiers`'s docstring).
 
-    Returns None only on TOTAL failure (both cloud backends errored or
+    Returns None only on TOTAL failure (every configured tier errored or
     timed out) - the caller's signal to fall through to the Cave path
     unconditionally. A parse_failed cloud response is a real (if
     degraded) answer from a backend that DID respond; it is returned
@@ -3269,8 +3380,11 @@ def _try_cloud_primary(
     the cost of an already-answered review."""
     first_parse_fail: tuple[Backend, str | None, str] | None = None
     last_error = ""
-    for backend in (Backend.POOLSIDE, Backend.OPENROUTER):
-        outcome = _run_review_arm(backend, messages, variant, pr_tags, cancel_event)
+    for tier in _cloud_chain_tiers():
+        backend = tier.backend
+        outcome = _run_review_arm(
+            backend, messages, variant, pr_tags, cancel_event, config_override=tier,
+        )
         if outcome.kind == "success":
             assert outcome.model is not None
             origin = _finding_origin(
