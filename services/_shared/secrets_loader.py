@@ -143,7 +143,7 @@ def get_dd_app_key() -> str:
     return _get_ssm_secure_string(name) if name else ""
 
 
-def get_omen_service_map() -> dict:
+def get_omen_service_map() -> dict[str, str]:
     """Operator-managed repo->DD-service mapping for Omen (#470):
     a JSON object {"owner/repo": "service"} in a plain String param.
     Explicit allow - {} (feature off) on ANY error or malformation,
@@ -238,3 +238,10 @@ def get_fallback_enabled() -> bool:
         )
         return False
     return value in ("true", "1", "yes", "on")
+
+
+def get_dd_service_env_pair() -> tuple[str, str]:
+    """(DD_SERVICE, DD_ENV) pair for tagging ad-hoc spans outside the
+    normal request path, read straight from process env with no SSM
+    round-trip - both are non-secret deploy-time labels."""
+    return (os.getenv("DD_SERVICE", "grug"), os.getenv("DD_ENV", "prod"))
