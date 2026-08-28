@@ -83,6 +83,13 @@ def get_poolside_api_key() -> str:
     return _get_ssm_secure_string(name)
 
 
+def get_opencode_go_api_key() -> str:
+    """grug#910. SSM param `/infra/llm/opencode_go_api_key` per this repo's
+    `/infra/llm/<provider>_api_key` convention."""
+    name = os.getenv("GRUG_OPENCODE_GO_API_KEY_SSM", "")
+    return _get_ssm_secure_string(name)
+
+
 @lru_cache(maxsize=1)
 def get_prompt_experiment_mode() -> Mode:
     """The Elder prompt-A/B experiment mode (#191), from the
