@@ -143,7 +143,7 @@ def get_dd_app_key() -> str:
     return _get_ssm_secure_string(name) if name else ""
 
 
-def get_omen_service_map() -> dict:
+def get_omen_service_map() -> dict[str, str]:
     """Operator-managed repo->DD-service mapping for Omen (#470):
     a JSON object {"owner/repo": "service"} in a plain String param.
     Explicit allow - {} (feature off) on ANY error or malformation,
