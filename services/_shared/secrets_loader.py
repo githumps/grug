@@ -238,3 +238,10 @@ def get_fallback_enabled() -> bool:
         )
         return False
     return value in ("true", "1", "yes", "on")
+
+
+def get_dd_service_env_pair() -> tuple[str, str]:
+    """(DD_SERVICE, DD_ENV) pair for tagging ad-hoc spans outside the
+    normal request path, read straight from process env with no SSM
+    round-trip - both are non-secret deploy-time labels."""
+    return (os.getenv("DD_SERVICE", "grug"), os.getenv("DD_ENV", "prod"))
