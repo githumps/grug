@@ -285,7 +285,7 @@ async def relay_review(
             "review_relay: relay attempt from unauthorized user",
             extra={"user_id": original_message.author.id, "user_name": str(original_message.author)},
         )
-        await original_message.channel.send(f"{bot_name} no know you well enough for that. Ask Evan to add you first.")
+        await original_message.channel.send(f"{bot_name} no know you well enough for that. Ask the operator to add you first.")
         return
 
     verdict = await fetch_elder_verdict(repo, pr_number)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Seed admin users into grug-main DDB table.
 #
-# Slice 2 acceptance: Evan + GF in DDB with role=admin, tier=lifetime,
+# Slice 2 acceptance: the operator + partner in DDB with role=admin, tier=lifetime,
 # allowlisted=true so allowlist-gate logic (Slice 5 #26) passes for
 # them as soon as it's wired.
 #
@@ -25,7 +25,7 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ADMINS=(
     # github_user_id|login|tier
     "59060157|quadseven|lifetime"
-    # "<gf_id>|<gf_login>|lifetime"  # uncomment + fill in for GF
+    # "<partner_id>|<partner_login>|lifetime"  # uncomment + fill in for the partner
 )
 
 for entry in "${ADMINS[@]}"; do

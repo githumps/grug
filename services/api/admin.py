@@ -6,7 +6,7 @@ Endpoints — all gated by `require_admin`:
   GET  /api/v1/admin/installations      → all INST# rows (cross-user)
 
 Full prefix-fetch instead of a filtered/paged query — admin endpoint,
-low traffic, < 100 rows in v1 (Evan + GF + handful of beta testers).
+low traffic, < 100 rows in v1 (the operator + their partner + a handful of beta testers).
 At real scale we'd add a dedicated index/predicate; for v1 that's
 premature optimization.
 

@@ -1,6 +1,6 @@
 # HITL prerequisites — Slice 1 (quadseven/grug#22)
 
-Before `pulumi up` succeeds, you (Evan) must complete these manual steps. They're one-time, not redone on every deploy.
+Before `pulumi up` succeeds, you (the operator) must complete these manual steps. They're one-time, not redone on every deploy.
 
 ## 1. Register the GitHub App
 

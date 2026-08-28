@@ -75,7 +75,7 @@ def test_change_requests_use_change_intent():
 def test_review_instruction_requests_peer_review_without_edits():
     request = task_relay.TaskRequest(kind="review", content="review PR #720 in grug")
 
-    instruction = task_relay.format_relay_request(request, "Evan")
+    instruction = task_relay.format_relay_request(request, "Operator")
 
     assert "independent peer-review or audit tools" in instruction
     assert "Do not edit code" in instruction
@@ -196,7 +196,7 @@ async def test_relay_sends_review_contract_to_hermes(monkeypatch):
     original_message = MagicMock()
     original_message.id = 720
     original_message.author.id = 111
-    original_message.author.display_name = "Evan"
+    original_message.author.display_name = "Operator"
     original_message.channel = original_channel
 
     thread = MagicMock()
@@ -227,7 +227,7 @@ async def test_thread_failure_reports_dispatched_task_without_inviting_retry(mon
     original_message = MagicMock()
     original_message.id = 721
     original_message.author.id = 111
-    original_message.author.display_name = "Evan"
+    original_message.author.display_name = "Operator"
     original_message.channel = original_channel
 
     relay_message = MagicMock()
