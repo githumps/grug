@@ -23,6 +23,8 @@ def _patch_keys(monkeypatch):
     patches stay for the judge/select_backend paths that still use them."""
     monkeypatch.setattr(lc, "_load_poolside_key", lambda: "test-pool-key")
     monkeypatch.setattr(lc, "_load_openrouter_key", lambda: "test-or-key")
+    monkeypatch.setattr(lc, "_load_opencode_go_key", lambda: "test-ocg-key")
+    monkeypatch.delenv("GRUG_CLOUD_FREE_TIER_MODEL", raising=False)
     monkeypatch.setenv("GRUG_CAVE_GATEWAY_URL", "http://cave.test")
     # Fast = single (coder) arm; the deep tests below opt into both arms so a
     # second backend call cannot make every transport fixture run two reviews.
@@ -3396,9 +3398,8 @@ def test_review_backend_priority_invalid_value_falls_back_to_cave(monkeypatch, c
 
 
 def test_cloud_priority_with_cloud_success_never_calls_cave(monkeypatch) -> None:
-    """grug#906 core: cloud priority + a healthy cloud backend must answer
-    the review WITHOUT ever reaching the Cave arms - the whole point of
-    "try cloud first"."""
+    """grug#910: cloud priority + a healthy opencode Go must answer the
+    review WITHOUT ever reaching Cave - opencode Go is tier 1 of the chain."""
     monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
     findings_json = (
         '{"findings": [{"path": "src/x.py", "line": 1, "rule": "cloud-found-it", '
@@ -3410,9 +3411,9 @@ def test_cloud_priority_with_cloud_success_never_calls_cave(monkeypatch) -> None
         out = review_diff([_hunk()], installation_id=1)
 
     assert out.kind == "reviewed"
-    assert out.backend_used == Backend.POOLSIDE, (
-        "Poolside is tried FIRST in the cloud pair - a success there must "
-        "answer immediately, never falling through to OpenRouter or Cave"
+    assert out.backend_used == Backend.OPENCODE_GO, (
+        "opencode Go is tier 1 of the grug#910 chain - a success there must "
+        "answer immediately, never falling through to the free tier or Cave"
     )
     assert len(out.findings) == 1
     assert out.findings[0].rule == "cloud-found-it"
@@ -3420,21 +3421,18 @@ def test_cloud_priority_with_cloud_success_never_calls_cave(monkeypatch) -> None
 
 
 def test_cloud_priority_total_cloud_failure_falls_through_to_cave(monkeypatch) -> None:
-    """grug#906 core: "if that fails, use my local sparks" (Evan,
-    2026-08-27) is unconditional. Both cloud backends fail transport-level
-    -> Cave is reached and answers, via the EXACT unmodified cave-primary
-    path (fast mode, single coder arm, from the autouse fixture)."""
+    """grug#906/#910: "if that fails, use my local sparks" (Evan,
+    2026-08-27) is unconditional. No free tier configured (default), so the
+    chain is just [opencode Go] - it fails transport-level, Cave answers,
+    via the EXACT unmodified cave-primary path (fast mode, single coder
+    arm, from the autouse fixture)."""
     monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
     findings_json = '{"findings": []}'
     cave_response = httpx.Response(200, json=_openai_json_response(findings_json))
 
     with patch.object(
         httpx, "post",
-        side_effect=[
-            httpx.ConnectError("poolside unreachable"),
-            httpx.ConnectError("openrouter unreachable"),
-            cave_response,
-        ],
+        side_effect=[httpx.ConnectError("opencode go unreachable"), cave_response],
     ) as mock_post:
         out = review_diff([_hunk()], installation_id=1)
 
@@ -3443,30 +3441,145 @@ def test_cloud_priority_total_cloud_failure_falls_through_to_cave(monkeypatch) -
         "total cloud failure must fall through to Cave, not surface as "
         "all_failed - the local hardware is the guaranteed fallback"
     )
-    assert mock_post.call_count == 3, (
-        "expected exactly Poolside, OpenRouter, then Cave - one call each, "
-        "no retries (transport_retry_attempts=1 for the review path)"
+    assert mock_post.call_count == 2, (
+        "expected exactly opencode Go, then Cave - one call each, no "
+        "retries (transport_retry_attempts=1 for chain tiers)"
     )
+
+
+def _admit_free_tier(monkeypatch) -> None:
+    """The real limiter needs a live Postgres store; tests have none and it
+    fails CLOSED (rejects, no HTTP call at all - see openrouter_free_limiter's
+    docstring). Mock it admitted so the free-tier HTTP call under test
+    actually happens, matching the pattern the limiter's own tests use."""
+    from openrouter_free_limiter import RateLimitOutcome
+
+    def fake_acquire(model, *, cancel_event=None):
+        return RateLimitOutcome(
+            admitted=True, waited_seconds=0.0, queued=False,
+            minute_count=1, day_count=1, minute_limit=20, day_limit=1000,
+        )
+
+    monkeypatch.setattr(lc, "acquire_free_tier_slot", fake_acquire)
+
+
+def test_cloud_chain_tries_free_tier_when_opencode_go_fails_and_free_tier_configured(
+    monkeypatch,
+) -> None:
+    """grug#910: WITH a `:free` model configured, it is tier 2 - tried
+    after opencode Go fails, before Cave. A success there must answer
+    without Cave ever being reached."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "z-ai/glm-5.2:free")
+    _admit_free_tier(monkeypatch)
+    findings_json = '{"findings": [{"path": "x.py", "line": 1, "rule": "free-tier-found-it", "severity": "low", "message": "m"}]}'
+    free_tier_response = httpx.Response(200, json=_openai_json_response(findings_json))
+
+    with patch.object(
+        httpx, "post",
+        side_effect=[httpx.ConnectError("opencode go unreachable"), free_tier_response],
+    ) as mock_post:
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "reviewed"
+    assert out.backend_used == Backend.OPENROUTER, (
+        "the :free tier reuses Backend.OPENROUTER - it genuinely is OpenRouter"
+    )
+    assert mock_post.call_count == 2
+    # model_name reflects the RESPONSE's echoed model field (the fixture
+    # hardcodes "test-model-id"), not the request - the property that
+    # actually proves the free tier was reached is what was SENT.
+    second_call_body = mock_post.call_args_list[1].kwargs["json"]
+    assert second_call_body["model"] == "z-ai/glm-5.2:free"
+
+
+def test_cloud_chain_all_tiers_fail_falls_through_to_cave_with_free_tier_configured(
+    monkeypatch,
+) -> None:
+    """grug#910: with BOTH tiers configured and both failing, the chain is
+    genuinely 3 deep before Cave, and the fallback is still unconditional."""
+    monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "z-ai/glm-5.2:free")
+    _admit_free_tier(monkeypatch)
+    findings_json = '{"findings": []}'
+    cave_response = httpx.Response(200, json=_openai_json_response(findings_json))
+
+    with patch.object(
+        httpx, "post",
+        side_effect=[
+            httpx.ConnectError("opencode go unreachable"),
+            httpx.ConnectError("free tier unreachable"),
+            cave_response,
+        ],
+    ) as mock_post:
+        out = review_diff([_hunk()], installation_id=1)
+
+    assert out.kind == "reviewed"
+    assert out.backend_used == Backend.CAVE
+    assert mock_post.call_count == 3
 
 
 def test_cloud_priority_parse_failed_is_not_masked_by_a_cave_retry(monkeypatch) -> None:
     """A cloud backend that DID respond, just unparseably, is a real
     (degraded) answer - falling through to Cave here would silently
-    double the cost of an already-answered review."""
+    double the cost of an already-answered review. Default chain (no free
+    tier configured) is just opencode Go - one call, one parse_failed."""
     monkeypatch.setenv("GRUG_REVIEW_BACKEND_PRIORITY", "cloud")
     bad_response = httpx.Response(
         200, json=_openai_json_response("not json at all, no fence either"),
     )
 
-    with patch.object(
-        httpx, "post",
-        side_effect=[bad_response, httpx.ConnectError("openrouter unreachable")],
-    ) as mock_post:
+    with patch.object(httpx, "post", return_value=bad_response) as mock_post:
         out = review_diff([_hunk()], installation_id=1)
 
     assert out.kind == "parse_failed"
-    assert out.backend_used == Backend.POOLSIDE
-    assert mock_post.call_count == 2, "Poolside (parse_failed) then OpenRouter - Cave never reached"
+    assert out.backend_used == Backend.OPENCODE_GO
+    mock_post.assert_called_once()
+
+
+def test_free_tier_chain_config_returns_none_when_unconfigured(monkeypatch) -> None:
+    """grug#910: no silent default onto an unvetted :free model - the
+    operator must explicitly opt in."""
+    monkeypatch.delenv("GRUG_CLOUD_FREE_TIER_MODEL", raising=False)
+    assert lc._free_tier_chain_config() is None
+
+
+def test_free_tier_chain_config_rejects_non_free_model(monkeypatch, caplog) -> None:
+    """A model that does not end in :free must not silently become a real
+    spend through this fallback tier."""
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "anthropic/claude-opus-4.7")
+    with caplog.at_level("WARNING"):
+        assert lc._free_tier_chain_config() is None
+    assert any("grug_cloud_free_tier_model_invalid" in r.message for r in caplog.records)
+
+
+def test_free_tier_chain_config_uses_short_timeout_and_bounded_tokens(monkeypatch) -> None:
+    """grug#910: the demonstrated failure mode (grug#883) is runaway
+    generation burning the FULL token budget - this tier's config must
+    bound that, not inherit a full-review budget."""
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "z-ai/glm-5.2:free")
+    cfg = lc._free_tier_chain_config()
+    assert cfg is not None
+    assert cfg.backend == Backend.OPENROUTER
+    assert cfg.model == "z-ai/glm-5.2:free"
+    assert cfg.timeout_seconds == lc._CLOUD_CHAIN_TIMEOUT_SECONDS
+    assert cfg.extra_body["max_tokens"] == lc._CLOUD_CHAIN_MAX_TOKENS
+
+
+def test_opencode_go_chain_config_uses_short_timeout_and_bounded_tokens() -> None:
+    cfg = lc._opencode_go_chain_config()
+    assert cfg.backend == Backend.OPENCODE_GO
+    assert cfg.timeout_seconds == lc._CLOUD_CHAIN_TIMEOUT_SECONDS
+    assert cfg.extra_body["max_tokens"] == lc._CLOUD_CHAIN_MAX_TOKENS
+
+
+def test_poolside_never_appears_in_the_cloud_chain(monkeypatch) -> None:
+    """grug#910: Poolside is DROPPED, confirmed unfunded - not merely
+    deprioritized. Must never appear regardless of what else is configured."""
+    monkeypatch.setenv("GRUG_CLOUD_FREE_TIER_MODEL", "z-ai/glm-5.2:free")
+    tiers = lc._cloud_chain_tiers()
+    assert all(t.backend != Backend.POOLSIDE for t in tiers)
+    assert [t.backend for t in tiers] == [Backend.OPENCODE_GO, Backend.OPENROUTER]
 
 
 def test_cave_priority_is_byte_identical_to_pre_906_behavior(monkeypatch) -> None:
