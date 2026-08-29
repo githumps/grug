@@ -30,7 +30,10 @@ class _PulumiMocks(pulumi.runtime.Mocks):
         return [args.name + "_id", args.inputs]
 
     def call(self, args):  # type: ignore[override]
-        if args.token == "aws:index/getCallerIdentity:getCallerIdentity":
+        # noqa S105: `args.token` is Pulumi's resource-FUNCTION token (the
+        # provider RPC name), not a credential. Same shape as
+        # test_oidc_role.py's mock.
+        if args.token == "aws:index/getCallerIdentity:getCallerIdentity":  # noqa: S105
             return {"accountId": _ACCOUNT, "id": _ACCOUNT, "arn": "arn:aws:iam::x:root"}
         return {}
 
