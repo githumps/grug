@@ -117,7 +117,7 @@ def compiled() -> list[tuple[str, re.Pattern[str], str]]:
 DENY = "deny-list"          # rule name for layer-2 hits; scan() redacts these
 
 
-def _fatal(msg: str) -> "SystemExit":
+def _fatal(msg: str) -> SystemExit:
     print(f"FATAL: {msg}", file=sys.stderr)
     print("The deny-list layer is the half that catches PEOPLE. Refusing to "
           "run without it: a guard that degrades to 'clean' is worse than no "
