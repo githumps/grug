@@ -149,7 +149,7 @@ spec:
             - {name: GRUG_CF_SHARED_SECRET_SSM, value: /grug/cf-shared-secret}
             - {name: GRUG_OPENROUTER_API_KEY_SSM, value: /infra/llm/openrouter_api_key}
             - {name: GRUG_POOLSIDE_API_KEY_SSM, value: /infra/llm/poolside_api_key}
-            # grug#906/#910: try cloud before owned Sparks hardware. Evan,
+            # grug#906/#910: try cloud before owned Sparks hardware. The operator,
             # 2026-08-27/28: "try opencode go first then openrouter free tier
             # 1000 limit then sparks last case." Reverses the 2026-07-14 call
             # this same file documents below (Cave primary, SaaS bounded
@@ -168,7 +168,7 @@ spec:
             # poolside/laguna-s-2.1:free - the exact model grug#883 found
             # degenerates 3-of-5 requests - with no way to pin it out; two
             # SINGLE-model :free candidates were tried first and rejected for
-            # worse failures. Evan, 2026-08-28: chosen anyway. Bounded by the
+            # worse failures. The operator, 2026-08-28: chosen anyway. Bounded by the
             # SAME 25s/8192-token chain config as opencode Go above. Only
             # reached when tier 1 already failed; a garbled tier-2 response
             # is a real (if degraded) answer per _try_cloud_primary's own

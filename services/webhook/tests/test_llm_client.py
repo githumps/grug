@@ -1346,7 +1346,7 @@ def test_review_diff_skips_saas_fallback_when_cancelled(monkeypatch) -> None:
 
 
 def test_saas_overload_fallback_rescues_review_when_cave_fully_down(monkeypatch) -> None:
-    """Evan's 2026-07-14 call: when both Cave arms are unreachable (the
+    """The operator's 2026-07-14 call: when both Cave arms are unreachable (the
     Sparks/spark-gateway overloaded), OpenRouter/Poolside step in as a
     last-resort so the review still completes instead of going all_failed."""
     monkeypatch.setattr(lc, "_RETRY_SLEEP", lambda s: None)
@@ -3421,7 +3421,7 @@ def test_cloud_priority_with_cloud_success_never_calls_cave(monkeypatch) -> None
 
 
 def test_cloud_priority_total_cloud_failure_falls_through_to_cave(monkeypatch) -> None:
-    """grug#906/#910: "if that fails, use my local sparks" (Evan,
+    """grug#906/#910: "if that fails, use my local sparks" (the operator,
     2026-08-27) is unconditional. No free tier configured (default), so the
     chain is just [opencode Go] - it fails transport-level, Cave answers,
     via the EXACT unmodified cave-primary path (fast mode, single coder

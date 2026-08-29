@@ -16,7 +16,7 @@ Three things close that gap:
 
 - ``is_authorized`` gates every relay on ``TASK_RELAY_ALLOWED_USER_IDS``,
   fail-closed (unset/empty = nobody authorized, not "everyone"). Only
-  Discord users Evan explicitly lists can trigger a relay at all.
+  Discord users the operator explicitly lists can trigger a relay at all.
 - ``_sanitize_for_relay`` strips @everyone/@here/role-mention syntax out
   of the relayed request before it reaches a channel Grug can post
   broadly in, so an authorized-but-malicious (or just careless) request
@@ -46,7 +46,7 @@ log = get_logger(__name__)
 # Discord user IDs allowed to trigger a Hermes relay, comma-separated.
 # Fail-closed: unset or empty means nobody is authorized. This is a new
 # capability that indirectly grants repo-write access via Hermes, so the
-# safe default is "off until Evan configures it", not "on for anyone who
+# safe default is "off until the operator configures it", not "on for anyone who
 # can talk to Grug".
 _ALLOWED_USERS_ENV_VAR = "TASK_RELAY_ALLOWED_USER_IDS"
 
@@ -255,7 +255,7 @@ async def relay_to_hermes(
         )
         await _safe_send(
             original_message.channel,
-            f"{bot_name} no know you well enough for that. Ask Evan to add you first.",
+            f"{bot_name} no know you well enough for that. Ask the operator to add you first.",
         )
         return
 
@@ -276,7 +276,7 @@ async def relay_to_hermes(
         await _safe_send(
             original_message.channel,
             f"{bot_name} try reach Hermes cave for {repo} but door locked. "
-            f"Tell Evan: Grug need Discord permission on that channel.",
+            f"Tell the operator: Grug need Discord permission on that channel.",
         )
         return
 

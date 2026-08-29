@@ -13,7 +13,7 @@ Owned Cave review modes (`GRUG_REVIEW_DEPTH`, default `tiered` - #645/#646):
 If Cave produces nothing usable, OpenRouter and Poolside step in as a
 bounded, single-shot last-resort fallback (see
 `_saas_overload_fallback_config`) rather than leaving the review `all_failed`
-- Evan's explicit 2026-07-14 call to bring the SaaS pair back as an overload
+- The operator's explicit 2026-07-14 call to bring the SaaS pair back as an overload
 valve, not the primary path. `judge_findings`, `summarize_pr`, and
 `answer_pr_question` still use Poolside/OpenRouter as their primary backend
 via `select_backend`'s stable per-install round robin, unrelated to Elder's
@@ -651,7 +651,7 @@ def _free_tier_chain_config() -> "BackendConfig | None":
     definition of "is this the free pool") is a random router across
     `:free` models, confirmed live to include `poolside/laguna-s-2.1:free`
     - the exact model #883 found degenerates 3-of-5 - with no way to pin
-    it out. Chosen anyway (Evan, 2026-08-28): accepted deliberately, not
+    it out. Chosen anyway (the operator, 2026-08-28): accepted deliberately, not
     an oversight."""
     model = os.getenv("GRUG_CLOUD_FREE_TIER_MODEL", "").strip()
     if not model:
@@ -675,7 +675,7 @@ def _cloud_chain_tiers() -> list[BackendConfig]:
     """The ordered grug#910 cloud chain: opencode Go first, OpenRouter
     `:free` second (only if configured). Poolside is DROPPED - confirmed
     unfunded (SSM key untouched since 2026-05-08, consistent with the
-    2026-06/07/08 http_402 "out of credits" failures), and Evan's own
+    2026-06/07/08 http_402 "out of credits" failures), and the operator's own
     2026-08-27 ordering omits it: "try opencode go first then openrouter
     free tier 1000 limit then sparks last case." """
     tiers = [_opencode_go_chain_config()]
@@ -872,7 +872,7 @@ def _cave_review_config(backend: Backend) -> "BackendConfig | None":
     )
 
 
-# Last-resort overload valve (Evan's explicit 2026-07-14 call): when BOTH
+# Last-resort overload valve (the operator's explicit 2026-07-14 call): when BOTH
 # Cave arms produce nothing usable, try OpenRouter/Poolside once each before
 # giving up entirely - "let it be used potentially if/when grug cave... are
 # overloaded", explicitly NOT the primary review path (that stays Cave-only,
@@ -3339,7 +3339,7 @@ _REVIEW_BACKEND_PRIORITY_VALUES = ("cave", "cloud")
 def _review_backend_priority() -> str:
     """Which backend family `review_diff` tries FIRST. grug#906: a
     self-hosted deployment's hardware/budget/reliability needs are not
-    this deployment's - Evan, live, 2026-08-27: "I would like it to try
+    this deployment's - the operator, live, 2026-08-27: "I would like it to try
     to use cloud, and if that fails then I can use my local sparks...
     let it be agnostic, let users tweak it to however they would like."
 
@@ -3484,7 +3484,7 @@ def _review_diff_dispatch(
             return cloud_result
         # Total cloud failure: fall through, unconditionally, to the exact
         # path every "cave" deployment runs - "if that fails, use my local
-        # sparks" (Evan, 2026-08-27) is not itself configurable away.
+        # sparks" (the operator, 2026-08-27) is not itself configurable away.
     return _review_diff_dispatch_cave_primary(
         hunks, installation_id, pr_context, file_contents, cross_file_contents,
         runtime_context, voice, cancel_event, review_map,
@@ -3657,7 +3657,7 @@ def _review_diff_dispatch_cave_primary(
             )
         # Both Cave arms produced NO usable response at all (misconfigured,
         # transport error, or timeout) - the strongest signal the owned
-        # hardware itself is unavailable. Evan's 2026-07-14 call: OpenRouter
+        # hardware itself is unavailable. The operator's 2026-07-14 call: OpenRouter
         # and Poolside come back here as a bounded, single-shot LAST RESORT
         # ("let it be used potentially if/when grug cave... are overloaded",
         # explicitly not the primary path). Skipped when a Cave arm DID
