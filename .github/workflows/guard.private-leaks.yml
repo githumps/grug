@@ -99,7 +99,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # Path, not a secret. The VALUES are the secret, and they live only
           # in this SecureString - never in this repo.
-          DENY_LIST: /grug/leak-guard-deny-list
+          DENY_LIST: /grug/leak-guard-deny-list-THROWAWAY-DOES-NOT-EXIST
         run: |
           set -euo pipefail
           python3 scripts/check_private_leaks.py --diff "${BASE_SHA}..${HEAD_SHA}" --deny-list-ssm "${DENY_LIST}"
@@ -114,7 +114,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           # Path, not a secret. The VALUES are the secret, and they live only
           # in this SecureString - never in this repo.
-          DENY_LIST: /grug/leak-guard-deny-list
+          DENY_LIST: /grug/leak-guard-deny-list-THROWAWAY-DOES-NOT-EXIST
         run: |
           set -euo pipefail
           printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > /tmp/pr-text.md
