@@ -210,7 +210,22 @@ def _elapsed_ms(start_ns: int) -> int:
 
 # Per-backend endpoints + default models.
 _POOLSIDE_URL = "https://inference.poolside.ai/v1/chat/completions"
-_POOLSIDE_MODEL = "poolside/laguna-m.1"
+# `laguna-m.1` was retired upstream. It 404s with
+# `{"error":"please check the model you provided"}` -- the KEY is healthy
+# (GET /v1/models returns 200), only this name is gone. Measured 2026-08-31,
+# at which point Poolside offered exactly two models, both `is_free: true`:
+# `poolside/laguna-xs-2.1` and `poolside/laguna-s-2.1`.
+#
+# This mattered more than a stale constant usually does. Since ADR-0009 the
+# Cave (the Sparks) is Elder's PRIMARY review path and this SaaS pair is the
+# last-resort overload valve -- so with this name dead and the OpenRouter key
+# over its limit, Elder had NO working fallback at all. A Spark outage would
+# have taken the review gate down rather than degrading it.
+#
+# `-s-2.1` not `-xs-2.1`: verified live against Elder's actual contract
+# (`response_format=json_object`), `-s-2.1` returned `{"findings": []}` and
+# `-xs-2.1` returned empty content.
+_POOLSIDE_MODEL = "poolside/laguna-s-2.1"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"
 # opencode Go (grug#910): a $10/mo subscription, OpenAI-compatible endpoint,
@@ -485,7 +500,7 @@ class BackendConfig:
     model: str
     key_loader: Callable[[], str]
     # Vendor-specific chat-completions body params merged for THIS backend
-    # only. Poolside's laguna-m.1 runs thinking ON by default — ~87% of output
+    # only. Poolside's laguna-s-2.1 runs thinking ON by default — ~87% of output
     # was reasoning tokens, which (a) blew past the 30s read timeout (measured
     # 72s for even a tiny diff → ReadTimeout → Elder posted nothing for days)
     # and (b) leaked reasoning prose into `content`, breaking JSON parse. The
@@ -588,7 +603,7 @@ _BACKEND_CONFIGS: dict[Backend, BackendConfig] = {
         # `lc._load_poolside_key`, which `_BACKEND_CONFIGS` no longer
         # consults.
         key_loader=lambda: _load_poolside_key(),
-        # Disable laguna-m.1's default thinking mode — see BackendConfig.extra_body.
+        # Disable laguna-s-2.1's default thinking mode — see BackendConfig.extra_body.
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     ),
     Backend.OPENROUTER: BackendConfig(
@@ -877,7 +892,7 @@ def _cave_review_config(backend: Backend) -> "BackendConfig | None":
 # giving up entirely - "let it be used potentially if/when grug cave... are
 # overloaded", explicitly NOT the primary review path (that stays Cave-only,
 # owned-hardware-first). Deliberately reuses each backend's fast, low-latency
-# DEFAULT model (Poolside laguna-m.1 thinking-disabled, OpenRouter Haiku 4.5)
+# DEFAULT model (Poolside laguna-s-2.1 thinking-disabled, OpenRouter Haiku 4.5)
 # from `_BACKEND_CONFIGS`, NOT the Opus-plus-high-reasoning review override
 # in `_review_backend_config` - that config is tuned for a multi-minute
 # quality pass, not a bounded emergency valve. Single-shot (no retry budget):
