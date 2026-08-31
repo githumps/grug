@@ -3612,3 +3612,102 @@ def test_cave_priority_is_byte_identical_to_pre_906_behavior(monkeypatch) -> Non
     assert len(out.findings) == 1
     assert out.findings[0].rule == "secret-in-log"
     mock_post.assert_called_once()
+
+
+# --- Responses API wire (gpt-5.6-luna) --------------------------------------
+
+
+def test_responses_wire_sends_input_and_text_format(monkeypatch) -> None:
+    """opencode Go serves gpt-5.6-luna ONLY from /v1/responses, whose request
+    shape differs from chat-completions in three ways that all matter."""
+    captured: dict = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return httpx.Response(200, json={"model": "gpt-5.6-luna", "output": []})
+
+    monkeypatch.setattr(lc.httpx, "post", fake_post)
+    cfg = lc.replace(
+        lc._BACKEND_CONFIGS[lc.Backend.OPENCODE_GO],
+        key_loader=lambda: "k",
+        extra_body={"max_tokens": 1234},
+    )
+    lc._call_backend(cfg, [{"role": "user", "content": "hi"}])
+    body = captured["json"]
+    assert "input" in body and "messages" not in body, "responses wire uses `input`"
+    assert body["text"] == {"format": {"type": "json_object"}}, "JSON mode moves under text.format"
+    assert "response_format" not in body
+    # the cap is translated, not dropped -- an untranslated cap would leave a
+    # runaway generation unbounded on this wire (the grug#883 failure mode)
+    assert body["max_output_tokens"] == 1234
+    assert "max_tokens" not in body
+
+
+def test_chat_wire_is_unchanged(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return httpx.Response(200, json={"model": "m", "choices": []})
+
+    monkeypatch.setattr(lc.httpx, "post", fake_post)
+    cfg = lc.replace(lc._BACKEND_CONFIGS[lc.Backend.POOLSIDE], key_loader=lambda: "k")
+    lc._call_backend(cfg, [{"role": "user", "content": "hi"}])
+    assert "messages" in captured["json"] and "input" not in captured["json"]
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+
+
+def test_responses_envelope_picks_the_message_block_not_reasoning() -> None:
+    """A reasoning model emits `reasoning` BEFORE `message` in output[].
+    Assuming output[0] hands the parser a reasoning block and reports a
+    confusing "missing content" while the real answer sits one element later.
+    Verified live: gpt-5.6-luna returns ['reasoning', 'message']."""
+    body = {
+        "model": "gpt-5.6-luna",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "content": [{"type": "output_text", "text": '{"findings": []}'}]},
+        ],
+    }
+    out = lc._responses_envelope_to_chat(body)
+    assert out["choices"][0]["message"]["content"] == '{"findings": []}'
+    assert out["model"] == "gpt-5.6-luna"
+
+
+def test_responses_incomplete_maps_to_length_finish_reason() -> None:
+    """`incomplete` is this wire's truncation signal. grug#851 exists so a
+    truncated generation never reads as a clean empty review."""
+    body = {
+        "model": "gpt-5.6-luna",
+        "status": "incomplete",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "{"}]}],
+    }
+    assert lc._responses_envelope_to_chat(body)["choices"][0]["finish_reason"] == "length"
+
+
+def test_responses_envelope_without_text_degrades_to_none() -> None:
+    """Unexpected shapes degrade to content=None, which _parse_response
+    already diagnoses precisely (grug#881) rather than raising."""
+    body = {"model": "m", "status": "completed", "output": [{"type": "reasoning"}]}
+    assert lc._responses_envelope_to_chat(body)["choices"][0]["message"]["content"] is None
+
+
+def test_parse_response_normalises_a_responses_envelope() -> None:
+    """End-to-end through the real parser: shape detection means all six
+    _call_backend call sites work unchanged."""
+    payload = {
+        "model": "gpt-5.6-luna",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "content": [{"type": "output_text", "text": json.dumps(
+                {"findings": [{"path": "a.py", "line": 1, "rule": "r",
+                               "severity": "high", "message": "m"}]})}]},
+        ],
+    }
+    findings, model, err = lc._parse_response(httpx.Response(200, json=payload))
+    assert err == ""
+    assert model == "gpt-5.6-luna"
+    assert len(findings) == 1 and findings[0].severity == "high"

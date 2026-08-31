@@ -223,8 +223,18 @@ _OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"
 # disproven). Model id has NO vendor prefix on this endpoint - verified via
 # GET /v1/models, not assumed from docs (the docs-implied "opencode-go/
 # deepseek-v4-flash" 404s).
-_OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1/chat/completions"
-_OPENCODE_GO_DEFAULT_MODEL = "deepseek-v4-flash"
+# gpt-5.6-luna is served ONLY from /v1/responses - opencode Go splits its
+# catalogue three ways (/v1/responses for luna, grok-4.6 and muse-spark;
+# /v1/messages for minimax and qwen; /v1/chat/completions for the rest), and
+# sending the wrong shape returns HTTP 500, not a 4xx that names the problem.
+# Both URL and model stay env-overridable together, because they are a PAIR:
+# changing the model without the matching endpoint is the 500 above.
+_OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1/responses"
+_OPENCODE_GO_DEFAULT_MODEL = "gpt-5.6-luna"
+# Chat-completions is still the right wire for most of the catalogue, so an
+# operator repointing GRUG_OPENCODE_GO_MODEL at e.g. deepseek-v4-flash must
+# set GRUG_OPENCODE_GO_URL and GRUG_OPENCODE_GO_WIRE to match.
+_OPENCODE_GO_DEFAULT_WIRE = "responses"
 
 # Review-only OpenRouter configuration. Teller, /grug ask, and the judge keep
 # their low-latency shared backend config; exhaustive reasoning belongs only on
@@ -508,6 +518,25 @@ class BackendConfig:
     # repeat a full _review_llm_timeout_s() transport timeout. None follows
     # retry_attempts.
     transport_retry_attempts: Optional[int] = None
+    # Which HTTP wire protocol this backend speaks. "chat" is the
+    # OpenAI chat-completions shape every backend here used until
+    # gpt-5.6-luna: `messages` in, `choices[0].message.content` out.
+    #
+    # "responses" is OpenAI's Responses API, which opencode Go documents as
+    # the ONLY endpoint for gpt-5.6-luna, grok-4.6 and muse-spark (its other
+    # models are chat-completions or anthropic /v1/messages). It differs in
+    # three ways that all matter here: the field is `input` not `messages`,
+    # JSON mode is `text.format` not `response_format`, and the reply is an
+    # `output[]` list of typed blocks rather than `choices[]`.
+    #
+    # Sending the chat shape to a responses-only model is not a graceful
+    # 400 - measured 2026-08-31, gpt-5.6-luna returns HTTP 500 "Internal
+    # server error" on BOTH /v1/chat/completions and /v1/messages, for every
+    # request variant tried (max_tokens, max_completion_tokens, no token
+    # param, reasoning_effort). Six other models answered 200 on the
+    # identical request with the identical key, so a 500 here reads like a
+    # provider outage rather than the routing mistake it actually is.
+    wire: Literal["chat", "responses"] = "chat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,6 +631,10 @@ _BACKEND_CONFIGS: dict[Backend, BackendConfig] = {
         url=os.getenv("GRUG_OPENCODE_GO_URL", _OPENCODE_GO_URL),
         model=os.getenv("GRUG_OPENCODE_GO_MODEL", _OPENCODE_GO_DEFAULT_MODEL),
         key_loader=lambda: _load_opencode_go_key(),
+        wire=cast(
+            'Literal["chat", "responses"]',
+            os.getenv("GRUG_OPENCODE_GO_WIRE", _OPENCODE_GO_DEFAULT_WIRE),
+        ),
     ),
 }
 
@@ -1327,12 +1360,28 @@ def _call_backend(
             f"{config.backend.value} key_loader returned empty string"
         )
 
-    body = {
-        "model": config.model,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-        **config.extra_body,
-    }
+    if config.wire == "responses":
+        # Responses API: `input` takes the same role/content list, JSON mode
+        # moves under `text.format`, and `max_tokens` is `max_output_tokens`.
+        # Translating the cap rather than dropping it keeps a runaway
+        # generation bounded on this wire too (the grug#883 failure mode).
+        extra = dict(config.extra_body)
+        max_tokens = extra.pop("max_tokens", None)
+        body = {
+            "model": config.model,
+            "input": messages,
+            "text": {"format": {"type": "json_object"}},
+            **extra,
+        }
+        if max_tokens is not None:
+            body["max_output_tokens"] = max_tokens
+    else:
+        body = {
+            "model": config.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            **config.extra_body,
+        }
     if any(name.lower() == "authorization" for name in config.extra_headers):
         raise _BackendConfigError(
             f"{config.backend.value} extra_headers must not contain Authorization"
@@ -1560,6 +1609,46 @@ def _diagnose_non_string_content(choice: object, message: object, content: objec
     return detail
 
 
+def _responses_envelope_to_chat(body: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite an OpenAI Responses API reply into the chat-completions shape.
+
+    `output` is a list of typed blocks, and a reasoning model emits
+    `reasoning` blocks alongside the `message` one - so this picks the
+    message block rather than assuming output[0], which would hand the
+    parser a reasoning block and produce a confusing "missing content"
+    instead of the real answer sitting one element later.
+
+    Within that block, `content` is itself a list of typed parts; the answer
+    is the `output_text` part. Anything unexpected degrades to
+    `content: None`, which _parse_response already diagnoses precisely
+    (grug#881) rather than raising.
+
+    `status` is carried into `finish_reason` because "incomplete" is this
+    wire's equivalent of `length` - the truncation signal grug#851 exists to
+    surface, which must never read as a clean empty review.
+    """
+    text: str | None = None
+    for block in body.get("output") or []:
+        if not isinstance(block, dict) or block.get("type") != "message":
+            continue
+        for part in block.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                value = part.get("text")
+                if isinstance(value, str):
+                    text = value
+                break
+        break
+    status = body.get("status")
+    return {
+        "model": body.get("model", ""),
+        "choices": [{
+            "message": {"content": text},
+            "finish_reason": "length" if status == "incomplete" else status,
+        }],
+        "usage": body.get("usage", {}),
+    }
+
+
 def _parse_response(
     resp: httpx.Response,
 ) -> tuple[tuple[Finding, ...], str, str]:
@@ -1592,6 +1681,17 @@ def _parse_response(
         return (), "", "envelope_json_decode_failed"
     if not isinstance(body, dict):
         return (), "", "envelope_not_a_dict"
+    if "choices" not in body and "output" in body:
+        # Responses API reply (BackendConfig.wire == "responses"). Normalise
+        # to the chat-completions shape so everything below - and all six
+        # _call_backend call sites - stay unchanged.
+        #
+        # Detected by SHAPE rather than threaded through as a flag: the
+        # discriminator is unambiguous (`output` and `choices` never co-occur)
+        # and _parse_response only receives an httpx.Response, so a flag would
+        # mean touching every call site to carry information the payload
+        # already states.
+        body = _responses_envelope_to_chat(body)
     model_name = body.get("model", "")
     try:
         choice = body["choices"][0]
