@@ -42,7 +42,9 @@ class BenchBackend:
 # model. NO endpoint URL is defaulted for the Cave (it is private/tailnet) — it
 # only runs when GRUG_BENCH_CAVE_URL is supplied.
 _OPENROUTER_DEFAULT_MODEL = "anthropic/claude-opus-4.7"
-_POOLSIDE_DEFAULT_MODEL = "poolside/laguna-m.1"
+# Same retirement as llm_client._POOLSIDE_MODEL -- `laguna-m.1` 404s
+# upstream; the key is fine. See that constant for the measurement.
+_POOLSIDE_DEFAULT_MODEL = "poolside/laguna-s-2.1"
 
 _OPENROUTER_EXTRA_BODY = {
     "max_tokens": 32_768,
@@ -73,7 +75,7 @@ _OPENROUTER_EXTRA_BODY = {
 # production's actual opus-4.7 reasoning config faithfully.
 _FREE_TIER_OPENROUTER_REASONING = {"enabled": False}
 
-# Poolside's laguna-m.1 runs thinking ON by default (blew the read timeout +
+# Poolside's laguna-s-2.1 runs thinking ON by default (blew the read timeout +
 # broke JSON parse — see llm_client). Disable it for the benchmark too.
 _POOLSIDE_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 
