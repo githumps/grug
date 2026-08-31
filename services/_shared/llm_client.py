@@ -1293,6 +1293,41 @@ def _post_with_retries(
     raise AssertionError("retry loop exited without producing a response")
 
 
+def _build_request_body(
+    config: BackendConfig, messages: list[dict[str, str]],
+) -> dict[str, Any]:
+    """The outgoing body for one backend call, in that backend's wire shape.
+
+    Extracted from `_call_backend` rather than inlined: adding the second
+    wire took that function from cyclomatic 15 to 17, past the Elder cap,
+    and the body shape is a self-contained decision with no bearing on the
+    retry/cancellation logic around it.
+
+    "responses" is OpenAI's Responses API - `input` not `messages`, JSON
+    mode under `text.format` not `response_format`, and `max_output_tokens`
+    not `max_tokens`. The cap is TRANSLATED rather than dropped, so a
+    runaway generation stays bounded on this wire too (grug#883).
+    """
+    if config.wire != "responses":
+        return {
+            "model": config.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            **config.extra_body,
+        }
+    extra = dict(config.extra_body)
+    max_tokens = extra.pop("max_tokens", None)
+    body: dict[str, Any] = {
+        "model": config.model,
+        "input": messages,
+        "text": {"format": {"type": "json_object"}},
+        **extra,
+    }
+    if max_tokens is not None:
+        body["max_output_tokens"] = max_tokens
+    return body
+
+
 def _call_backend(
     config: BackendConfig, messages: list[dict[str, str]],
     cancel_event: threading.Event | None = None,
@@ -1360,28 +1395,7 @@ def _call_backend(
             f"{config.backend.value} key_loader returned empty string"
         )
 
-    if config.wire == "responses":
-        # Responses API: `input` takes the same role/content list, JSON mode
-        # moves under `text.format`, and `max_tokens` is `max_output_tokens`.
-        # Translating the cap rather than dropping it keeps a runaway
-        # generation bounded on this wire too (the grug#883 failure mode).
-        extra = dict(config.extra_body)
-        max_tokens = extra.pop("max_tokens", None)
-        body = {
-            "model": config.model,
-            "input": messages,
-            "text": {"format": {"type": "json_object"}},
-            **extra,
-        }
-        if max_tokens is not None:
-            body["max_output_tokens"] = max_tokens
-    else:
-        body = {
-            "model": config.model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-            **config.extra_body,
-        }
+    body = _build_request_body(config, messages)
     if any(name.lower() == "authorization" for name in config.extra_headers):
         raise _BackendConfigError(
             f"{config.backend.value} extra_headers must not contain Authorization"
