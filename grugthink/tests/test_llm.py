@@ -94,6 +94,25 @@ def test_embed_single_and_batch(monkeypatch):
     assert _EmbedClient.last_url.endswith("/v1/embeddings")
 
 
+def test_embeddings_go_to_the_embed_url_while_chat_stays_on_the_gateway(monkeypatch):
+    """The Sparks serve one tensor-parallel chat model and no embedder, so
+    embeddings have to leave the chat gateway. Unset, they follow chat (no
+    behavior change for anyone who never sets it); set, embed() must
+    actually POST there -- asserting embed_base_url() alone would not catch
+    the call site still using base_url()."""
+    monkeypatch.setenv("SPARK_GATEWAY_URL", "http://gw:8080")
+    monkeypatch.delenv("GRUGTHINK_EMBED_URL", raising=False)
+    with patch("httpx.Client", lambda *a, **k: _EmbedClient()):
+        llm.embed("cave")
+    assert _EmbedClient.last_url == "http://gw:8080/v1/embeddings"
+
+    monkeypatch.setenv("GRUGTHINK_EMBED_URL", "http://embed.embed.svc.cluster.local:11434/")
+    with patch("httpx.Client", lambda *a, **k: _EmbedClient()):
+        llm.embed("cave")
+    assert _EmbedClient.last_url == "http://embed.embed.svc.cluster.local:11434/v1/embeddings"
+    assert llm.base_url() == "http://gw:8080"  # chat is untouched
+
+
 def test_base_url_prefers_gateway_then_ollama_then_default(monkeypatch):
     monkeypatch.delenv("SPARK_GATEWAY_URL", raising=False)
     monkeypatch.delenv("GRUGTHINK_LLM_URL", raising=False)
