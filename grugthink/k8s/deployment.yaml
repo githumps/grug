@@ -76,9 +76,16 @@ spec:
             # query_model and llm_clients.py's _FALLBACK_TIMEOUT comment.
             - {name: SPARK_GATEWAY_URL, value: http://spark-gateway.spark-gateway.svc:8080}
             - {name: OLLAMA_URLS, value: http://spark-gateway.spark-gateway.svc:8080}
-            # Chat model on the Cave gateway (was defaulting to llama3.2:3b -> 503).
-            - {name: OLLAMA_MODELS, value: "poolside/Laguna-S-2.1-NVFP4"}
-            - {name: GRUGTHINK_LLM_MODEL, value: "poolside/Laguna-S-2.1-NVFP4"}
+            # Chat model on the Cave gateway. An exact name is a strict
+            # membership test in the router, so a retired model 503s every
+            # request -- which is what Laguna had been doing here. Ask for
+            # whatever the Sparks have resident instead (2026-09-02).
+            - {name: OLLAMA_MODELS, value: "spark:warm-any"}
+            - {name: GRUGTHINK_LLM_MODEL, value: "spark:warm-any"}
+            # Embeddings are NOT on the Sparks: they serve one DeepSeek and
+            # no embedding model. The in-cluster Ollama has nomic, and is
+            # where pasto-api already gets its vectors.
+            - {name: GRUGTHINK_EMBED_URL, value: "http://embed.embed.svc.cluster.local:11434"}
             - {name: GRUGTHINK_LLM_API, value: "openai"}
             - {name: USE_OLLAMA_EMBEDDINGS, value: "true"}
             - {name: GRUGBOT_DATA_DIR, value: /data}

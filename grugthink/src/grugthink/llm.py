@@ -13,6 +13,9 @@ Unauthenticated in-cluster.
 Config (env):
   SPARK_GATEWAY_URL / GRUGTHINK_LLM_URL - gateway base URL. Falls back to the
     first OLLAMA_URLS entry, then the in-cluster default.
+  GRUGTHINK_EMBED_URL   - embeddings base URL, when they do not live behind
+    the chat gateway (the Sparks serve no embedding model while they are one
+    tensor-parallel pair). Defaults to the chat base URL.
   GRUGTHINK_LLM_MODEL   - chat model (default Laguna S 2.1).
   GRUGTHINK_EMBED_MODEL - embedding model (default nomic-embed-text:v1.5).
   GRUGTHINK_LLM_TIMEOUT - per-request seconds (default 60).
@@ -47,6 +50,14 @@ def chat_model() -> str:
     # Shared fleet default. Realtime chat disables long-form thinking in
     # chat(), while coding and review keep their task-specific settings.
     return os.getenv("GRUGTHINK_LLM_MODEL", "poolside/Laguna-S-2.1-NVFP4")
+
+
+def embed_base_url() -> str:
+    """Where embeddings live. The same gateway as chat unless told otherwise:
+    chat follows whatever the Sparks have resident, while embeddings need a
+    model that is actually an embedder, and those are not always the same
+    host."""
+    return os.getenv("GRUGTHINK_EMBED_URL", "").rstrip("/") or base_url()
 
 
 def embed_model() -> str:
@@ -107,12 +118,12 @@ def embed(texts: str | Iterable[str], *, model: str | None = None):
     body = {"model": model or embed_model(), "input": inputs}
     try:
         with httpx.Client(timeout=_timeout()) as client:
-            resp = client.post(f"{base_url()}/v1/embeddings", json=body)
+            resp = client.post(f"{embed_base_url()}/v1/embeddings", json=body)
             resp.raise_for_status()
             vectors = [row["embedding"] for row in resp.json()["data"]]
         return vectors[0] if single else vectors
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as e:
-        raise LLMError(f"spark-gateway embeddings failed: {type(e).__name__}: {e}") from e
+        raise LLMError(f"embeddings failed at {embed_base_url()}: {type(e).__name__}: {e}") from e
 
 
 def health() -> bool:
