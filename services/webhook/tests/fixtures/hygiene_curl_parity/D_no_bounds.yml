@@ -1,0 +1,8 @@
+# parity-case: D - no bounds at all
+# canonical-rule5-lines: 8
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: curl -fsSL -o /tmp/x https://example.invalid/

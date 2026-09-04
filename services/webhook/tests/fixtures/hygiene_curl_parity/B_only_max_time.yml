@@ -1,0 +1,8 @@
+# parity-case: B - only --max-time
+# canonical-rule5-lines: 8
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: curl -fsSL --max-time 120 -o /tmp/x https://example.invalid/

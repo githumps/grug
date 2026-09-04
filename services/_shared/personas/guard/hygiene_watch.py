@@ -20,9 +20,11 @@ about it weekly:
   - `runs-on:` job with no `timeout-minutes:`. Reusable-caller jobs
     (top-level `uses:`, no `runs-on:`) are exempt; their timeout lives in
     the reusable. Opt out with `# hygiene: allow-no-timeout-minutes`.
-  - `curl` in a `run:` block with neither a total bound (`--max-time`/`-m`)
-    nor a connect bound (`--connect-timeout`). Opt out with
-    `# hygiene: allow-curl-no-timeout`.
+  - `curl` in a `run:` block without BOTH a total bound (`--max-time`/`-m`)
+    and a connect bound (`--connect-timeout`). Backslash continuations are
+    one command; a curl quoted in a `description:` block scalar is prose.
+    Opt out with `# hygiene: allow-curl-no-timeout` on any line of the
+    command or the line above it.
   - third-party `uses: owner/repo@ref` where ref is not a full 40-hex SHA.
     Local composites (`./.github/actions/...`) have no pinning concern.
   - dead infrastructure references in LIVE (non-comment) code.
@@ -77,6 +79,10 @@ _SCAN_PATH_RE = re.compile(
 )
 
 # --- rule regexes: mirrored from the diff-time linter's semantics --------
+# The mirror claim is CHECKED, not asserted, for the curl rule: the parity
+# corpus under services/webhook/tests/fixtures/hygiene_curl_parity/ carries
+# the canonical verdict per case and test_hygiene_watch.py runs both
+# implementations over it (#899). The other two rules are not yet measured.
 # Only owner/repo@ref refs are pin-checked; local composites are exempt.
 _USES_RE = re.compile(
     r"^\s*-?\s*uses:\s*([A-Za-z0-9_-]+/[A-Za-z0-9._/-]+)@([A-Za-z0-9._-]+)"
@@ -87,6 +93,7 @@ _CURL_RE = re.compile(r"(?:^|[\s;&|(`$])curl\s+(?:-|\\$|\"|'|\$|https?://)")
 _CURL_MAXTIME_RE = re.compile(r"(?:--max-time(?:[=\s]|$)|(?:^|\s)-m(?:[=\s]|$))")
 _CURL_CONNTIMEOUT_RE = re.compile(r"--connect-timeout(?:[=\s]|$)")
 _CURL_ALLOW_RE = re.compile(r"#\s*hygiene:\s*allow-curl-no-timeout\b")
+_DESC_BLOCK_RE = re.compile(r"^(\s*)description:\s*[|>]")
 
 _JOBS_HEADER_RE = re.compile(r"^jobs:\s*$")
 _JOB_KEY_RE = re.compile(r"^\s{2}([A-Za-z0-9_-]+):\s*$")
@@ -118,12 +125,14 @@ def _code_part(line: str) -> str:
     return line if idx < 0 else line[:idx]
 
 
-def _job_block_end(lines: list[str], start: int) -> int:
-    """Index one past the last line of the job block beginning at `start`.
+def _block_end(lines: list[str], start: int, indent: int) -> int:
+    """Index one past the last line of the block beginning at `start` whose
+    key sits at `indent` spaces.
 
-    A job's body is everything indented deeper than its 2-space key; blank
-    lines do not end it. Split out of `scan_job_timeouts` so the walk and
-    the rule are separately readable (Elder #766: cyclomatic 17 > cap 15).
+    A block's body is everything indented deeper than its key; blank lines
+    do not end it. Split out of `scan_job_timeouts` so the walk and the
+    rule are separately readable (Elder #766: cyclomatic 17 > cap 15); the
+    `description:` block-scalar walk (#899) is the same shape at any indent.
     """
     j = start
     n = len(lines)
@@ -132,7 +141,7 @@ def _job_block_end(lines: list[str], start: int) -> int:
         if ln.strip() == "":
             j += 1
             continue
-        if len(ln) - len(ln.lstrip()) <= 2:
+        if len(ln) - len(ln.lstrip()) <= indent:
             break
         j += 1
     return j
@@ -162,7 +171,7 @@ def _iter_job_blocks(lines: list[str]):
         if not m:
             i += 1
             continue
-        end = _job_block_end(lines, i + 1)
+        end = _block_end(lines, i + 1, 2)
         yield m.group(1), i, lines[i:end]
         i = end
 
@@ -190,29 +199,73 @@ def scan_job_timeouts(path: str, text: str) -> tuple[Violation, ...]:
     return tuple(out)
 
 
-def scan_curl_timeouts(path: str, text: str) -> tuple[Violation, ...]:
-    """`curl` invocations bounded by neither `--max-time`/`-m` nor
-    `--connect-timeout`.
+def _description_block_lines(lines: list[str]) -> set[int]:
+    """Indices (0-based) inside a `description: |` / `description: >` block
+    scalar. A composite action's description often quotes an example
+    command (`... | curl -fsS ...`); that is prose, never executed."""
+    inside: set[int] = set()
+    i = 0
+    while i < len(lines):
+        m = _DESC_BLOCK_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        end = _block_end(lines, i + 1, len(m.group(1)))
+        inside.update(range(i + 1, end))
+        i = end
+    return inside
 
-    The opt-out marker is honoured on the curl line itself or the line
-    directly above it, matching the diff-time linter - a repo that
-    deliberately opted a line out must not be re-flagged weekly.
+
+def _joined_command(lines: list[str], start: int) -> tuple[str, int]:
+    """The logical command beginning at `start`, with backslash-continued
+    physical lines joined, and the index of its LAST physical line. Flags
+    on a continuation line bound the curl on the first line - testing each
+    physical line alone reports a correctly-bounded curl as unbounded."""
+    code = _code_part(lines[start])
+    j = start
+    while _code_part(lines[j]).rstrip().endswith("\\") and j + 1 < len(lines):
+        j += 1
+        code += " " + _code_part(lines[j])
+    return code, j
+
+
+def scan_curl_timeouts(path: str, text: str) -> tuple[Violation, ...]:
+    """`curl` invocations missing a total-time bound (`--max-time`/`-m`)
+    AND/OR a connect bound (`--connect-timeout`) - Rule 5 wants BOTH. A
+    total bound alone still lets a stalled connect eat the whole budget
+    before the first byte; a connect bound alone lets a slow body hang
+    the step to the job timeout.
+
+    Backslash continuations are joined into one logical command before the
+    bounds test, and the opt-out marker is honoured on any physical line of
+    that command or the line directly above it - both as the diff-time
+    linter does (#899), so a repo that deliberately opted a line out is not
+    re-flagged weekly and ordinary long-fetch formatting is not reported.
     """
     out: list[Violation] = []
     lines = text.splitlines()
-    for idx, raw in enumerate(lines):
-        code = _code_part(raw)
-        if not _CURL_RE.search(code):
+    prose = _description_block_lines(lines)
+    i = 0
+    while i < len(lines):
+        if i in prose or not _CURL_RE.search(_code_part(lines[i])):
+            i += 1
             continue
-        if _CURL_MAXTIME_RE.search(code) or _CURL_CONNTIMEOUT_RE.search(code):
+        code, last = _joined_command(lines, i)
+        span = lines[max(i - 1, 0):last + 1]
+        if any(_CURL_ALLOW_RE.search(r) for r in span):
+            i = last + 1
             continue
-        prev = lines[idx - 1] if idx else ""
-        if _CURL_ALLOW_RE.search(raw) or _CURL_ALLOW_RE.search(prev):
-            continue
-        out.append(Violation(
-            file=path, line=idx + 1, category="curl-timeout",
-            detail="curl with neither `--max-time`/`-m` nor `--connect-timeout`",
-        ))
+        missing = []
+        if not _CURL_MAXTIME_RE.search(code):
+            missing.append("`--max-time`/`-m`")
+        if not _CURL_CONNTIMEOUT_RE.search(code):
+            missing.append("`--connect-timeout`")
+        if missing:
+            out.append(Violation(
+                file=path, line=i + 1, category="curl-timeout",
+                detail=f"curl without {' and '.join(missing)}",
+            ))
+        i = last + 1
     return tuple(out)
 
 
