@@ -107,6 +107,43 @@ def test_summary_table_header_present():
     assert "|---|---|---|" in summary.split("\n")[1]
 
 
+def test_summary_skipped_check_is_not_counted_as_a_pass():
+    """#782 criterion 3: a fail-open check that never ran must not hide
+    inside "all N checks". It drops from the numerator, is named in the
+    title, and its row reads `skipped`, not `pass`."""
+    results = [
+        CheckResult("why", True, "ok"),
+        CheckResult("acceptance", True, "3 bullets"),
+        CheckResult("linked-issue-completeness", True, "fetch failed (fail-open)", skipped=True),
+    ]
+    title, summary = persona._summary(results)
+    assert "Hunt Plan ready" in title          # still not a hold: fail-open kept
+    assert "all 3 checks" not in title
+    assert "2/3 checks" in title
+    assert "ticket done skipped" in title
+    assert "| ticket done | skipped |" in summary
+    assert "| ticket done | pass |" not in summary
+
+
+def test_summary_hold_still_names_skipped_check():
+    """A hold with a skipped check alongside: the fail count is unchanged
+    (a skipped check never blocks) but the skip stays visible."""
+    results = [
+        CheckResult("why", False, "missing"),
+        CheckResult("linked-issue-completeness", True, "no fetcher (fail-open)", skipped=True),
+    ]
+    title, _ = persona._summary(results)
+    assert "Hunt Plan hold - 1/2 plan checks fail" in title
+    assert "ticket done skipped" in title
+
+
+def test_summary_no_skips_keeps_all_n_wording():
+    """Regression guard for the unchanged happy path: with every check
+    actually evaluated the title still says "all N checks"."""
+    title, _ = persona._summary([CheckResult("why", True, "ok"), CheckResult("estimate", True, "S")])
+    assert title == "Hunt Plan ready - all 2 checks"
+
+
 # --- evaluate_pull_request (pure) ---
 
 def test_evaluate_pull_request_passes_on_good_body():
@@ -116,6 +153,20 @@ def test_evaluate_pull_request_passes_on_good_body():
     assert evaluation.conclusion == "success"
     assert len(evaluation.results) == 6  # 6 dor checks
     assert all(r.passed for r in evaluation.results)
+
+
+def test_evaluate_pull_request_without_fetcher_marks_linked_issue_skipped():
+    """#782: a bare `evaluate_pull_request(body)` on a body that closes an
+    issue still fails open (pass) - but the linked-issue result carries
+    `skipped=True`, so the published title cannot claim all six ran."""
+    evaluation = persona.evaluate_pull_request(_GOOD_BODY)  # closes #1, no fetcher
+
+    assert evaluation.passed is True
+    lic = next(r for r in evaluation.results if r.name == "linked-issue-completeness")
+    assert lic.skipped is True
+    title, _ = persona._summary(list(evaluation.results))
+    assert "all 6 checks" not in title
+    assert "5/6 checks (ticket done skipped)" in title
 
 
 def test_evaluate_pull_request_fails_on_empty_body():

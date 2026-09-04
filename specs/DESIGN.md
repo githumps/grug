@@ -21,7 +21,7 @@ The vocabulary used in `services/`, `infra/`, and `web/`. Terms map to identifie
 |---|---|
 | **Hunt Plan** | Product name for Chief's PR-body gate (was industry jargon "Definition of Ready"). Enforced as plan checks rolled into `Grug - Chief`. Module path still `dor_checks.py`. |
 | **Plan check** | Individual Hunt Plan rule: `why`, `acceptance`, `estimate`, `scope-fence`, `issue-link`. Defined in [`services/_shared/personas/tpm/dor_checks.py`](services/_shared/personas/tpm/dor_checks.py). |
-| **CheckResult** | Outcome of one `plan check` against one PR body. Frozen dataclass — fields `name: str`, `passed: bool`, `detail: str`. Pass/fail only — no third "warn" state. |
+| **CheckResult** | Outcome of one `plan check` against one PR body. Frozen dataclass — fields `name: str`, `passed: bool`, `detail: str`, `skipped: bool` (default `False`). Pass/fail only — no third "warn" state. `skipped=True` is a fail-open pass that was never evaluated (#782): it never blocks, and the Chief title renders it as `skipped` instead of counting it toward "all N checks". |
 | **TpmEvaluation** | Aggregate result of running all `plan check`s against one PR. Frozen dataclass returned by `evaluate_pull_request(...)` in `personas/tpm/persona.py`. Composes into a `CheckRunResult` for GitHub. |
 | **CheckRunResult** | Frozen dataclass that maps directly onto GitHub's Checks API `POST /repos/{owner}/{repo}/check-runs` payload. Carries the `status=completed` ↔ `conclusion` cross-field invariant — enforced in `__post_init__`. See [`services/_shared/github_checks_client.py`](services/_shared/github_checks_client.py). |
 | **`post_check_run` (publisher)** | Module-level function in `github_checks_client.py` that POSTs a `CheckRunResult` to GitHub. The acceptance-criteria spelling "CheckRunPublisher" is the *concept name* — the actual identifier is a function, not a class. |
@@ -188,7 +188,7 @@ The single copy of every cross-service module lives in `services/_shared/` - a P
 | `enforcement.py` | Enforcement lifecycle — `ensure_enforcement()` and `remove_enforcement()` wired from dispatcher + API. |
 | `adapters/install_store.py` | Facade re-exporting `pg_install_store.py` (Postgres single-table CRUD for `Installation` + `RepoConfig` + `AllowlistGate` reads) — import/patch paths preserved from the DDB era. |
 | `ports/token_cache.py` | `TokenCache` Protocol + `InMemoryTokenCache` impl. |
-| `personas/tpm/dor_checks.py` | The 5 `plan check` rules + the `CheckResult` dataclass. |
+| `personas/tpm/dor_checks.py` | The 6 `plan check` rules + the `CheckResult` dataclass. |
 | `personas/tpm/persona.py` | `TpmEvaluation` dataclass + `evaluate_pull_request(...)` entry point. |
 | `personas/code_reviewer/diff_parser.py` | `DiffHunk` dataclass + pure `parse_diff(unified_diff)` for the Elder persona. |
 | `personas/code_reviewer/persona.py` | `Finding` + `CodeReviewEvaluation` dataclasses + pure `evaluate_diff(hunks, llm_response)`. |

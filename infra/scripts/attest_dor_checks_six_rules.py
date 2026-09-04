@@ -4,12 +4,12 @@
 Proves four bools against the real source files:
 
   - `six_rules_exactly_no_more_no_less_per_process_gate_concepts`
-  - `name_field_is_one_of_five_canonical_rule_names_per_process_gate_concepts`
+  - `name_field_is_one_of_six_canonical_rule_names_per_process_gate_concepts`
   - `rule_function_returns_check_result_not_class_method_per_process_gate_concepts`
   - `check_result_is_frozen_dataclass_per_process_gate_concepts`
 
-Asserts that `services/{api,webhook}/personas/tpm/dor_checks.py` each
-define exactly the 6 canonical `check_*` functions matching the rule
+Asserts that the single shared `services/_shared/personas/tpm/dor_checks.py`
+defines exactly the 6 canonical `check_*` functions matching the rule
 names in CONTEXT.md section "Process-gate concepts" AND that the
 `CheckResult` dataclass is declared with `frozen=True` (peer-review HIGH
 found a frozen=False regression that the DorCheck attester falsely passed).
@@ -83,7 +83,7 @@ def main() -> int:
                 f"FAIL: {path}\n"
                 f"  extra:   {sorted(extra) or 'none'}\n"
                 f"  missing: {sorted(missing) or 'none'}\n"
-                f"  DorCheck declares exactly 5 canonical rules; drift breaks the contract."
+                f"  DorCheck declares exactly {len(CANONICAL_RULES)} canonical rules; drift breaks the contract."
             )
         if not _check_result_is_frozen(path):
             failures.append(
@@ -94,7 +94,7 @@ def main() -> int:
     if failures:
         print("\n".join(failures))
         return 1
-    print(f"OK: both dor_checks.py modules define exactly {sorted(CANONICAL_RULES)}")
+    print(f"OK: dor_checks.py defines exactly {sorted(CANONICAL_RULES)}")
     return 0
 
 
