@@ -1619,9 +1619,16 @@ def _describe_unparseable(content: str) -> str:
 
 
 def _diagnose_non_string_content(choice: object, message: object, content: object) -> str:
-    """Describe a `message.content` that is not a str, well enough to fix it
-    from ONE log line: the offending type, the `finish_reason` that explains
-    it, and whether a `reasoning` field was there to fall back to.
+    """Describe a `message.content` that is not a usable str - the wrong
+    type, null, or empty - well enough to fix it from ONE log line: the
+    offending shape, the `finish_reason` that explains it, and whether a
+    `reasoning` field was there to fall back to.
+
+    Empty (or whitespace-only) content is diagnosed here too, not by the
+    non-json path: the issue's live probe of a thinking model came back as
+    `content: ""` with the budget spent in `reasoning` and
+    `finish_reason: "length"`, and "len=0" alone cannot separate a
+    truncated think from a model that stopped with nothing to say.
 
     A module-level sibling rather than a nested helper deliberately: Elder
     scores the whole subtree, so a closure would not lift `_parse_response`
@@ -1630,7 +1637,12 @@ def _diagnose_non_string_content(choice: object, message: object, content: objec
     finish_reason = (
         choice.get("finish_reason") if isinstance(choice, dict) else None
     ) or "unknown"
-    content_kind = "null" if content is None else type(content).__name__
+    if content is None:
+        content_kind = "null"
+    elif isinstance(content, str):
+        content_kind = "empty str"
+    else:
+        content_kind = type(content).__name__
     detail = f"content is {content_kind}, not str; finish_reason={finish_reason}"
     reasoning = message.get("reasoning") if isinstance(message, dict) else None
     if isinstance(reasoning, str) and reasoning:
@@ -1685,8 +1697,8 @@ def _parse_response(
     ((), model_name, error_message).
 
     grug#881: a THINKING model under `response_format={"type":
-    "json_object"}` can legally return `content: null` (or some other
-    non-string value) instead of raising a shape error - `body["choices"]
+    "json_object"}` can legally return `content: null` (or `""`, or some
+    other non-string value) instead of raising a shape error - `body["choices"]
     [0]["message"]` still exists, it just has no usable `content`. Verified
     live against `poolside/laguna-s-2.1:free` via OpenRouter with the exact
     request shape `sast_benchmark`/`elder_eval` send
@@ -1728,7 +1740,9 @@ def _parse_response(
         content = message["content"]
     except (KeyError, IndexError, TypeError):
         return (), model_name, "missing choices/message/content"
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not content.strip():
+        # Null, wrong type, or empty: nothing to parse. Diagnose the shape
+        # (with finish_reason) rather than reporting a zero-length non-json.
         return (), model_name, _diagnose_non_string_content(choice, message, content)
     try:
         parsed = json.loads(content)

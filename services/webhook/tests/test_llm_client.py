@@ -1843,6 +1843,55 @@ def test_parse_response_non_string_content_diagnoses_type() -> None:
     assert "finish_reason=stop" in err
 
 
+def test_parse_response_empty_string_content_names_finish_reason_and_reasoning() -> None:
+    """grug#881: the shape the issue observed LIVE on the in-cluster gateway
+    was `content: ""` (an empty STRING, not null) with the whole token
+    budget spent in `reasoning` and `finish_reason: "length"`. That is a
+    str, so it skipped the non-string diagnosis and came back as the
+    generic non-json error - `len=0` and nothing else. An operator reading
+    that line cannot tell "the model spent its budget thinking" (length)
+    from "the model answered nothing" (stop). Empty content must get the
+    same one-line diagnosis as null: the offending field, finish_reason,
+    and whether a reasoning field was there."""
+    body = {
+        "model": "some-thinking-model",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "Here's a thinking process:\n\n1. **An",
+                },
+                "finish_reason": "length",
+            }
+        ],
+    }
+    findings, model, err = lc._parse_response(httpx.Response(200, json=body))
+    assert findings == ()
+    assert model == "some-thinking-model"
+    assert err
+    assert "content is empty str" in err
+    assert "finish_reason=length" in err
+    assert "reasoning field present" in err
+
+
+def test_parse_response_whitespace_only_content_is_diagnosed_as_empty() -> None:
+    """Whitespace-only content is the same failure as `""` - nothing to
+    parse - and must not slip back into the generic non-json path just
+    because len() is non-zero."""
+    body = {
+        "model": "m",
+        "choices": [
+            {"message": {"role": "assistant", "content": "\n  \n"}, "finish_reason": "stop"}
+        ],
+    }
+    findings, _model, err = lc._parse_response(httpx.Response(200, json=body))
+    assert findings == ()
+    assert "content is empty str" in err
+    assert "finish_reason=stop" in err
+    assert "reasoning field present" not in err
+
+
 # ---------------------------------------------------------------------------
 # DD LLM Obs tracing — every successful LLM call emits a trace span with
 # prompt/response/latency/tokens; failures emit a span with error metadata.
