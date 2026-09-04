@@ -310,8 +310,19 @@ aws.iam.UserPolicy(
                 "Version": "2012-10-17",
                 "Statement": [
                     {
+                        # ChangeMessageVisibility (#834): the connector heartbeats
+                        # the in-flight job's visibility while Spark inference
+                        # runs, the same lease-renewal shape the webhook consumer
+                        # already uses on grug-rerun-jobs. Without it a review
+                        # slower than the queue's visibility timeout redelivers
+                        # mid-inference and dead-letters even when it succeeds.
                         "Effect": "Allow",
-                        "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+                        "Action": [
+                            "sqs:ReceiveMessage",
+                            "sqs:DeleteMessage",
+                            "sqs:GetQueueAttributes",
+                            "sqs:ChangeMessageVisibility",
+                        ],
                         "Resource": a[0],
                     },
                     {
