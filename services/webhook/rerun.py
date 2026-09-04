@@ -1502,6 +1502,13 @@ def _run_hot_review(
         result_status = result.get("result")
         if result_status == "publish_failed":
             raise RuntimeError("Elder review publication failed")
+        # `review_rejected` (#770) is deliberately NOT in that raise: GitHub
+        # returned a deterministic 4xx on the inline review (422 for a
+        # comment outside the diff). The check-run already landed, so the
+        # merge gate is intact; redriving would re-send the identical
+        # payload and collect the identical answer five times over - which
+        # is exactly how four Elder jobs reached the DLQ. It completes below
+        # like pass/fail; dispatch already logged the status and body.
         # Fail-open like FLINT: infra / GH brownout must COMPLETE the
         # required check as neutral, never leave in_progress forever and
         # never redrive forever. Real model findings still use pass/fail.
@@ -1591,7 +1598,10 @@ def _run_hot_review(
                         f"(skip: {degraded_reason or 'unknown'})"
                     )
             return f"fail_open_{degraded_reason or 'skipped'}"
-        if result_status not in {"pass", "fail", "skipped"} and not str(result_status).startswith("fail_open"):
+        if (
+            result_status not in {"pass", "fail", "skipped", "review_rejected"}
+            and not str(result_status).startswith("fail_open")
+        ):
             raise RuntimeError(
                 f"Elder review returned unexpected result: {result_status!r}"
             )

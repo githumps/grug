@@ -119,8 +119,12 @@ _MAX_COMMENT_PAGES = 3
 ReviewMode = Literal["advisory", "blocking"]
 
 # Closed set so a new return site can't introduce an undocumented value.
+# `review_rejected` (#770): the check-run landed but GitHub returned a
+# deterministic 4xx on the inline review. A completed pass minus its
+# advisory surface - the durable lane treats it as terminal, never redrives.
 PersonaResultStr = Literal[
-    "pass", "fail", "skipped", "publish_failed", "unhandled_error",
+    "pass", "fail", "skipped", "publish_failed", "review_rejected",
+    "unhandled_error",
 ]
 
 
@@ -1595,6 +1599,7 @@ def _resolve_result(
     *,
     check_publish_failed: bool,
     review_publish_failed: bool = False,
+    review_publish_rejected: bool = False,
 ) -> PersonaResultStr:
     """Pick the per-persona result string. Symmetric twin of
     `_publish_shape` (publish state ↔ verdict mapping). Centralising
@@ -1606,11 +1611,23 @@ def _resolve_result(
     consulting `review_publish_failed`, an inline-comment publish 5xx
     would let the log fire with `result="pass"` while comments never
     reached GitHub — DD dashboards would overstate success rate.
+
+    `review_publish_rejected` (#770) is the permanent-4xx sibling: GitHub
+    refused the inline review outright (422 for a comment outside the
+    diff), so a retry with the same payload is guaranteed waste. It maps
+    to `review_rejected`, which rerun completes rather than redrives. It
+    ranks BELOW `publish_failed` (a real outage still owns the redrive)
+    and below a degraded eval (whose degradation owns the retry decision
+    - `all_failed` must still redrive for the model, whatever GitHub said
+    about the deterministic findings that rode along), and above
+    pass/fail so the dashboard never counts a lost review as a clean one.
     """
     if check_publish_failed or review_publish_failed:
         return "publish_failed"
     if evaluation.degraded_reason:
         return "skipped"
+    if review_publish_rejected:
+        return "review_rejected"
     return "pass" if evaluation.passed else "fail"
 
 
@@ -1856,6 +1873,35 @@ def _http_error_detail(error: Exception) -> dict[str, object]:
     if url is not None:
         detail["url"] = str(url)[:200]
     return detail
+
+
+def _is_permanent_rejection(error: Exception) -> bool:
+    """Is this HTTP failure a verdict on the PAYLOAD rather than on the wire?
+
+    grug#770: GitHub 422s an inline review when any one comment's path/line
+    is not part of the diff. The response is deterministic - the identical
+    body is rejected identically on every attempt - yet it was classified
+    like a 5xx and four Elder jobs each burned all five redrives into the
+    DLQ on it. A 4xx other than a rate limit is such a verdict: 400/422 name
+    the payload, 403/404 name a permission or a PR that is not there.
+
+    Kept retryable: everything with no response (transport), 5xx, 429, and
+    a 403 that carries a rate-limit signal - GitHub's secondary throttle is
+    a plain 403 told apart only by its headers (the grug#891 shape).
+    Deliberately does not consult the body: a classifier that parses
+    GitHub's prose drifts the day the wording changes."""
+    response = _safe_attr(error, "response")
+    status = getattr(response, "status_code", None) if response is not None else None
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return False
+    if status == 429:
+        return False
+    if status == 403:
+        headers = getattr(response, "headers", None) or {}
+        get = headers.get if hasattr(headers, "get") else (lambda _k: None)
+        if get("retry-after") is not None or get("x-ratelimit-remaining") == "0":
+            return False
+    return True
 
 
 def dispatch_code_review(
@@ -2397,6 +2443,7 @@ def dispatch_code_review(
         # Continue to attempt the review post — independent surface.
 
     review_publish_failed = False
+    review_publish_rejected = False
     # On a re-review (synchronize/reopened), dedup findings already
     # commented on unchanged lines so the PR isn't flooded with
     # duplicate inline comments on every push (#189). On the first pass
@@ -2431,15 +2478,27 @@ def dispatch_code_review(
                 ),
             )
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            # #770: a deterministic 4xx (422 on an out-of-diff comment) is
+            # NOT a publish failure to redrive - the same payload gets the
+            # same answer. Only wire/5xx/429 failures reach the retry lane.
+            # The status + GitHub's error body ride on the log line so the
+            # DLQ runbook can name the cause from one record (grug#891).
+            permanent = _is_permanent_rejection(e)
             log.error(
                 "code_review_review_publish_failed",
                 extra={
                     "installation_id": installation_id,
                     "pr": f"{owner}/{repo_name}#{pull_number}",
                     "kind": type(e).__name__,
+                    "permanent": permanent,
+                    "inline_comments": len(review_result.comments),
+                    **_http_error_detail(e),
                 },
             )
-            review_publish_failed = True
+            if permanent:
+                review_publish_rejected = True
+            else:
+                review_publish_failed = True
 
     # Capture inline-comment IDs for later reaction polling (#247). BEST-
     # EFFORT, post-publish, own try/except — a capture failure must never
@@ -2506,6 +2565,7 @@ def dispatch_code_review(
         evaluation,
         check_publish_failed=check_publish_failed,
         review_publish_failed=review_publish_failed,
+        review_publish_rejected=review_publish_rejected,
     )
     # Structured log carries everything needed to verify the persona
     # ran end-to-end on a real PR (operator AC). Backend + model
