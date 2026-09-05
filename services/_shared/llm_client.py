@@ -1690,6 +1690,41 @@ def _responses_envelope_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coerce_findings(raw_findings: list[Any], model_name: str) -> tuple[Finding, ...]:
+    """Coerce a validated list of raw finding dicts, dropping and LOGGING
+    each one that will not coerce.
+
+    Split out of `_parse_response` for the same reason as
+    `_diagnose_non_string_content` above: Elder scores the whole subtree, so
+    only a module-level sibling actually lifts the parser back under the
+    complexity cap. It is a real seam too - everything above this point
+    validates the ENVELOPE's shape and returns an error string, while this
+    validates the findings themselves and cannot fail as a whole: a
+    malformed finding is dropped, never a reason to discard the review."""
+    coerced: list[Finding] = []
+    for raw in raw_findings:
+        finding, reason = _coerce_finding(raw)
+        if finding is None:
+            # Log per-drop with truncated raw so a hostile/hallucinating
+            # LLM can't hide a critical finding by surrounding it with
+            # malformed noise. `reason` carries the failure class +
+            # offending field value so triage is mechanical.
+            log.warning(
+                "llm_finding_dropped",
+                extra={
+                    "reason": reason,
+                    "model": model_name,
+                    # repr() not str() so a partial multibyte char at the
+                    # 200-byte boundary becomes `\xNN` rather than an
+                    # invalid UTF-8 sequence DD log ingest may reject.
+                    "raw_truncated": repr(raw)[:200],
+                },
+            )
+            continue
+        coerced.append(finding)
+    return tuple(coerced)
+
+
 def _parse_response(
     resp: httpx.Response,
 ) -> tuple[tuple[Finding, ...], str, str]:
@@ -1765,28 +1800,7 @@ def _parse_response(
         return (), model_name, "llm content is neither object nor array"
     if not isinstance(raw_findings, list):
         return (), model_name, "findings field is not a list"
-    coerced: list[Finding] = []
-    for raw in raw_findings:
-        finding, reason = _coerce_finding(raw)
-        if finding is None:
-            # Log per-drop with truncated raw so a hostile/hallucinating
-            # LLM can't hide a critical finding by surrounding it with
-            # malformed noise. `reason` carries the failure class +
-            # offending field value so triage is mechanical.
-            log.warning(
-                "llm_finding_dropped",
-                extra={
-                    "reason": reason,
-                    "model": model_name,
-                    # repr() not str() so a partial multibyte char at the
-                    # 200-byte boundary becomes `\xNN` rather than an
-                    # invalid UTF-8 sequence DD log ingest may reject.
-                    "raw_truncated": repr(raw)[:200],
-                },
-            )
-            continue
-        coerced.append(finding)
-    return tuple(coerced), model_name, ""
+    return _coerce_findings(raw_findings, model_name), model_name, ""
 
 
 def _llmobs_tags(pr_context: Optional[PrContext]) -> dict[str, str]:
