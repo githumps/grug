@@ -2905,3 +2905,181 @@ def test_http_error_detail_handles_an_error_with_no_response():
     )
     assert "nodename" in str(detail["err"])
     assert "status" not in detail
+
+
+# --- grug#770: a permanent 4xx on review-publish must not redrive -----------
+
+
+def _one_finding_llm() -> LlmReviewResponse:
+    return LlmReviewResponse(
+        kind="reviewed",
+        findings=(LlmFinding(
+            path="src/x.py", line=2, rule="x", severity="medium", message="m",  # type: ignore[arg-type]
+        ),),
+        backend_used=Backend.POOLSIDE,
+    )
+
+
+def _review_status_error(
+    status: int, body: str = "", headers: dict[str, str] | None = None,
+) -> httpx.HTTPStatusError:
+    request = httpx.Request(
+        "POST", "https://api.github.com/repos/myorg/myrepo/pulls/7/reviews",
+    )
+    response = httpx.Response(
+        status, request=request, text=body, headers=headers or {},
+    )
+    return httpx.HTTPStatusError(str(status), request=request, response=response)
+
+
+def _dispatch_with_review_error(monkeypatch, error: Exception):
+    """Run one advisory dispatch whose inline-review POST raises `error`.
+    Returns (result dict, number of post_review attempts)."""
+    monkeypatch.setattr(cr_dispatch, "review_diff", lambda *a, **kw: _one_finding_llm())
+    monkeypatch.setattr(cr_dispatch, "post_check_run", lambda *a, **kw: {})
+    attempts: list[object] = []
+
+    def _raise(*a, **kw):
+        attempts.append(kw.get("result"))
+        raise error
+
+    monkeypatch.setattr(cr_dispatch, "post_review", _raise)
+    with patch("httpx.get", return_value=_diff_response()):
+        out = cr_dispatch.dispatch_code_review(_payload(), blocking=False)
+    return out, len(attempts)
+
+
+def test_dispatch_review_publish_422_is_rejected_not_publish_failed(monkeypatch, caplog):
+    """grug#770: GitHub 422s the WHOLE review when one inline comment sits
+    outside the diff. The payload is identical on every attempt, so the
+    answer is too - four Elder jobs redrove 5x each into the DLQ on it. A
+    deterministic 4xx must complete as `review_rejected` (the check-run
+    already landed; only the advisory surface was lost), never as the
+    `publish_failed` value rerun raises on. The GitHub error body must be
+    on the log line so the next incident is diagnosable from one record."""
+    body = (
+        '{"message":"Unprocessable Entity","errors":['
+        '"Pull request review thread line must be part of the diff"]}'
+    )
+    with caplog.at_level("ERROR"):
+        out, attempts = _dispatch_with_review_error(
+            monkeypatch, _review_status_error(422, body),
+        )
+
+    assert out["result"] == "review_rejected"
+    assert attempts == 1
+    records = [
+        r for r in caplog.records
+        if r.message == "code_review_review_publish_failed"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.status == 422
+    assert record.permanent is True
+    assert "must be part of the diff" in record.body
+    assert "/pulls/7/reviews" in record.url
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_dispatch_review_publish_5xx_still_publish_failed(monkeypatch, status):
+    """A 5xx is GitHub's problem, not the payload's: the durable lane must
+    still raise for redrive, exactly as before grug#770."""
+    out, attempts = _dispatch_with_review_error(
+        monkeypatch, _review_status_error(status, "upstream brownout"),
+    )
+    assert out["result"] == "publish_failed"
+    assert attempts == 1
+
+
+def test_dispatch_review_publish_429_still_publish_failed(monkeypatch):
+    """429 is a 4xx that IS transient (rate limit): the identical payload
+    succeeds once the window resets, so it keeps redriving."""
+    out, _ = _dispatch_with_review_error(
+        monkeypatch,
+        _review_status_error(
+            429, '{"message":"API rate limit exceeded"}',
+            headers={"retry-after": "60"},
+        ),
+    )
+    assert out["result"] == "publish_failed"
+
+
+def test_dispatch_review_publish_transport_error_still_publish_failed(monkeypatch):
+    """A transport error carries no verdict on the payload at all."""
+    out, _ = _dispatch_with_review_error(
+        monkeypatch, httpx.ConnectError("reviews API down"),
+    )
+    assert out["result"] == "publish_failed"
+
+
+def test_dispatch_review_publish_failed_log_names_status_and_body(monkeypatch, caplog):
+    """Acceptance (grug#770): the GitHub error response body is logged on
+    publish failure - on the retryable branch too, not only the permanent
+    one. `kind=HTTPStatusError` alone is the grug#891 blind spot again."""
+    with caplog.at_level("ERROR"):
+        _dispatch_with_review_error(
+            monkeypatch, _review_status_error(502, "<html>bad gateway</html>"),
+        )
+    record = next(
+        r for r in caplog.records
+        if r.message == "code_review_review_publish_failed"
+    )
+    assert record.status == 502
+    assert record.permanent is False
+    assert "bad gateway" in record.body
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "permanent"),
+    [
+        (400, {}, True),
+        (403, {}, True),
+        (404, {}, True),
+        (422, {}, True),
+        # A 403 that names a rate limit is GitHub's secondary throttle
+        # (grug#891 shape), not a verdict on the payload.
+        (403, {"retry-after": "60"}, False),
+        (403, {"x-ratelimit-remaining": "0"}, False),
+        (429, {}, False),
+        (500, {}, False),
+        (502, {}, False),
+    ],
+)
+def test_is_permanent_rejection_classifies_status(status, headers, permanent):
+    assert cr_dispatch._is_permanent_rejection(
+        _review_status_error(status, headers=headers),
+    ) is permanent
+
+
+def test_is_permanent_rejection_is_false_without_a_response():
+    """Transport errors have no status to judge; they stay retryable. And a
+    bare ConnectError's `.request` property RAISES (grug#891) - the classifier
+    must not blow up inside an except block."""
+    assert cr_dispatch._is_permanent_rejection(
+        httpx.ConnectError("reset"),
+    ) is False
+
+
+def test_resolve_result_rejected_review_precedence():
+    """`review_rejected` is a completed pass minus its advisory surface. It
+    must never mask a real publish failure (redrive) or a degraded eval
+    (whose degradation owns the retry decision)."""
+    from personas.code_reviewer.persona import CodeReviewEvaluation
+
+    clean = CodeReviewEvaluation(findings=(), conclusion="success")
+    assert cr_dispatch._resolve_result(
+        clean, check_publish_failed=False, review_publish_rejected=True,
+    ) == "review_rejected"
+    assert cr_dispatch._resolve_result(
+        clean, check_publish_failed=True, review_publish_rejected=True,
+    ) == "publish_failed"
+    assert cr_dispatch._resolve_result(
+        clean, check_publish_failed=False, review_publish_failed=True,
+        review_publish_rejected=True,
+    ) == "publish_failed"
+    degraded = CodeReviewEvaluation(
+        findings=(), conclusion="neutral", degraded_reason="all_failed",
+    )
+    assert cr_dispatch._resolve_result(
+        degraded, check_publish_failed=False, review_publish_rejected=True,
+    ) == "skipped"

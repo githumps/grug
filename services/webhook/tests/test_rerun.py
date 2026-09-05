@@ -995,6 +995,40 @@ def test_hot_review_publish_failure_releases_claim_and_raises_for_redrive(monkey
     complete.assert_not_called()
 
 
+def test_hot_review_rejected_review_completes_claim_and_does_not_redrive(monkeypatch):
+    """grug#770: a deterministic 4xx on the inline review (GitHub 422 for an
+    out-of-diff comment) is NOT a publish failure to redrive - the identical
+    payload is rejected identically every time, and four jobs each burned
+    all five redrives into the DLQ proving it. The check-run already landed,
+    so the job completes its claim and returns normally; the consumer then
+    deletes the message. Exactly one attempt."""
+    monkeypatch.setattr(
+        rerun,
+        "with_install_token_retry",
+        lambda iid, fn: _pr_data(head_sha="rejected-head"),
+    )
+    monkeypatch.setattr(rerun, "get_repo_config", lambda iid, rid: {})
+    acquire, complete, release = _patch_hot_claims(monkeypatch)
+    dispatch = MagicMock(return_value={
+        "persona": "code_reviewer",
+        "result": "review_rejected",
+    })
+    monkeypatch.setattr(rerun, "dispatch_code_review", dispatch)
+
+    assert rerun._run_one(_job(kind="review", settle_seconds=0)) == "dispatched"
+
+    assert dispatch.call_count == 1
+    complete.assert_called_once_with(
+        install_id=11,
+        repo="myorg/myrepo",
+        pr_number=7,
+        persona="code_reviewer",
+        head_sha=rerun.review_snapshot_id_from_pr(_pr_data(head_sha="rejected-head")),
+        owner_token=acquire.call_args.kwargs["owner_token"],
+    )
+    release.assert_not_called()
+
+
 def test_hot_review_unexpected_result_releases_claim_and_redrives(monkeypatch):
     monkeypatch.setattr(
         rerun,

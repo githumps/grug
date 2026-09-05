@@ -299,7 +299,11 @@ tiny PRs).
 `@event:(code_review_fetch_or_parse_failed OR code_review_check_run_publish_failed OR code_review_degraded_publish_failed)`;
 neutral+"skipped" -> `@event:code_review_llm_degraded` (which backend kind);
 findings but no inline review -> `@event:code_review_review_publish_failed`
-(independent surface); webhook 500 -> DD `@event:(tpm_dispatch_unhandled OR code_review_dispatch_unhandled)` (last-resort guards, empty in steady state).
+(independent surface; the line carries `status`, `body` (GitHub's error text)
+and `permanent`. `permanent:true` is a deterministic 4xx - typically a 422
+for a comment outside the diff - and the job completes with
+`result:review_rejected` instead of redriving (#770); `permanent:false` is a
+5xx/transport/429 and redrives as `publish_failed`); webhook 500 -> DD `@event:(tpm_dispatch_unhandled OR code_review_dispatch_unhandled)` (last-resort guards, empty in steady state).
 
 **Security-suite checks (SAST/SCA/secret/IaC):** the four candidate sources
 are best-effort - a detector failure returns `()` and never breaks the core

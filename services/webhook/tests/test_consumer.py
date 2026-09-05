@@ -544,6 +544,56 @@ def test_main_exits_nonzero_when_a_poll_thread_dies(monkeypatch):
         consumer._stop.clear()
 
 
+def test_main_configures_json_logging_so_extra_fields_reach_datadog(monkeypatch):
+    """grug#770 acceptance: grug-consumer must emit structured JSON so every
+    `extra={...}` field (`kind`, `err`, `message_id`, `redrive`) survives to
+    Datadog. The DLQ runbook tells the operator to read those fields; under
+    the old plain-text basicConfig they were silently dropped, and the
+    incident's 422 was undiagnosable from Logs. Pins #747: main() installs
+    the shared JsonFormatter before anything else runs."""
+    import logging
+
+    from observability import JsonFormatter
+
+    consumer._stop.clear()
+    monkeypatch.setattr(consumer, "_warm_trace_writer", lambda: None)
+
+    def _stop_here() -> None:
+        raise SystemExit(3)
+
+    monkeypatch.setattr(consumer, "_startup_check", _stop_here)
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    try:
+        with pytest.raises(SystemExit) as exc:
+            consumer.main()
+        assert exc.value.code == 3
+        formatters = [h.formatter for h in root.handlers]
+        formatter = next(
+            (f for f in formatters if isinstance(f, JsonFormatter)), None,
+        )
+        assert formatter is not None, formatters
+        record = logging.LogRecord(
+            "grug-consumer.consumer", logging.WARNING, __file__, 1,
+            "consumer_handler_raised", None, None,
+        )
+        record.kind = "RuntimeError"
+        record.err = "Elder review publication failed"
+        record.message_id = "m-1"
+        record.redrive = True
+        payload = json.loads(formatter.format(record))
+        assert payload["msg"] == "consumer_handler_raised"
+        assert payload["level"] == "warning"
+        assert payload["kind"] == "RuntimeError"
+        assert payload["err"] == "Elder review publication failed"
+        assert payload["message_id"] == "m-1"
+        assert payload["redrive"] is True
+    finally:
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+        consumer._stop.clear()
+
+
 def test_watchdog_returns_work_and_hard_exits_for_an_expired_review(monkeypatch):
     """A live-but-stuck worker must take down the process at its deadline."""
     consumer._stop.clear()
