@@ -1619,9 +1619,16 @@ def _describe_unparseable(content: str) -> str:
 
 
 def _diagnose_non_string_content(choice: object, message: object, content: object) -> str:
-    """Describe a `message.content` that is not a str, well enough to fix it
-    from ONE log line: the offending type, the `finish_reason` that explains
-    it, and whether a `reasoning` field was there to fall back to.
+    """Describe a `message.content` that is not a usable str - the wrong
+    type, null, or empty - well enough to fix it from ONE log line: the
+    offending shape, the `finish_reason` that explains it, and whether a
+    `reasoning` field was there to fall back to.
+
+    Empty (or whitespace-only) content is diagnosed here too, not by the
+    non-json path: the issue's live probe of a thinking model came back as
+    `content: ""` with the budget spent in `reasoning` and
+    `finish_reason: "length"`, and "len=0" alone cannot separate a
+    truncated think from a model that stopped with nothing to say.
 
     A module-level sibling rather than a nested helper deliberately: Elder
     scores the whole subtree, so a closure would not lift `_parse_response`
@@ -1630,7 +1637,12 @@ def _diagnose_non_string_content(choice: object, message: object, content: objec
     finish_reason = (
         choice.get("finish_reason") if isinstance(choice, dict) else None
     ) or "unknown"
-    content_kind = "null" if content is None else type(content).__name__
+    if content is None:
+        content_kind = "null"
+    elif isinstance(content, str):
+        content_kind = "empty str"
+    else:
+        content_kind = type(content).__name__
     detail = f"content is {content_kind}, not str; finish_reason={finish_reason}"
     reasoning = message.get("reasoning") if isinstance(message, dict) else None
     if isinstance(reasoning, str) and reasoning:
@@ -1678,6 +1690,41 @@ def _responses_envelope_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coerce_findings(raw_findings: list[Any], model_name: str) -> tuple[Finding, ...]:
+    """Coerce a validated list of raw finding dicts, dropping and LOGGING
+    each one that will not coerce.
+
+    Split out of `_parse_response` for the same reason as
+    `_diagnose_non_string_content` above: Elder scores the whole subtree, so
+    only a module-level sibling actually lifts the parser back under the
+    complexity cap. It is a real seam too - everything above this point
+    validates the ENVELOPE's shape and returns an error string, while this
+    validates the findings themselves and cannot fail as a whole: a
+    malformed finding is dropped, never a reason to discard the review."""
+    coerced: list[Finding] = []
+    for raw in raw_findings:
+        finding, reason = _coerce_finding(raw)
+        if finding is None:
+            # Log per-drop with truncated raw so a hostile/hallucinating
+            # LLM can't hide a critical finding by surrounding it with
+            # malformed noise. `reason` carries the failure class +
+            # offending field value so triage is mechanical.
+            log.warning(
+                "llm_finding_dropped",
+                extra={
+                    "reason": reason,
+                    "model": model_name,
+                    # repr() not str() so a partial multibyte char at the
+                    # 200-byte boundary becomes `\xNN` rather than an
+                    # invalid UTF-8 sequence DD log ingest may reject.
+                    "raw_truncated": repr(raw)[:200],
+                },
+            )
+            continue
+        coerced.append(finding)
+    return tuple(coerced)
+
+
 def _parse_response(
     resp: httpx.Response,
 ) -> tuple[tuple[Finding, ...], str, str]:
@@ -1685,8 +1732,8 @@ def _parse_response(
     ((), model_name, error_message).
 
     grug#881: a THINKING model under `response_format={"type":
-    "json_object"}` can legally return `content: null` (or some other
-    non-string value) instead of raising a shape error - `body["choices"]
+    "json_object"}` can legally return `content: null` (or `""`, or some
+    other non-string value) instead of raising a shape error - `body["choices"]
     [0]["message"]` still exists, it just has no usable `content`. Verified
     live against `poolside/laguna-s-2.1:free` via OpenRouter with the exact
     request shape `sast_benchmark`/`elder_eval` send
@@ -1728,7 +1775,9 @@ def _parse_response(
         content = message["content"]
     except (KeyError, IndexError, TypeError):
         return (), model_name, "missing choices/message/content"
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not content.strip():
+        # Null, wrong type, or empty: nothing to parse. Diagnose the shape
+        # (with finish_reason) rather than reporting a zero-length non-json.
         return (), model_name, _diagnose_non_string_content(choice, message, content)
     try:
         parsed = json.loads(content)
@@ -1751,28 +1800,7 @@ def _parse_response(
         return (), model_name, "llm content is neither object nor array"
     if not isinstance(raw_findings, list):
         return (), model_name, "findings field is not a list"
-    coerced: list[Finding] = []
-    for raw in raw_findings:
-        finding, reason = _coerce_finding(raw)
-        if finding is None:
-            # Log per-drop with truncated raw so a hostile/hallucinating
-            # LLM can't hide a critical finding by surrounding it with
-            # malformed noise. `reason` carries the failure class +
-            # offending field value so triage is mechanical.
-            log.warning(
-                "llm_finding_dropped",
-                extra={
-                    "reason": reason,
-                    "model": model_name,
-                    # repr() not str() so a partial multibyte char at the
-                    # 200-byte boundary becomes `\xNN` rather than an
-                    # invalid UTF-8 sequence DD log ingest may reject.
-                    "raw_truncated": repr(raw)[:200],
-                },
-            )
-            continue
-        coerced.append(finding)
-    return tuple(coerced), model_name, ""
+    return _coerce_findings(raw_findings, model_name), model_name, ""
 
 
 def _llmobs_tags(pr_context: Optional[PrContext]) -> dict[str, str]:

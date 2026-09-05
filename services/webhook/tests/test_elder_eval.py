@@ -881,6 +881,54 @@ def test_run_case_errored_logs_exception_message_not_just_kind(monkeypatch, capl
     ), "the exception MESSAGE must reach the log, not just kind=RuntimeError"
 
 
+def test_run_case_empty_content_after_thinking_logs_finish_reason(monkeypatch, caplog):
+    """grug#881: the shape the issue observed live on the in-cluster gateway
+    - `content: ""`, the budget spent in `reasoning`, `finish_reason:
+    "length"` - must surface finish_reason on the one `eval_case_parse_failed`
+    line, so a 90-minute run's log says WHY the case produced nothing."""
+    import httpx
+
+    from elder_eval import runner
+    from sast_benchmark.backends import BenchBackend
+
+    def fake_post(backend, messages):
+        body = {
+            "model": "some-thinking-model",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning": "Here's a thinking process:\n\n1. **An",
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+        }
+        return httpx.Response(
+            200, json=body, request=httpx.Request("POST", "http://invalid"),
+        )
+
+    monkeypatch.setattr(runner, "_post", fake_post)
+    (case,) = build_cases([_row(7, "correctness")])
+    backend = BenchBackend(name="fake", url="http://invalid", model="m", api_key="")
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1 +1,2 @@\n a = 1\n+b = 2\n"
+    )
+    with caplog.at_level("WARNING"):
+        replay = runner.run_case(backend, case, diff)
+
+    assert replay.errored is True
+    parse_failed = [
+        r.getMessage() for r in caplog.records if "eval_case_parse_failed" in r.getMessage()
+    ]
+    assert parse_failed, "empty content must take the dedicated parse-failed branch"
+    assert "finish_reason=length" in parse_failed[0]
+    assert "reasoning field present" in parse_failed[0]
+    assert not any("eval_case_errored" in r.getMessage() for r in caplog.records)
+
+
 def test_production_case_uses_full_diff_and_scores_complete_staged_result():
     from elder_eval.runner import run_production_case
 
