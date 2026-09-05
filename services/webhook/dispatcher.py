@@ -605,6 +605,7 @@ def _handle_issue_comment(payload: dict[str, Any]) -> dict[str, str]:
     # cheap when only PR events fire.
     from github_app_auth import with_install_token_retry  # type: ignore
     from personas.publish_check import PUBLISH_FAILED  # type: ignore
+    from personas.tpm.issue_fetcher import build_issue_fetcher  # type: ignore
     from personas.tpm.persona import evaluate_pull_request, publish_tpm_evaluation  # type: ignore
     import httpx  # type: ignore
 
@@ -693,7 +694,17 @@ def _handle_issue_comment(payload: dict[str, Any]) -> dict[str, str]:
     # /grug recheck silently do nothing. Mirror the pull_request
     # handler's containment: log with coords, return a skip.
     try:
-        evaluation = evaluate_pull_request(pr_body)
+        # Same fetcher builder as the pull_request webhook path (#782).
+        # Pre-#782 this call was bare `evaluate_pull_request(pr_body)`,
+        # so `linked-issue-completeness` always hit its no-fetcher
+        # fail-open branch: a comment could turn a stale red row green
+        # without the check ever running, on a required_status_checks
+        # context. The builder is shared on purpose - a fetcher copied
+        # here would be the same divergence one refactor later.
+        fetcher = build_issue_fetcher(
+            installation_id=int(installation_id), owner=owner, repo=repo_name,
+        )
+        evaluation = evaluate_pull_request(pr_body, fetch_issue=fetcher)
         # publish_tpm_evaluation never raises on a failed publish since
         # #550 — the seam classifies ANY publish failure into the
         # returned "publish_failed" sentinel, logs it under

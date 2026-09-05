@@ -10,6 +10,10 @@ Covers:
 - Non-allowlisted install no_op
 - Per-repo TPM disable no_op
 - Successful path re-fetches PR + dispatches to TPM persona
+- #782: recheck and the pull_request webhook reach the SAME verdict on a
+  PR whose linked issue has an unchecked box (recheck used to skip the
+  linked-issue check by never wiring a fetcher), and a genuine fetch
+  failure still fails open - as a visibly `skipped` check, not a pass.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import httpx
 import pytest
 
 import dispatcher as d
+import personas.tpm.persona as tpm_persona
 
 
 def _comment_payload(
@@ -287,3 +292,140 @@ def test_recheck_resultless_map_lands_in_guard_not_500(_no_install_lookups):
             out = d.dispatch("issue_comment", payload)
 
     assert out == {"status": "skip", "trigger": "recheck", "reason": "unhandled_error"}
+
+
+# --- #782: recheck must evaluate the same checks the webhook path does ---
+
+# A Hunt Plan that passes every pure check and closes #7. The ONLY thing
+# that can fail it is the linked issue's unchecked box - so a "pass" from
+# either path below can only come from the linked-issue check not running.
+_PR_BODY_CLOSES_7 = (
+    "## Why\nbecause we need it badly\n"
+    "## Acceptance criteria\n- a\n- b\n- c\n"
+    "## Out of scope\nx\nSize: S\ncloses #7"
+)
+_ISSUE_7_ONE_BOX_OPEN = "## Acceptance criteria\n- [x] done\n- [ ] still open\n"
+
+
+def _pull_request_payload():
+    """The same PR as `_comment_payload` (myorg/myrepo #42, install 1),
+    arriving as a `pull_request` webhook instead of a comment."""
+    return {
+        "action": "opened",
+        "pull_request": {
+            "number": 42,
+            "body": _PR_BODY_CLOSES_7,
+            "head": {"sha": "abc123"},
+            "user": {"login": "evan"},
+        },
+        "repository": {
+            "id": 100, "name": "myrepo",
+            "owner": {"login": "myorg"}, "full_name": "myorg/myrepo",
+        },
+        "installation": {"id": 1},
+    }
+
+
+def _fake_github(issue_7=_ISSUE_7_ONE_BOX_OPEN, *, issue_exc=None):
+    """One fake GitHub for BOTH paths: the PR re-fetch only recheck needs,
+    and the linked-issue fetch both paths must make. Anything else is a
+    call the test did not model and must not be silently absorbed."""
+    def _get(url, **_kw):
+        class _R:
+            def __init__(self, body):
+                self._body = body
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._body
+
+        if url.endswith("/repos/myorg/myrepo/pulls/42"):
+            return _R({"head": {"sha": "abc123"}, "body": _PR_BODY_CLOSES_7})
+        if url.endswith("/repos/myorg/myrepo/issues/7"):
+            if issue_exc is not None:
+                raise issue_exc
+            return _R({"body": issue_7})
+        raise AssertionError(f"unmodelled GitHub call: {url}")
+    return _get
+
+
+def _run_both_paths(_github_get):
+    """Drive the pull_request webhook AND `/grug recheck` for the same PR
+    through the REAL evaluator, capturing the TpmEvaluation each path
+    hands to the publisher. Returns (webhook_out, webhook_eval,
+    recheck_out, recheck_eval)."""
+    captured: list[tpm_persona.TpmEvaluation] = []
+
+    def _publish(evaluation, **_kw):
+        captured.append(evaluation)
+        return {"persona": "tpm", "result": "pass" if evaluation.passed else "fail"}
+
+    with patch("github_app_auth.with_install_token_retry", side_effect=lambda _i, fn: fn("tok")), \
+         patch("httpx.get", side_effect=_github_get), \
+         patch("personas.tpm.persona.publish_tpm_evaluation", side_effect=_publish), \
+         patch("personas.tpm.ticket_compliance_run.run_ticket_compliance",
+               return_value={"status": "ok"}):
+        webhook_out = d.dispatch("pull_request", _pull_request_payload())
+        recheck_out = d.dispatch(
+            "issue_comment",
+            _comment_payload(body="/grug recheck", sender_login="evan", pr_author="evan"),
+        )
+    assert len(captured) == 2, captured
+    return webhook_out, captured[0], recheck_out, captured[1]
+
+
+@pytest.fixture
+def _tpm_only(monkeypatch):
+    """Allowlisted install, Chief the only persona on - so the webhook
+    path's `personas` list holds exactly the tpm result."""
+    monkeypatch.setattr(d, "is_install_allowlisted", lambda _id: True)
+    monkeypatch.setattr(d, "is_persona_enabled", lambda *a: a[2] == "tpm")
+
+
+def test_recheck_and_webhook_agree_on_unchecked_linked_issue(_tpm_only):
+    """#782 acceptance: recheck and the pull_request webhook must produce
+    the SAME verdict for a PR whose linked issue has an unchecked box.
+
+    Comparative on purpose. Asserting only "recheck now fails" would stay
+    green if a later refactor made BOTH paths fail open; asserting only
+    equality would stay green for the same reason. Both together pin the
+    honest outcome: the two paths agree, AND what they agree on is the
+    red the unchecked box earns."""
+    webhook_out, webhook_eval, recheck_out, recheck_eval = _run_both_paths(
+        _fake_github(),
+    )
+
+    # Same per-check results, check for check - not just the same rollup.
+    assert recheck_eval.results == webhook_eval.results
+    assert recheck_eval.passed is webhook_eval.passed
+    assert recheck_eval.conclusion == webhook_eval.conclusion
+
+    # ...and that shared verdict is the honest one.
+    assert webhook_out["personas"][0]["result"] == "fail"
+    assert recheck_out["result"] == "fail"
+    lic = {r.name: r for r in recheck_eval.results}["linked-issue-completeness"]
+    assert lic.passed is False and lic.skipped is False
+    assert "#7" in lic.detail and "still open" in lic.detail
+
+
+def test_recheck_fetch_failure_still_fails_open_but_visibly_skipped(_tpm_only):
+    """#782 criterion 4: a GitHub blip fetching the linked issue must NOT
+    block the merge - and criterion 3: it must not render as a pass
+    either. Both paths fall open identically, the check is `skipped`,
+    and the title stops claiming all six ran."""
+    webhook_out, webhook_eval, recheck_out, recheck_eval = _run_both_paths(
+        _fake_github(issue_exc=httpx.ConnectError("github.com unreachable")),
+    )
+
+    assert recheck_eval.results == webhook_eval.results
+    assert webhook_out["personas"][0]["result"] == "pass"
+    assert recheck_out["result"] == "pass"
+    lic = {r.name: r for r in recheck_eval.results}["linked-issue-completeness"]
+    assert lic.passed is True and lic.skipped is True
+
+    title, summary = tpm_persona._summary(list(recheck_eval.results))
+    assert "all 6 checks" not in title
+    assert "5/6 checks" in title and "ticket done skipped" in title
+    assert "| ticket done | skipped |" in summary

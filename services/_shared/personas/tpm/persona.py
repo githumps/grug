@@ -96,17 +96,37 @@ def check_display_name(key: str) -> str:
     return _CHECK_DISPLAY.get(key, key)
 
 
+def _skipped(results: Sequence[CheckResult]) -> list[CheckResult]:
+    """Checks that passed by fail-open without being evaluated (#782)."""
+    return [r for r in results if r.skipped]
+
+
 def _summary(results: list[CheckResult]) -> tuple[str, str]:
-    """Build (title, summary) markdown for the check-run output."""
+    """Build (title, summary) markdown for the check-run output.
+
+    A skipped check (fail-open, #782) never blocks, but it is named in the
+    title and dropped from the "all N" claim: "all 6 checks" over a check
+    that never ran is exactly the silent pass the fail-open branch was
+    never meant to be. `Hunt Plan ready - 5/6 checks (ticket done skipped)`
+    tells the reader which row to distrust.
+    """
     blocking = _blocking_failures(results)
-    title = (
-        f"Hunt Plan ready - all {len(results)} checks"
-        if not blocking
-        else f"Hunt Plan hold - {len(blocking)}/{len(results)} plan checks fail"
-    )
+    skipped = _skipped(results)
+    total = len(results)
+    if not blocking:
+        title = f"Hunt Plan ready - all {total} checks"
+        if skipped:
+            title = f"Hunt Plan ready - {total - len(skipped)}/{total} checks"
+    else:
+        title = f"Hunt Plan hold - {len(blocking)}/{total} plan checks fail"
+    if skipped:
+        names = ", ".join(check_display_name(r.name) for r in skipped)
+        title += f" ({names} skipped)"
     lines = ["| Check | Status | Detail |", "|---|---|---|"]
     for r in results:
-        if r.passed:
+        if r.skipped:
+            icon = "skipped"
+        elif r.passed:
             icon = "pass"
         elif r.name in _ADVISORY_CHECKS:
             icon = "warn"
@@ -127,9 +147,12 @@ def evaluate_pull_request(
     the result in `publish_tpm_evaluation(...)` to POST the check-run.
 
     `fetch_issue` is passed through to check_linked_issue_completeness.
-    When None, that check fails open (pass). The fetcher is a parameter,
-    not a call target inside this function -- the purity attestation
-    (attest_persona_purity.py) sees only the allowlisted `run_all` call.
+    When None, that check fails open (pass, marked `skipped` so the
+    rendered title does not count it - #782). Real callers build one via
+    `personas.tpm.issue_fetcher.build_issue_fetcher`. The fetcher is a
+    parameter, not a call target inside this function -- the purity
+    attestation (attest_persona_purity.py) sees only the allowlisted
+    `run_all` call.
     """
     results = run_all(pr_body, fetch_issue=fetch_issue)
     blocking = _blocking_failures(results)
@@ -210,6 +233,9 @@ def publish_tpm_evaluation(
                 "head_sha": head_sha[:8],
                 "passed": evaluation.passed,
                 "failed_checks": [r.name for r in evaluation.results if not r.passed],
+                # Fail-open checks that never ran (#782): a pass with a
+                # non-empty list here is a pass that was not fully earned.
+                "skipped_checks": [r.name for r in _skipped(evaluation.results)],
             },
         )
     return result_map

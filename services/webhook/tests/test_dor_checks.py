@@ -6,7 +6,10 @@ count as filled bullets (security: unfilled template should NOT pass).
 
 from __future__ import annotations
 
+import pytest
+
 from personas.tpm.dor_checks import (
+    CheckResult,
     check_acceptance,
     check_estimate,
     check_issue_link,
@@ -190,6 +193,7 @@ def test_linked_issue_all_ticked_passes():
         return "## Acceptance\n- [x] done one\n- [x] done two\n"
     r = check_linked_issue_completeness(body, fetch_issue=fetcher)
     assert r.passed
+    assert not r.skipped  # actually evaluated: an earned pass, not fail-open
     assert "all checkboxes ticked" in r.detail
 
 
@@ -271,21 +275,58 @@ def test_linked_issue_multiple_only_one_has_gap_fails():
 
 
 def test_linked_issue_fetch_failure_fails_open():
-    """Fetch failure (exception) must fail OPEN, not block merge."""
+    """Fetch failure (exception) must fail OPEN, not block merge - and
+    say so via `skipped` (#782), so the rollup cannot count it as a pass."""
     body = "closes #42\n**Size:** M"
     def fetcher(_num: int) -> str:
         raise RuntimeError("network blip")
     r = check_linked_issue_completeness(body, fetch_issue=fetcher)
     assert r.passed
+    assert r.skipped
     assert "fail-open" in r.detail
 
 
 def test_linked_issue_no_fetcher_fails_open():
-    """No fetcher provided at all -> fail open."""
+    """No fetcher provided at all -> fail open, marked skipped (#782)."""
     body = "closes #42\n**Size:** M"
     r = check_linked_issue_completeness(body)
     assert r.passed
+    assert r.skipped
     assert "fail-open" in r.detail
+
+
+def test_linked_issue_partial_fetch_failure_is_skipped_not_pass():
+    """Two linked issues, one fetched clean and one unfetchable: the check
+    was not fully evaluated, so it is `skipped` - a clean half does not
+    earn a pass for the half nobody read (#782)."""
+    body = "closes #10 closes #20\n**Size:** M"
+    def fetcher(num: int) -> str:
+        if num == 10:
+            return "## Acceptance\n- [x] done\n"
+        raise RuntimeError("404 on #20")
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert r.passed and r.skipped
+    assert "#[20]" in r.detail
+
+
+def test_linked_issue_unchecked_box_beats_fetch_failure():
+    """An unchecked box on ANY fetched issue is a real fail, never masked
+    by a fetch failure on a sibling - and a fail is never `skipped`."""
+    body = "closes #10 closes #20\n**Size:** M"
+    def fetcher(num: int) -> str:
+        if num == 10:
+            return "## Acceptance\n- [ ] open\n"
+        raise RuntimeError("404 on #20")
+    r = check_linked_issue_completeness(body, fetch_issue=fetcher)
+    assert not r.passed and not r.skipped
+
+
+def test_check_result_skipped_requires_passed():
+    """`skipped` is a fail-open pass by definition; a failed-and-skipped
+    result is incoherent and refused at construction (#782)."""
+    with pytest.raises(ValueError, match="skipped=True requires passed=True"):
+        CheckResult("linked-issue-completeness", False, "x", skipped=True)
+    assert CheckResult("why", True, "ok").skipped is False  # default stays off
 
 
 def test_empty_out_of_scope_section_does_not_pass():

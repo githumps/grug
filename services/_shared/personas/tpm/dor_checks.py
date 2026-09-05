@@ -31,6 +31,22 @@ class CheckResult:
     name: str
     passed: bool
     detail: str
+    # True when the check was NOT actually evaluated and passed by
+    # fail-open (#782: linked issue could not be fetched, or no fetcher
+    # was wired). A skipped check never blocks - fail-open is the whole
+    # point - but the rollup must not count it as a pass either: a title
+    # reading "all 6 checks" over a check that never ran is a lie the
+    # required_status_checks context then repeats to the merge button.
+    skipped: bool = False
+
+    def __post_init__(self) -> None:
+        # Skipped implies passed: fail-open is by definition a pass that
+        # was not earned. A failed-AND-skipped result has no meaning and
+        # would render as both `fail` and `skipped` in the same row.
+        if self.skipped and not self.passed:
+            raise ValueError(
+                f"CheckResult {self.name!r} incoherent: skipped=True requires passed=True",
+            )
 
 
 # Bullet pattern that REQUIRES non-empty content after marker (closes #20).
@@ -272,7 +288,8 @@ def check_linked_issue_completeness(
             "no linked issues (no Closes/Fixes/Resolves #N)",
         )
 
-    # Step 2: if no fetcher is provided, fail open.
+    # Step 2: if no fetcher is provided, fail open - and say so. Marked
+    # `skipped` so the rollup title cannot count it as a pass (#782).
     if fetch_issue is None:
         log.warning(
             "linked_issue_completeness_no_fetcher",
@@ -281,6 +298,7 @@ def check_linked_issue_completeness(
         return CheckResult(
             "linked-issue-completeness", True,
             f"linked issues #{issue_numbers} but no fetcher provided (fail-open)",
+            skipped=True,
         )
 
     # Step 3: fetch each issue body and scan for unchecked items.
@@ -307,12 +325,14 @@ def check_linked_issue_completeness(
         return CheckResult("linked-issue-completeness", False, detail)
 
     # No failures found. If any fetches failed, we fail open (pass) but
-    # mention the fetch failures in the detail so they're visible.
+    # mark the check `skipped`: a partly-fetched issue list was not fully
+    # evaluated, and the rollup must not count it toward "all N checks".
     if fetch_failures:
         return CheckResult(
             "linked-issue-completeness", True,
             f"linked issues #{issue_numbers} checked; "
             f"fetch failed for #{fetch_failures} (fail-open)",
+            skipped=True,
         )
 
     return CheckResult(
