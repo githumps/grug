@@ -1,0 +1,8 @@
+# parity-case: C - only --connect-timeout
+# canonical-rule5-lines: 8
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: curl -fsSL --connect-timeout 10 -o /tmp/x https://example.invalid/

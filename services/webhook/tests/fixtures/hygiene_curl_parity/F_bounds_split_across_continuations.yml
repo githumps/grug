@@ -1,0 +1,12 @@
+# parity-case: F - short -m on the curl line, --connect-timeout two lines down
+# canonical-rule5-lines: none
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL -m 120 \
+            -H "Accept: application/json" \
+            --connect-timeout 10 \
+            -o /tmp/x https://example.invalid/

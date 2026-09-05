@@ -1,0 +1,10 @@
+# parity-case: H - opt-out marker sits on a continuation line of the curl, not the first
+# canonical-rule5-lines: none
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL \
+            -o /tmp/x https://example.invalid/  # hygiene: allow-curl-no-timeout installer one-liner

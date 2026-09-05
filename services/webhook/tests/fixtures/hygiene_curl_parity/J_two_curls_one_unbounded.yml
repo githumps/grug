@@ -1,0 +1,13 @@
+# parity-case: J - two curls in one run block; only the second is unbounded
+# canonical-rule5-lines: 12
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          curl -fsSL \
+            --max-time 120 --connect-timeout 10 \
+            -o /tmp/x https://example.invalid/
+          curl -fsSL \
+            -o /tmp/y https://example.invalid/y

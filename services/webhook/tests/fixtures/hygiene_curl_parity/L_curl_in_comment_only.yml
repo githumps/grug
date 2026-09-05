@@ -1,0 +1,10 @@
+# parity-case: L - curl mentioned only in a comment and a step name
+# canonical-rule5-lines: none
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: wraps the curl block below
+        # the curl -fsSL https://example.invalid/ one-liner moved to a script
+        run: ./scripts/fetch.sh

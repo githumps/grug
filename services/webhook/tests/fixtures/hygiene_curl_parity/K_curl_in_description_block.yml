@@ -1,0 +1,11 @@
+# parity-case: K - composite action whose description quotes a curl; prose, never executed
+# canonical-rule5-lines: none
+name: probe
+description: |
+  Probe an endpoint. Equivalent to:
+    curl -fsS https://example.invalid/health
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: curl -fsS --max-time 10 --connect-timeout 3 https://example.invalid/health

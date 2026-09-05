@@ -6,7 +6,13 @@ tests mirror test_dep_watch.py's `_wire` shape.
 """
 from __future__ import annotations
 
+import importlib.util
+import os
+import re
+from pathlib import Path
+
 import httpx
+import pytest
 
 from personas.guard import hygiene_watch as hw
 
@@ -89,16 +95,68 @@ def test_unbounded_curl_is_flagged():
     assert [(x.line, x.category) for x in v] == [(1, "curl-timeout")]
 
 
-def test_curl_with_max_time_is_clean():
-    assert hw.scan_curl_timeouts("wf.yml", "  run: curl --max-time 10 https://x") == ()
+def test_curl_with_both_bounds_is_clean():
+    text = "  run: curl --max-time 10 --connect-timeout 5 https://x"
+    assert hw.scan_curl_timeouts("wf.yml", text) == ()
 
 
-def test_curl_with_connect_timeout_is_clean():
-    assert hw.scan_curl_timeouts("wf.yml", "  run: curl --connect-timeout 5 https://x") == ()
+def test_curl_with_only_max_time_is_flagged():
+    """Rule 5 wants BOTH bounds (#899): a total-time bound alone still lets
+    a stalled connect eat the whole budget before the first byte."""
+    v = hw.scan_curl_timeouts("wf.yml", "  run: curl --max-time 10 https://x")
+    assert [(x.line, x.category) for x in v] == [(1, "curl-timeout")]
 
 
-def test_curl_short_m_flag_is_clean():
-    assert hw.scan_curl_timeouts("wf.yml", "  run: curl -m 5 https://x") == ()
+def test_curl_with_only_connect_timeout_is_flagged():
+    v = hw.scan_curl_timeouts("wf.yml", "  run: curl --connect-timeout 5 https://x")
+    assert [(x.line, x.category) for x in v] == [(1, "curl-timeout")]
+
+
+def test_curl_short_m_flag_counts_as_the_total_bound():
+    assert hw.scan_curl_timeouts("wf.yml", "  run: curl -m 5 --connect-timeout 2 https://x") == ()
+
+
+def test_curl_bounds_on_a_continuation_line_are_seen():
+    """Backslash continuations are ONE logical command (#899): flags on the
+    second physical line bound the curl on the first."""
+    text = "\n".join([
+        "      - run: |",
+        "          curl -fsSL \\",
+        "            --max-time 120 --connect-timeout 10 \\",
+        "            -o /tmp/x https://example/",
+    ])
+    assert hw.scan_curl_timeouts("wf.yml", text) == ()
+
+
+def test_continued_curl_missing_a_bound_is_flagged_once_at_its_first_line():
+    text = "\n".join([
+        "          curl -fsSL \\",
+        "            --max-time 120 \\",
+        "            -o /tmp/x https://example/",
+    ])
+    v = hw.scan_curl_timeouts("wf.yml", text)
+    assert [(x.line, x.category) for x in v] == [(1, "curl-timeout")]
+
+
+def test_curl_opt_out_on_a_continuation_line_is_honoured():
+    text = "\n".join([
+        "          curl -fsSL \\",
+        "            https://x  # hygiene: allow-curl-no-timeout installer",
+    ])
+    assert hw.scan_curl_timeouts("wf.yml", text) == ()
+
+
+def test_curl_quoted_in_a_description_block_is_prose():
+    """A composite action's `description: |` often shows an example command;
+    the diff-time linter skips it and so must the weekly pass."""
+    text = "\n".join([
+        "description: |",
+        "  Equivalent to:",
+        "    curl -fsS https://example/health",
+        "runs:",
+        "  using: composite",
+    ])
+    assert hw.scan_curl_timeouts("action.yml", text) == ()
 
 
 def test_curl_opt_out_on_same_or_previous_line():
@@ -114,6 +172,82 @@ def test_curl_opt_out_on_same_or_previous_line():
 def test_curl_mentioned_in_a_comment_is_not_a_violation():
     """`_code_part` strips comments, so prose about curl is not code."""
     assert hw.scan_curl_timeouts("wf.yml", "  # wraps the curl block below") == ()
+
+
+# --- curl rule parity with the diff-time linter (#899) -------------------
+#
+# The module header claims its rules mirror the diff-time linter. Nothing
+# used to CHECK that, and the curl rule drifted in both directions. This
+# corpus is the shared artifact: one fixture per case, each carrying the
+# canonical Rule 5 verdict in a `# canonical-rule5-lines:` header (1-based
+# lines of the flagged curls, or `none`). The verdicts were recorded by
+# running the canonical linter over the same files; with
+# GRUG_CANONICAL_HYGIENE_LINTER pointing at its `workflow_hygiene.py`,
+# `test_parity_corpus_verdicts_match_the_live_canonical_linter` re-derives
+# them live, so a stale recording is caught too.
+
+_PARITY_DIR = Path(__file__).parent / "fixtures" / "hygiene_curl_parity"
+_PARITY_VERDICT_RE = re.compile(r"^# canonical-rule5-lines:\s*(.+?)\s*$", re.MULTILINE)
+# Bumped by hand when a case is added: a corpus that silently loads zero
+# fixtures must read as a broken test, never as a clean one.
+_PARITY_CASE_COUNT = 12
+
+
+def _parity_cases() -> list[tuple[str, str, tuple[int, ...]]]:
+    cases = []
+    for p in sorted(_PARITY_DIR.glob("*.yml")):
+        text = p.read_text()
+        m = _PARITY_VERDICT_RE.search(text)
+        if not m:
+            raise ValueError(f"{p.name}: no `# canonical-rule5-lines:` header")
+        verdict = m.group(1)
+        expected = () if verdict == "none" else tuple(int(x) for x in verdict.split(","))
+        cases.append((p.name, text, expected))
+    return cases
+
+
+def _parity_ids() -> list[str]:
+    return [name.split("_", 1)[0] for name, _, _ in _parity_cases()]
+
+
+def test_parity_corpus_loads_every_case():
+    n = len(_parity_cases())
+    assert n == _PARITY_CASE_COUNT, (
+        f"{n} parity case(s) loaded from {_PARITY_DIR}, expected {_PARITY_CASE_COUNT}"
+    )
+
+
+@pytest.mark.parametrize("name,text,expected", _parity_cases(), ids=_parity_ids())
+def test_curl_rule_matches_canonical_rule5(name, text, expected):
+    got = tuple(v.line for v in hw.scan_curl_timeouts(name, text))
+    assert got == expected, (
+        f"{name}: hygiene-watch flags lines {list(got)}, "
+        f"canonical Rule 5 flags {list(expected)}"
+    )
+
+
+def test_parity_corpus_verdicts_match_the_live_canonical_linter():
+    """Runs the OTHER implementation over the same corpus. The canonical
+    linter lives in another repo on this install, so this only runs when
+    pointed at it; the recorded verdicts stand in otherwise."""
+    linter = os.environ.get("GRUG_CANONICAL_HYGIENE_LINTER")
+    if not linter:
+        pytest.skip("GRUG_CANONICAL_HYGIENE_LINTER unset - recorded verdicts stand in")
+    spec = importlib.util.spec_from_file_location("canonical_hygiene", linter)
+    assert spec and spec.loader, linter
+    canon = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(canon)
+    cases = _parity_cases()
+    assert len(cases) == _PARITY_CASE_COUNT
+    drift = []
+    for name, text, expected in cases:
+        live = tuple(sorted(
+            int(re.match(r".*?:(\d+):", e).group(1))
+            for e in canon.lint_curl_timeouts(Path(name), text)
+        ))
+        if live != expected:
+            drift.append(f"{name}: recorded {list(expected)}, canonical now {list(live)}")
+    assert not drift, "\n".join(drift)
 
 
 # --- scan_unpinned_actions -----------------------------------------------
