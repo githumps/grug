@@ -62,9 +62,23 @@ jobs:
       # both together. amd64/x86 asset: hosted ubuntu-latest runners are
       # x86_64 (the Dockerfile's arm64 asset is for the arm64 k8s nodes, a
       # different target).
+      # Bounded per fleet hygiene Rule 5 (#896). `-f` fails fast on an HTTP
+      # error but NOT on a connection that opens and then delivers nothing,
+      # which is the case these flags exist for: unbounded, a stalled release
+      # CDN turned a download failure into a 15-minute silent stall ending in
+      # a job timeout, on a required check, with a log that said nothing.
+      # Sizing, since too tight a bound trades a stall for a flake: a full
+      # fetch of this exact asset measured 0.97s wall (curl 8.5.0, 2026-08-22),
+      # so --max-time 120 sits ~120x above real duration - a bound on the
+      # hang, not on the download. --retry re-arms --max-time per attempt, so the true
+      # worst case is 3 x 120s + 2 x 5s delay = 4m10s, deliberately well
+      # inside this job's `timeout-minutes: 15` (:27) with room left for the
+      # test steps that follow.
       - name: install opengrep (pinned to match services/Dockerfile)
         run: |
-          curl -fsSL -o /usr/local/bin/opengrep \
+          curl -fsSL --connect-timeout 10 --max-time 120 \
+            --retry 2 --retry-delay 5 --retry-all-errors \
+            -o /usr/local/bin/opengrep \
             "https://github.com/opengrep/opengrep/releases/download/v1.27.1/opengrep_manylinux_x86"
           chmod 0755 /usr/local/bin/opengrep
           opengrep --version
